@@ -12,3 +12,23 @@ that is licensed under the Apache 2.0 license from the following projects:
 
 OpenAI Codex
 Copyright 2025 OpenAI
+
+--------------------------------------------------------------------------------
+
+sammad
+Copyright 2026 the sammad maintainers
+
+sammad is a downstream fork of Kimi Code CLI (formerly Kimi CLI) by Moonshot AI,
+distributed under the Apache License, Version 2.0. This product has been modified
+from the original. Notable modifications include:
+
+- enterprise single sign-on via the Microsoft Entra device authorization grant;
+- governed model access routed through the sammad LLM gateway (an internal,
+  OpenAI-compatible endpoint backed by Azure AI Foundry);
+- short-lived, organization-scoped runtime credentials in place of personal
+  provider keys;
+- rebranding of the command name, banner, and theme.
+
+The original copyright notices and the Apache-2.0 LICENSE are retained above and
+in LICENSE, as required. Upstream provenance and the rebase procedure are
+documented in docs/sammad/INTEGRATION.md.
