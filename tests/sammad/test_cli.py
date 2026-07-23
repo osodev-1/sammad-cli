@@ -117,3 +117,18 @@ def test_run_not_logged_in_fails_fast(monkeypatch):
     result = runner.invoke(cli_mod.sammad_app, ["run"])
     assert result.exit_code == 1
     assert "not signed in" in result.output.lower()
+
+
+def test_governed_env_disables_moonshot_egress_by_default():
+    env: dict[str, str] = {}
+    cli_mod._apply_governed_env(env)
+    assert env["KIMI_DISABLE_TELEMETRY"] == "1"
+    assert env["KIMI_CLI_NO_AUTO_UPDATE"] == "1"
+
+
+def test_governed_env_respects_operator_override():
+    env = {"KIMI_DISABLE_TELEMETRY": "0", "KIMI_CLI_NO_AUTO_UPDATE": "0"}
+    cli_mod._apply_governed_env(env)
+    # An operator who deliberately opts in still wins.
+    assert env["KIMI_DISABLE_TELEMETRY"] == "0"
+    assert env["KIMI_CLI_NO_AUTO_UPDATE"] == "0"

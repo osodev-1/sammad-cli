@@ -9,6 +9,8 @@ kimi agent against it.
 
 from __future__ import annotations
 
+import os
+from collections.abc import MutableMapping
 from typing import Annotated
 
 import typer
@@ -63,6 +65,23 @@ def _root(
 def _build_session() -> SammadSession:
     """Seam for tests: return a session bound to the configured control plane."""
     return SammadSession(SammadSettings.load())
+
+
+# Governance defaults applied to the agent's environment on ``sammad run``.
+# Upstream's telemetry sink egresses to a Moonshot endpoint and its auto-update
+# checks/pulls upstream kimi-cli releases — both are inappropriate for a
+# governed enterprise fork. We disable them by default (fail-closed on data
+# egress) but use setdefault so an operator who deliberately sets either value
+# still wins.
+_FORK_ENV_DEFAULTS = {
+    "KIMI_DISABLE_TELEMETRY": "1",
+    "KIMI_CLI_NO_AUTO_UPDATE": "1",
+}
+
+
+def _apply_governed_env(env: MutableMapping[str, str]) -> None:
+    for key, value in _FORK_ENV_DEFAULTS.items():
+        env.setdefault(key, value)
 
 
 def _fail(console: Console, exc: SammadError) -> None:
@@ -197,6 +216,9 @@ def run(ctx: typer.Context) -> None:
     agent (e.g. ``sammad run -p "fix the build"``).
     """
     from kimi_cli.config import load_config
+
+    # Governance posture: no telemetry to Moonshot, no auto-update from upstream.
+    _apply_governed_env(os.environ)
 
     console = Console()
     session = _build_session()

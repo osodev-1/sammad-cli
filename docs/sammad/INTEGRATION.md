@@ -59,16 +59,38 @@ This mirrors the backend contracts already built and tested:
 
 ## Change surface (keep localized for cheap rebases)
 
-- `src/kimi_cli/sammad/` — new package: device-flow client, keychain store,
-  runtime-token mint/renew, gateway provider wiring. All net-new; no upstream
-  conflicts.
-- `src/kimi_cli/constant.py` — `NAME` and brand strings.
-- CLI entry (`__main__` / command wiring) — register `sammad login/logout/whoami`
-  and the brand banner; keep upstream commands.
-- `pyproject.toml` — package name, `[project.scripts]` add `sammad = …`, add deps
-  (`keyring`, `httpx`).
-- theme/banner assets — the sammad palette (gold/sand on ink, rust accent) and
-  logo, carried over from the backend repo's CLI design reference.
+Almost everything is net-new under sammad-owned paths, so upstream rebases only
+have to reconcile a handful of small, deliberate edits.
+
+**Net-new (never conflicts):**
+
+- `src/kimi_cli/sammad/` — the whole fork logic: settings, errors, models,
+  keychain, control-plane client, session lifecycle + runtime-token renewer,
+  gateway provider wiring, branding, and the `sammad` CLI commands.
+- `tests/sammad/`, `docs/sammad/`, `NOTICE` (fork-attribution section).
+
+**Modified upstream files (the entire rebase burden — keep this list exact):**
+
+| file | change |
+|---|---|
+| `src/kimi_cli/constant.py` | `NAME = "sammad"` + `UPSTREAM_NAME`; user agent → `sammad/…` |
+| `src/kimi_cli/cli/__init__.py` | process title + `--version` string; nothing else |
+| `src/kimi_cli/__main__.py` | `--version` string |
+| `src/kimi_cli/ui/shell/__init__.py` | welcome logo/header/border sourced from `sammad.branding` |
+| `pyproject.toml` | `[project.scripts]` `sammad = …`; deps `keyring`, `httpx` |
+| `tests/acp/test_protocol_v1.py` | asserts the rebranded ACP `agent_info.name` |
+| `tests/core/test_startup_imports.py` | asserts the rebranded `--version` prefix |
+
+Verify the surface hasn't drifted before/after a rebase:
+
+```bash
+git diff --stat <base>...HEAD \
+  -- ':(exclude)src/kimi_cli/sammad' ':(exclude)tests/sammad' \
+     ':(exclude)docs/sammad' ':(exclude)NOTICE' ':(exclude)pyproject.toml' ':(exclude)uv.lock'
+```
+
+Anything in that output beyond the four `src/…` files and two `tests/…` files
+above is unplanned drift — fold it back into `sammad/` or document why.
 
 ## Phased plan
 
@@ -91,8 +113,14 @@ This mirrors the backend contracts already built and tested:
    `sammad` and `kimi` entry points prints sammad + upstream provenance, and
    `sammad about` shows the full banner. Process title is `sammad`. Remaining:
    the favicon/app-icon needs the transparent logo PNG committed to the repo.
-6. **Harden + docs**: opt-in real-Entra/Foundry smoke, rebase test against a newer
-   upstream tag, onboarding.
+6. **Harden + docs** ✅ (binary icon still pending): `sammad run` disables
+   upstream telemetry (which egresses to Moonshot) and auto-update by default
+   via `KIMI_DISABLE_TELEMETRY`/`KIMI_CLI_NO_AUTO_UPDATE` (operator can still
+   override); an opt-in real-Foundry smoke test (`tests/sammad/test_smoke.py`,
+   gated on `SAMMAD_SMOKE_*`) exercises mint → streamed completion → revoke
+   against a live gateway; onboarding is documented in `ONBOARDING.md`; and the
+   change-surface manifest above plus the drift-check command make rebases onto
+   newer upstream tags cheap and reviewable.
 
 ## Command surface (phase 4)
 
