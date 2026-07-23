@@ -83,9 +83,14 @@ This mirrors the backend contracts already built and tested:
    in-place runtime-token renewer (ADR-017). Commands live in `sammad/cli.py`
    behind a `sammad` console-script entry point; `sammad run` mints a token,
    writes the gateway provider config, starts renewal, and launches the agent.
-5. **Skin**: rename to `sammad`, banner/theme, help text, favicon/icon from the
-   logo; preserve upstream attribution in `--version`/about. The palette and
-   one-line banner already live in `sammad/branding.py`.
+5. **Skin** ✅ (text/theme; binary icon pending the logo file): product name
+   rebranded via `constant.NAME` (`sammad`, with `UPSTREAM_NAME` kept for
+   attribution — flows through the ACP/wire handshakes, telemetry app name, and
+   user agent); the shell welcome uses the sammad cross-stitch mark and palette
+   (`branding.SHELL_LOGO`/`WELCOME`, gold panel border); `--version` on both the
+   `sammad` and `kimi` entry points prints sammad + upstream provenance, and
+   `sammad about` shows the full banner. Process title is `sammad`. Remaining:
+   the favicon/app-icon needs the transparent logo PNG committed to the repo.
 6. **Harden + docs**: opt-in real-Entra/Foundry smoke, rebase test against a newer
    upstream tag, onboarding.
 

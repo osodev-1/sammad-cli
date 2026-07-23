@@ -68,9 +68,9 @@ def _strip_session_id_suffix(title: str, session_id: str) -> str:
 
 def _version_callback(value: bool) -> None:
     if value:
-        from kimi_cli.constant import get_version
+        from kimi_cli.constant import NAME, UPSTREAM_NAME, get_version
 
-        typer.echo(f"kimi, version {get_version()}")
+        typer.echo(f"{NAME}, forked from {UPSTREAM_NAME} {get_version()}")
         raise typer.Exit()
 
 
@@ -368,9 +368,10 @@ def kimi(
     import contextlib
     import json
 
+    from kimi_cli.constant import NAME
     from kimi_cli.utils.proctitle import init_process_name
 
-    init_process_name("Kimi Code")
+    init_process_name(NAME)
 
     if ctx.invoked_subcommand is not None:
         return  # skip rest if a subcommand is invoked

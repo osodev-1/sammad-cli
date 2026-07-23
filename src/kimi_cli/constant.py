@@ -6,7 +6,11 @@ from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-NAME = "Kimi Code CLI"
+# sammad brand identity. This is a downstream fork of Kimi Code CLI; NAME is the
+# product name surfaced to users and reported in the ACP/wire handshakes and
+# telemetry. UPSTREAM_NAME preserves attribution for the about/version output.
+NAME = "sammad"
+UPSTREAM_NAME = "Kimi Code CLI"
 
 if TYPE_CHECKING:
     VERSION: str
@@ -25,7 +29,7 @@ def get_version() -> str:
 
 @cache
 def get_user_agent() -> str:
-    return f"KimiCLI/{get_version()}"
+    return f"sammad/{get_version()}"
 
 
 def _normalize_remote(url: str) -> str:
@@ -108,6 +112,7 @@ def __getattr__(name: str) -> str:
 
 __all__ = [
     "NAME",
+    "UPSTREAM_NAME",
     "VERSION",
     "USER_AGENT",
     "get_version",

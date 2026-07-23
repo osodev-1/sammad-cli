@@ -20,9 +20,9 @@ def main(argv: Sequence[str] | None = None) -> int | str | None:
     args = list(sys.argv[1:] if argv is None else argv)
 
     if len(args) == 1 and args[0] in {"--version", "-V"}:
-        from kimi_cli.constant import get_version
+        from kimi_cli.constant import NAME, UPSTREAM_NAME, get_version
 
-        print(f"kimi, version {get_version()}")
+        print(f"{NAME}, forked from {UPSTREAM_NAME} {get_version()}")
         return 0
 
     from kimi_cli.cli import cli

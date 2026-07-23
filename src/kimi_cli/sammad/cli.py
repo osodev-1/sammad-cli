@@ -9,14 +9,32 @@ kimi agent against it.
 
 from __future__ import annotations
 
+from typing import Annotated
+
 import typer
 from rich.console import Console
 
-from kimi_cli.sammad.branding import GOLD, MUTED, RUST, SAND, print_banner
+from kimi_cli.sammad.branding import (
+    GOLD,
+    MUTED,
+    RUST,
+    SAND,
+    about_text,
+    print_banner,
+)
 from kimi_cli.sammad.errors import SammadError
 from kimi_cli.sammad.models import DeviceStart
 from kimi_cli.sammad.session import SammadSession
 from kimi_cli.sammad.settings import SammadSettings
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        from kimi_cli.constant import get_version
+
+        Console().print(about_text(get_version(), upstream_version=get_version()))
+        raise typer.Exit()
+
 
 sammad_app = typer.Typer(
     add_completion=False,
@@ -24,6 +42,22 @@ sammad_app = typer.Typer(
     help="sammad — governed, SSO-first agent workspace.",
     no_args_is_help=True,
 )
+
+
+@sammad_app.callback()
+def _root(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            help="Show version and provenance, then exit.",
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = False,
+) -> None:
+    """sammad — governed, SSO-first agent workspace."""
 
 
 def _build_session() -> SammadSession:
@@ -65,6 +99,17 @@ def login() -> None:
     who = user.email if user else "your account"
     where = f" · {org.name}" if org else ""
     console.print(f"✓ Signed in as {who}{where}", style="bold green")
+
+
+@sammad_app.command()
+def about() -> None:
+    """Show sammad's version and upstream provenance."""
+    from kimi_cli.constant import get_version
+
+    console = Console()
+    print_banner(console)
+    console.print()
+    console.print(about_text(get_version(), upstream_version=get_version()))
 
 
 @sammad_app.command()

@@ -13,6 +13,9 @@ from rich.text import Text
 NAME = "sammad"
 TAGLINE = "governed agent workspace"
 
+# sammad is a downstream fork of Kimi Code CLI; keep the provenance visible.
+UPSTREAM_NAME = "Kimi Code CLI"
+
 # Palette (truecolor hex). Names mirror the design reference.
 GOLD = "#cba36a"
 SAND = "#e6cf9a"
@@ -20,12 +23,19 @@ RUST = "#c85f27"
 INK = "#141210"
 MUTED = "#8a7f6d"
 
+# The cross-stitch mark for the shell welcome. Keeps upstream's 7-wide × 2-row
+# footprint (so the welcome layout is unchanged) but in the sammad palette, with
+# a rust diamond as the accent. ``Text.from_markup`` renders this.
+SHELL_LOGO = f"[{GOLD}]▐█▛[/][{RUST}]◆[/][{GOLD}]▜█▌[/]\n[{GOLD}]▐█████▌[/]"
+
+WELCOME = f"Welcome to {NAME}!"
+
 
 def banner_text() -> Text:
     """The one-line brand banner as a Rich renderable."""
     text = Text()
     text.append("◆", style=f"bold {RUST}")
-    text.append(" sammad", style=f"bold {SAND}")
+    text.append(f" {NAME}", style=f"bold {SAND}")
     text.append("  ")
     text.append(TAGLINE, style=MUTED)
     return text
@@ -33,3 +43,16 @@ def banner_text() -> Text:
 
 def print_banner(console: Console | None = None) -> None:
     (console or Console()).print(banner_text())
+
+
+def about_text(version: str, upstream_version: str | None = None) -> Text:
+    """Multi-line 'about' block: sammad identity + upstream attribution."""
+    text = Text()
+    text.append(f"{NAME} ", style=f"bold {SAND}")
+    text.append(f"v{version}\n", style=GOLD)
+    text.append(TAGLINE + "\n", style=MUTED)
+    upstream = f"{UPSTREAM_NAME}"
+    if upstream_version:
+        upstream += f" v{upstream_version}"
+    text.append(f"forked from {upstream}, Apache-2.0", style=MUTED)
+    return text

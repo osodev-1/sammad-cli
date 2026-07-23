@@ -25,7 +25,8 @@ async def test_initialize_returns_negotiated_version(
     assert resp.agent_capabilities is not None
     assert resp.agent_capabilities.prompt_capabilities is not None
     assert resp.agent_info is not None
-    assert resp.agent_info.name == "Kimi Code CLI"
+    # sammad fork: the ACP handshake reports the rebranded product identity.
+    assert resp.agent_info.name == "sammad"
 
 
 async def test_initialize_with_higher_version(

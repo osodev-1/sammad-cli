@@ -26,6 +26,10 @@ from kimi_cli import logger
 from kimi_cli.background import list_task_views
 from kimi_cli.llm import model_display_name
 from kimi_cli.notifications import NotificationManager, NotificationWatcher
+from kimi_cli.sammad.branding import GOLD as _BRAND_BORDER
+from kimi_cli.sammad.branding import NAME as _BRAND_NAME
+from kimi_cli.sammad.branding import SHELL_LOGO as _LOGO
+from kimi_cli.sammad.branding import WELCOME as _WELCOME
 from kimi_cli.soul import LLMNotSet, LLMNotSupported, MaxStepsReached, RunCancelled, Soul, run_soul
 from kimi_cli.soul.kimisoul import FLOW_COMMAND_PREFIX, KimiSoul
 from kimi_cli.ui.shell import update as _update_mod
@@ -404,7 +408,7 @@ class Shell:
         else:
             self._start_background_task(self._auto_update())
 
-        _print_welcome_info(self.soul.name or "Kimi Code CLI", self._welcome_info)
+        _print_welcome_info(self.soul.name or _BRAND_NAME, self._welcome_info)
 
         # Start telemetry periodic flush and disk retry
         from kimi_cli.telemetry import get_sink
@@ -1469,15 +1473,6 @@ class Shell:
         self._background_tasks.clear()
 
 
-_KIMI_BLUE = "dodger_blue1"
-_LOGO = f"""\
-[{_KIMI_BLUE}]\
-▐█▛█▛█▌
-▐█████▌\
-[{_KIMI_BLUE}]\
-"""
-
-
 @dataclass(slots=True)
 class WelcomeInfoItem:
     class Level(Enum):
@@ -1491,7 +1486,7 @@ class WelcomeInfoItem:
 
 
 def _print_welcome_info(name: str, info_items: list[WelcomeInfoItem]) -> None:
-    head = Text.from_markup("Welcome to Kimi Code CLI!")
+    head = Text.from_markup(_WELCOME)
     help_text = Text.from_markup("[grey50]Send /help for help information.[/grey50]")
 
     # Use Table for precise width control
@@ -1544,7 +1539,7 @@ def _print_welcome_info(name: str, info_items: list[WelcomeInfoItem]) -> None:
     console.print(
         Panel(
             Group(*rows),
-            border_style=_KIMI_BLUE,
+            border_style=_BRAND_BORDER,
             expand=False,
             padding=(1, 2),
         )
