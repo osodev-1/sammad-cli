@@ -72,15 +72,29 @@ This mirrors the backend contracts already built and tested:
 
 ## Phased plan
 
-1. **Provenance + scaffold** (this change): attribution, this doc, an empty
+1. **Provenance + scaffold** ✅: attribution, this doc, an empty
    `src/kimi_cli/sammad/` package, dev bring-up notes.
-2. **Backend client**: typed device-flow + runtime-token client (`httpx`),
+2. **Backend client** ✅: typed device-flow + runtime-token client (`httpx`),
    keychain store, unit tests against the backend's fake-IdP stack (`pnpm demo`).
-3. **Provider wiring**: build the `LLMProvider`/`LLMModel` config from a mint
+3. **Provider wiring** ✅: build the `LLMProvider`/`LLMModel` config from a mint
    response; `sammad run` uses it; verify a streamed turn through the gateway.
-4. **Login UX + renewal + logout**: `sammad login/whoami/logout`, background
-   renewal, `sammad doctor`.
+4. **Login UX + renewal + logout** ✅: `sammad login/whoami/logout/doctor`, the
+   session service (`session.py`) that owns the token lifecycle, and the
+   in-place runtime-token renewer (ADR-017). Commands live in `sammad/cli.py`
+   behind a `sammad` console-script entry point; `sammad run` mints a token,
+   writes the gateway provider config, starts renewal, and launches the agent.
 5. **Skin**: rename to `sammad`, banner/theme, help text, favicon/icon from the
-   logo; preserve upstream attribution in `--version`/about.
+   logo; preserve upstream attribution in `--version`/about. The palette and
+   one-line banner already live in `sammad/branding.py`.
 6. **Harden + docs**: opt-in real-Entra/Foundry smoke, rebase test against a newer
    upstream tag, onboarding.
+
+## Command surface (phase 4)
+
+| command | what it does |
+|---|---|
+| `sammad login` | Entra device flow → stores the opaque session token in the OS keychain |
+| `sammad whoami` | shows the signed-in identity, org, and role from `GET /auth/me` |
+| `sammad logout` | best-effort server logout, then clears the local credential |
+| `sammad doctor` | checks keychain, control-plane reachability, and session validity |
+| `sammad run [args…]` | mints a runtime token, writes the gateway provider config, starts renewal, and launches the kimi agent; extra args pass through |

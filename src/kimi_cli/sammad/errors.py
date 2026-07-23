@@ -21,6 +21,16 @@ class SammadError(Exception):
         self.retryable = retryable
 
 
+class NotLoggedIn(SammadError):
+    """No session token is stored; the user must run ``sammad login`` first."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "not_logged_in",
+            "You are not signed in. Run `sammad login` to authenticate.",
+        )
+
+
 class KeychainUnavailable(SammadError):
     """No OS keychain is available; sammad never falls back to plaintext."""
 

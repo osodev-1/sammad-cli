@@ -73,6 +73,7 @@ kimi-cli = { workspace = true }
 [project.scripts]
 kimi = "kimi_cli.__main__:main"
 kimi-cli = "kimi_cli.__main__:main"
+sammad = "kimi_cli.sammad.cli:main"
 
 [tool.ruff]
 line-length = 100
