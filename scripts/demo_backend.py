@@ -32,9 +32,7 @@ HOST = "127.0.0.1"
 
 
 def _iso(delta_seconds: int = 0) -> str:
-    return (datetime.now(UTC) + timedelta(seconds=delta_seconds)).isoformat().replace(
-        "+00:00", "Z"
-    )
+    return (datetime.now(UTC) + timedelta(seconds=delta_seconds)).isoformat().replace("+00:00", "Z")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -84,7 +82,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": {"code": "not_found", "message": self.path}})
 
     def do_POST(self) -> None:  # noqa: N802
-        self._read_json()
+        body = self._read_json()
         if self.path == "/api/v1/auth/device/start":
             self._data(
                 {
@@ -118,13 +116,26 @@ class Handler(BaseHTTPRequestHandler):
                     "familyId": "demo-family",
                     "expiresAt": _iso(600),
                     "absoluteExpiresAt": _iso(24 * 3600),
-                    "allowedModelAliases": ["agent-default"],
                     "gatewayBaseUrl": f"http://{HOST}:{PORT}/v1",
-                    "modelSettings": {
-                        "name": "agent-default",
-                        "maxContextSize": 128000,
-                        "capabilities": ["thinking"],
-                    },
+                    # Illustrative sandbox set mirroring the real alias surface so
+                    # `/model <alias>` switching is demonstrable end to end. Context
+                    # sizes/capabilities are server-authored in production.
+                    "modelSettings": [
+                        {
+                            "name": "kimi-k2.7-code",
+                            "maxContextSize": 128000,
+                            "capabilities": ["thinking"],
+                        },
+                        {"name": "gpt-5.3-codex", "maxContextSize": 200000, "capabilities": []},
+                        {
+                            "name": "deepseek-v4-pro",
+                            "maxContextSize": 64000,
+                            "capabilities": ["thinking"],
+                        },
+                        {"name": "codestral", "maxContextSize": 32000, "capabilities": []},
+                        {"name": "mistral-small", "maxContextSize": 32000, "capabilities": []},
+                    ],
+                    "defaultModelAlias": "kimi-k2.7-code",
                 }
             )
         elif self.path == "/api/v1/runtime-tokens/renew":
@@ -132,11 +143,11 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/v1/runtime-tokens/revoke":
             self._send(204, None)
         elif self.path.rstrip("/") == "/v1/chat/completions":
-            self._stream_completion()
+            self._stream_completion(body.get("model") or "kimi-k2.7-code")
         else:
             self._send(404, {"error": {"code": "not_found", "message": self.path}})
 
-    def _stream_completion(self) -> None:
+    def _stream_completion(self, model: str) -> None:
         chunks = [
             {"delta": {"role": "assistant"}},
             {"delta": {"content": "Hello from the sammad demo gateway — "}},
@@ -150,7 +161,7 @@ class Handler(BaseHTTPRequestHandler):
             frame = {
                 "id": "demo",
                 "object": "chat.completion.chunk",
-                "model": "agent-default",
+                "model": model,
                 "choices": [{"index": 0, **c}],
             }
             self.wfile.write(f"data: {json.dumps(frame)}\n\n".encode())

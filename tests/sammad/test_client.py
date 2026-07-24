@@ -87,20 +87,26 @@ def test_mint_parses_model_settings_and_gateway():
                 "familyId": "rtfam_1",
                 "expiresAt": "2026-07-23T00:10:00Z",
                 "absoluteExpiresAt": "2026-07-24T00:00:00Z",
-                "allowedModelAliases": ["agent-default"],
                 "gatewayBaseUrl": "http://gw.test/v1",
-                "modelSettings": {
-                    "name": "agent-default",
-                    "maxContextSize": 128000,
-                    "capabilities": ["thinking", "tool_use"],
-                },
+                "modelSettings": [
+                    {
+                        "name": "kimi-k2.7-code",
+                        "maxContextSize": 128000,
+                        "capabilities": ["thinking"],
+                    },
+                    {"name": "gpt-5.3-codex", "maxContextSize": 200000, "capabilities": []},
+                ],
+                "defaultModelAlias": "kimi-k2.7-code",
             }
         )
 
     mint = make_client(handler).mint_runtime_token("sess-xyz")
     assert mint.token == "rtok-plain"
     assert mint.gateway_base_url == "http://gw.test/v1"
-    assert mint.model_settings.max_context_size == 128000
+    # modelSettings is now a per-alias list, and the default is named explicitly.
+    assert [m.name for m in mint.model_settings] == ["kimi-k2.7-code", "gpt-5.3-codex"]
+    assert mint.model_settings[0].max_context_size == 128000
+    assert mint.default_model_alias == "kimi-k2.7-code"
 
 
 def test_logout_204_is_none():

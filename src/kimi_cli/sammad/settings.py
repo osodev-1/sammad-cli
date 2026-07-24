@@ -7,8 +7,6 @@ from dataclasses import dataclass
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:3001"
 KEYCHAIN_SERVICE = "sammad-cli"
-"""The org model alias exposed to users; resolved to a deployment server-side."""
-DEFAULT_MODEL_ALIAS = "agent-default"
 
 
 @dataclass(frozen=True, slots=True)

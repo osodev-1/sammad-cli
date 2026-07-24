@@ -103,18 +103,20 @@ class SammadSession:
         *,
         config_file: Path | None = None,
         provider_name: str = PROVIDER_NAME,
-        model_key: str = "sammad-default",
     ) -> MintResponse:
-        """Mint a runtime token and write the gateway provider/model into ``config``.
+        """Mint a runtime token and write the gateway provider/models into ``config``.
 
-        Returns the mint response so the caller can start renewal. The provider
-        is keyed by ``provider_name`` and the model by ``model_key``; ``config``
-        is saved and its ``default_model`` is pointed at the sammad model.
+        Every allowed alias from the mint response is registered as its own model
+        entry (keyed by its alias name, all sharing the one gateway provider), so
+        ``/model <alias>`` works in-session. ``default_model`` is pointed at the
+        server-named ``default_model_alias``. Returns the mint response so the
+        caller can start renewal.
         """
         mint = self._client.mint_runtime_token(self.require_token())
         config.providers[provider_name] = build_provider(mint)
-        config.models[model_key] = build_model(mint, provider_name=provider_name)
-        config.default_model = model_key
+        for settings in mint.model_settings:
+            config.models[settings.name] = build_model(settings, provider_name=provider_name)
+        config.default_model = mint.default_model_alias
         save_config(config, config_file)
         return mint
 

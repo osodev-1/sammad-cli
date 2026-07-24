@@ -48,8 +48,11 @@ def test_mint_and_stream_through_real_foundry_gateway():
     mint = client.mint_runtime_token(SESSION_TOKEN)
     assert mint.token
     assert mint.gateway_base_url
+    aliases = {s.name for s in mint.model_settings}
+    assert mint.default_model_alias in aliases
+    default_settings = next(s for s in mint.model_settings if s.name == mint.default_model_alias)
     provider = build_provider(mint)
-    model = build_model(mint)
+    model = build_model(default_settings)
     assert provider.type == "openai_legacy"
     assert model.max_context_size > 0
 

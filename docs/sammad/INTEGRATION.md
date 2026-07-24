@@ -39,11 +39,43 @@ sammad configures this to point at the internal gateway:
 | `provider.type` | `openai_legacy` (OpenAI-compatible chat completions) |
 | `provider.base_url` | the gateway URL from the runtime-token mint response |
 | `provider.api_key` | the short-lived **runtime token** (never a provider key) |
-| `model.model` | the org model alias, e.g. `agent-default` |
+| `model.model` | an org model **alias** (e.g. `kimi-k2.7-code`), resolved to a Foundry deployment server-side |
 
 The gateway is the sammad LLM gateway from the backend repo: it validates the
-runtime token, resolves the alias to an Azure AI Foundry deployment server-side,
+runtime token, resolves each alias to an Azure AI Foundry deployment server-side,
 enforces quotas, and streams normalized OpenAI SSE back.
+
+### Model aliases (per-alias registration)
+
+The mint response enumerates **every alias** the caller may use — one entry per
+alias — and names the default. `session.configure_run` registers each as its own
+`LLMModel` (keyed by the alias name, all sharing the single `sammad-gateway`
+provider) and points `default_model` at `defaultModelAlias`, so `/model <alias>`
+switches models in-session without re-minting. Mint-response shape:
+
+```jsonc
+"gatewayBaseUrl": "https://<gateway>/v1",
+"modelSettings": [
+  {"name": "kimi-k2.7-code", "maxContextSize": <int>, "capabilities": ["thinking"]},
+  {"name": "gpt-5.3-codex",  "maxContextSize": <int>, "capabilities": []}
+  // … one entry per allowed alias
+],
+"defaultModelAlias": "kimi-k2.7-code"
+```
+
+The CLI invents nothing (ADR-014): context window and capabilities are
+server-authored per alias. Only `thinking` maps to a kimi `ModelCapability`;
+`tool_use` is inherent and dropped. There is no separate `allowedModelAliases`
+field — the `name`s in `modelSettings` are the allowed aliases. The backend
+gateway registry maps each alias to its Foundry deployment:
+
+| alias (`/model <alias>`) | Azure Foundry deployment |
+|---|---|
+| `gpt-5.3-codex` | `gpt-5.3-codex` |
+| `kimi-k2.7-code` (default) | `FW-Kimi-K2.7-Code` |
+| `deepseek-v4-pro` | `DeepSeek-V4-Pro` |
+| `codestral` | `Codestral-2501` |
+| `mistral-small` | `mistral-small-2503` |
 
 ## SSO + credential flow (to build)
 

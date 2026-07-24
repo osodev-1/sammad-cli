@@ -68,6 +68,9 @@ class MintResponse(_Camel):
     family_id: str
     expires_at: str
     absolute_expires_at: str
-    allowed_model_aliases: list[str]
     gateway_base_url: str
-    model_settings: ModelSettings
+    # One entry per allowed alias; the ``name`` fields enumerate the aliases the
+    # user may select. ``default_model_alias`` names which one ``sammad run``
+    # starts on and must match one of the entries' ``name``.
+    model_settings: list[ModelSettings]
+    default_model_alias: str

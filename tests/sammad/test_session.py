@@ -89,7 +89,7 @@ def test_logout_clears_local_token_even_if_server_fails() -> None:
     assert kc.token is None
 
 
-def test_configure_run_writes_provider_model_and_default(tmp_path) -> None:
+def test_configure_run_registers_every_alias_and_sets_default(tmp_path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/runtime-tokens"
         return ok(
@@ -99,13 +99,19 @@ def test_configure_run_writes_provider_model_and_default(tmp_path) -> None:
                 "familyId": "rtfam_1",
                 "expiresAt": "2026-07-23T00:10:00Z",
                 "absoluteExpiresAt": "2026-07-24T00:00:00Z",
-                "allowedModelAliases": ["agent-default"],
                 "gatewayBaseUrl": "http://gw.test/v1",
-                "modelSettings": {
-                    "name": "agent-default",
-                    "maxContextSize": 128000,
-                    "capabilities": ["thinking"],
-                },
+                # Default is deliberately NOT the first entry, so the assertion
+                # below proves configure_run reads defaultModelAlias, not order.
+                "modelSettings": [
+                    {"name": "gpt-5.3-codex", "maxContextSize": 200000, "capabilities": []},
+                    {
+                        "name": "kimi-k2.7-code",
+                        "maxContextSize": 128000,
+                        "capabilities": ["thinking"],
+                    },
+                    {"name": "codestral", "maxContextSize": 32000, "capabilities": []},
+                ],
+                "defaultModelAlias": "kimi-k2.7-code",
             }
         )
 
@@ -116,13 +122,22 @@ def test_configure_run_writes_provider_model_and_default(tmp_path) -> None:
     mint = session.configure_run(config, config_file=config_file)
 
     assert mint.token == "rtok-plain"
-    assert config.default_model == "sammad-default"
-    provider = config.providers[config.models["sammad-default"].provider]
+    # Every alias becomes its own model entry, keyed by alias name, all pointing
+    # at the single gateway provider — so `/model <alias>` works in-session.
+    for alias in ("gpt-5.3-codex", "kimi-k2.7-code", "codestral"):
+        assert config.models[alias].provider == "sammad-gateway"
+        assert config.models[alias].model == alias
+    # The default is the named alias, even though it is not first in the list.
+    assert config.default_model == "kimi-k2.7-code"
+    # Per-alias metadata is preserved independently.
+    assert config.models["gpt-5.3-codex"].max_context_size == 200000
+    assert config.models["kimi-k2.7-code"].max_context_size == 128000
+    assert config.models["kimi-k2.7-code"].capabilities == {"thinking"}
+    # Provider wiring: one OpenAI-compatible gateway, runtime token as the key.
+    provider = config.providers[config.models["kimi-k2.7-code"].provider]
     assert provider.type == "openai_legacy"
     assert provider.base_url == "http://gw.test/v1"
     assert provider.api_key.get_secret_value() == "rtok-plain"
-    assert config.models["sammad-default"].max_context_size == 128000
-    # The config validates end to end (model references an existing provider).
     assert config_file.exists()
 
 
@@ -139,9 +154,9 @@ def _mint(expires_minutes: int = 10, absolute_hours: int = 24) -> MintResponse:
             "familyId": "fam_1",
             "expiresAt": (BASE_TIME + timedelta(minutes=expires_minutes)).isoformat(),
             "absoluteExpiresAt": (BASE_TIME + timedelta(hours=absolute_hours)).isoformat(),
-            "allowedModelAliases": ["agent-default"],
             "gatewayBaseUrl": "http://gw.test/v1",
-            "modelSettings": {"name": "agent-default", "maxContextSize": 1000},
+            "modelSettings": [{"name": "kimi-k2.7-code", "maxContextSize": 1000}],
+            "defaultModelAlias": "kimi-k2.7-code",
         }
     )
 

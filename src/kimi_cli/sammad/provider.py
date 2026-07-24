@@ -11,7 +11,7 @@ from __future__ import annotations
 from pydantic import SecretStr
 
 from kimi_cli.config import LLMModel, LLMProvider
-from kimi_cli.sammad.models import MintResponse
+from kimi_cli.sammad.models import MintResponse, ModelSettings
 
 PROVIDER_NAME = "sammad-gateway"
 
@@ -28,14 +28,13 @@ def build_provider(mint: MintResponse) -> LLMProvider:
     )
 
 
-def build_model(mint: MintResponse, *, provider_name: str = PROVIDER_NAME) -> LLMModel:
-    caps = {
-        _CAPABILITY_MAP[c] for c in mint.model_settings.capabilities if c in _CAPABILITY_MAP
-    } or None
+def build_model(settings: ModelSettings, *, provider_name: str = PROVIDER_NAME) -> LLMModel:
+    """Build one ``LLMModel`` for a single alias from its server-authored settings."""
+    caps = {_CAPABILITY_MAP[c] for c in settings.capabilities if c in _CAPABILITY_MAP} or None
     return LLMModel(
         provider=provider_name,
-        model=mint.model_settings.name,
-        max_context_size=mint.model_settings.max_context_size,
+        model=settings.name,
+        max_context_size=settings.max_context_size,
         capabilities=caps,
-        display_name=mint.model_settings.name,
+        display_name=settings.name,
     )

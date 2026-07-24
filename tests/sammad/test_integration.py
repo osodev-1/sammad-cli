@@ -39,9 +39,11 @@ def test_full_flow_against_demo_backend():
 
     # mint a runtime token and build the kimi provider/model from it
     mint = client.mint_runtime_token(token)
-    assert mint.model_settings.name == "agent-default"
+    aliases = {s.name for s in mint.model_settings}
+    assert mint.default_model_alias in aliases
+    default_settings = next(s for s in mint.model_settings if s.name == mint.default_model_alias)
     provider = build_provider(mint)
-    model = build_model(mint)
+    model = build_model(default_settings)
     assert provider.type == "openai_legacy"
     assert model.max_context_size > 0
 
