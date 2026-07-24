@@ -18,10 +18,12 @@ def test_product_name_is_rebranded_with_upstream_attribution():
     assert branding.NAME == "sammad"
 
 
-def test_shell_logo_is_valid_markup_and_two_lines():
-    # Renders without raising and keeps upstream's two-row footprint.
+def test_shell_logo_is_valid_markup_and_aligned():
+    # Renders without raising; a 3-row gem with equal-width rows.
     text = Text.from_markup(branding.SHELL_LOGO)
-    assert branding.SHELL_LOGO.count("\n") == 1
+    rows = text.plain.split("\n")
+    assert len(rows) == 3
+    assert len({len(r) for r in rows}) == 1  # all rows same display width
     assert "◆" in text.plain  # the rust diamond accent
     assert branding.WELCOME == "Welcome to sammad!"
 

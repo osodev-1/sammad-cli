@@ -23,10 +23,16 @@ RUST = "#c85f27"
 INK = "#141210"
 MUTED = "#8a7f6d"
 
-# The cross-stitch mark for the shell welcome. Keeps upstream's 7-wide × 2-row
-# footprint (so the welcome layout is unchanged) but in the sammad palette, with
-# a rust diamond as the accent. ``Text.from_markup`` renders this.
-SHELL_LOGO = f"[{GOLD}]▐█▛[/][{RUST}]◆[/][{GOLD}]▜█▌[/]\n[{GOLD}]▐█████▌[/]"
+# The cross-stitch mark for the shell welcome: a gold gem/diamond echoing the
+# sammad emblem's central rhombus, with the rust diamond as its heart. Uses the
+# quadrant block glyphs that render cleanly in the target terminals; each of the
+# three rows is the same display width so it stays aligned. ``Text.from_markup``
+# renders this.
+SHELL_LOGO = (
+    f"[{GOLD}] ▟█▙ [/]\n"
+    f"[{GOLD}]██[/][{RUST}]◆[/][{GOLD}]██[/]\n"
+    f"[{GOLD}] ▜█▛ [/]"
+)
 
 WELCOME = f"Welcome to {NAME}!"
 

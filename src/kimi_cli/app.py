@@ -754,35 +754,9 @@ class KimiCLI:
                     level=WelcomeInfoItem.Level.INFO,
                 )
             )
-            model_name = self._soul.model_name
-            if model_name not in (
-                "kimi-for-coding",
-                "kimi-code",
-            ) and not model_name.startswith("kimi-k2"):
-                welcome_info.append(
-                    WelcomeInfoItem(
-                        name="Tip",
-                        value="send /login to use Kimi for Coding",
-                        level=WelcomeInfoItem.Level.WARN,
-                    )
-                )
-        from kimi_cli.ui.shell.migration_nudge import (
-            already_installed_text,
-            kimi_code_installed,
-            welcome_card_text,
-        )
-
-        welcome_info.append(
-            WelcomeInfoItem(
-                name="\n✨ Update",
-                value=(
-                    already_installed_text(sys.platform)
-                    if kimi_code_installed()
-                    else welcome_card_text()
-                ),
-                level=WelcomeInfoItem.Level.WARN,
-            )
-        )
+        # sammad fork: upstream added a "/login to use Kimi for Coding" tip and a
+        # "/upgrade to the new Kimi Code" nudge here. Both point at Moonshot flows
+        # that do not apply to a governed sammad deployment, so they are removed.
         async with self._env():
             shell = Shell(self._soul, welcome_info=welcome_info, prefill_text=prefill_text)
             return await shell.run(command)
