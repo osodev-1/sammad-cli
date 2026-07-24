@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Launch the sammad CLI wired to the local demo backend.
+#
+# This sets up a throwaway sandbox: it points the CLI at scripts/demo_backend.py
+# and uses a demo-only file keychain (this box has no real OS keychain). It is
+# NOT how sammad runs in production — real deployments use a real control plane
+# and a real OS keychain, and the token never touches disk in plaintext.
+#
+#   scripts/sammad-demo login      # auto-approves, stores a demo session token
+#   scripts/sammad-demo whoami
+#   scripts/sammad-demo doctor
+#   scripts/sammad-demo run        # interactive governed agent (fake gateway)
+#   scripts/sammad-demo run -p "hi" --print   # one-shot
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PORT="${SAMMAD_DEMO_PORT:-4101}"
+
+export SAMMAD_API_BASE_URL="http://127.0.0.1:${PORT}"
+# Demo-only keychain: a file backend under the repo so `login` can store a token
+# on a box with no Secret Service. Never do this in production.
+export PYTHON_KEYRING_BACKEND="keyrings.alt.file.PlaintextKeyring"
+export XDG_DATA_HOME="${ROOT}/.demo-keyring"
+mkdir -p "${XDG_DATA_HOME}"
+
+# The file keychain backend lives in keyrings.alt (a dev-only extra, not a
+# product dependency). Install it into the venv on first run if it's missing.
+if ! "${ROOT}/.venv/bin/python" -c "import keyrings.alt" >/dev/null 2>&1; then
+  echo "· installing demo keychain backend (keyrings.alt) …" >&2
+  UV_PYTHON=3.12 uv pip install --python "${ROOT}/.venv/bin/python" keyrings.alt >/dev/null
+fi
+
+# Start the demo backend if nothing is listening on the port yet.
+if ! curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+  echo "· starting demo backend on 127.0.0.1:${PORT} …" >&2
+  "${ROOT}/.venv/bin/python" "${ROOT}/scripts/demo_backend.py" >/tmp/sammad-demo-backend.log 2>&1 &
+  for _ in $(seq 1 30); do
+    curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 && break
+    sleep 0.2
+  done
+fi
+
+exec "${ROOT}/.venv/bin/sammad" "$@"

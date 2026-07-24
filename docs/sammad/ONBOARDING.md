@@ -38,6 +38,26 @@ export SAMMAD_API_BASE_URL="https://<your-control-plane>"
 # optional: export SAMMAD_REQUEST_TIMEOUT=30
 ```
 
+## Try it locally (no real backend, no keychain)
+
+To kick the tyres without a control plane or an OS keychain, use the bundled
+sandbox. It runs a tiny local stand-in for the control plane + gateway
+(`scripts/demo_backend.py`) and points the CLI at it with a throwaway file
+keychain:
+
+```bash
+scripts/sammad-demo login                     # auto-approves; stores a demo token
+scripts/sammad-demo whoami
+scripts/sammad-demo doctor
+scripts/sammad-demo run                        # interactive governed agent
+scripts/sammad-demo run -p "say hello" --print # one-shot
+```
+
+The model replies are canned — this proves the SSO login, runtime-token mint,
+provider wiring, and streaming end to end. It is a **sandbox only**: it does no
+real auth and writes the token to a plaintext file under `.demo-keyring/`. The
+real CLI (below) uses a real control plane and a real OS keychain.
+
 ## Sign in
 
 ```bash
