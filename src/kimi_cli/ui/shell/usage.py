@@ -39,7 +39,9 @@ async def usage(app: Shell, args: str):
     """Display API usage and quota information"""
     assert isinstance(app.soul, KimiSoul)
     if app.soul.runtime.llm is None:
-        console.print("[red]LLM not set. Please run /login first.[/red]")
+        console.print(
+            "[red]No model configured for this session. Restart with [bold]sammad run[/bold].[/red]"
+        )
         return
 
     provider = app.soul.runtime.llm.provider_config

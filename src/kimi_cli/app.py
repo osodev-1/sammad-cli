@@ -731,7 +731,7 @@ class KimiCLI:
             welcome_info.append(
                 WelcomeInfoItem(
                     name="Model",
-                    value="not set, send /login to login",
+                    value="not set — start a session with 'sammad run'",
                     level=WelcomeInfoItem.Level.WARN,
                 )
             )
