@@ -7,9 +7,10 @@ provider key. This guide gets you from a clone to a governed session.
 
 ## Prerequisites
 
-- **Python 3.12** (pinned). The upstream `.python-version` may say a newer
-  release, but the toolchain currently targets 3.12 — a 3.14 pre-release trips a
-  pydantic `ForwardRef` bug on import. Always pass `UV_PYTHON=3.12`.
+- **Python 3.14** (pinned via `.python-version`). Earlier builds pinned 3.12 to
+  dodge a pydantic `ForwardRef` bug that a 3.14 pre-release tripped on import;
+  that is resolved in the current dependency pins, and the toolchain (including
+  the pyright target) now tracks 3.14 — `uv` picks it up from `.python-version`.
 - [`uv`](https://docs.astral.sh/uv/) for environment + dependency management.
 - An **OS keychain**: macOS Keychain, Windows Credential Manager, or a Secret
   Service provider (e.g. GNOME Keyring) on Linux. sammad stores its session
@@ -21,8 +22,8 @@ provider key. This guide gets you from a clone to a governed session.
 
 ```bash
 git clone <this-fork> sammad-cli && cd sammad-cli
-UV_PYTHON=3.12 uv venv --python 3.12
-UV_PYTHON=3.12 uv sync
+uv venv          # uses the pinned 3.14 from .python-version
+uv sync
 ```
 
 This installs the `sammad` console script into the environment
@@ -108,7 +109,5 @@ sammad about    # version + upstream (Kimi Code CLI) provenance
 - **`You are not signed in`** — run `sammad login`. If it persists, `sammad
   doctor` will show whether the control plane is reachable at
   `SAMMAD_API_BASE_URL`.
-- **Import/`ForwardRef` errors on startup** — you are almost certainly on Python
-  3.14+. Recreate the venv with `UV_PYTHON=3.12 uv venv --python 3.12 --clear`.
 - **Sign-in timed out** — the device code expired before approval; just run
   `sammad login` again.

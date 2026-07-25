@@ -27,7 +27,7 @@ mkdir -p "${XDG_DATA_HOME}"
 # product dependency). Install it into the venv on first run if it's missing.
 if ! "${ROOT}/.venv/bin/python" -c "import keyrings.alt" >/dev/null 2>&1; then
   echo "· installing demo keychain backend (keyrings.alt) …" >&2
-  UV_PYTHON=3.12 uv pip install --python "${ROOT}/.venv/bin/python" keyrings.alt >/dev/null
+  uv pip install --python "${ROOT}/.venv/bin/python" keyrings.alt >/dev/null
 fi
 
 # Start the demo backend if nothing is listening on the port yet.
