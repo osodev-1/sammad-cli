@@ -1,8 +1,8 @@
 """sanad brand palette and banner.
 
-Carried from the backend repo's CLI design reference: a cross-stitch / pixel
-mark in gold and sand on near-black ink, with a rust-orange diamond accent.
-Kept here as data so the skin (phase 5) and the auth commands share one source.
+The shell welcome shows the "sanad" wordmark (a figlet logotype) in gold ink on
+near-black; the leaning-figure pun from the app icon stays in the icon, not the
+ASCII art. Kept here as data so the skin and the auth commands share one source.
 """
 
 from __future__ import annotations
@@ -23,16 +23,18 @@ RUST = "#c85f27"
 INK = "#141210"
 MUTED = "#8a7f6d"
 
-# The cross-stitch mark for the shell welcome: a gold gem/diamond echoing the
-# sanad emblem's central rhombus, with the rust diamond as its heart. Uses the
-# quadrant block glyphs that render cleanly in the target terminals; each of the
-# three rows is the same display width so it stays aligned. ``Text.from_markup``
-# renders this.
-SHELL_LOGO = (
-    f"[{GOLD}] ▟█▙ [/]\n"
-    f"[{GOLD}]██[/][{RUST}]◆[/][{GOLD}]██[/]\n"
-    f"[{GOLD}] ▜█▛ [/]"
+# The shell welcome wordmark: the "sanad" logotype (a figlet rendering) in gold
+# ink. The leaning-figure pun from the app icon reads as noise at ASCII scale, so
+# the terminal uses the clean wordmark and the icon carries the figure. Rendered
+# via Rich markup; wrapping each line keeps the ``\`` and backtick glyphs literal
+# (no ``[`` appears in the art, so nothing is mistaken for a markup tag).
+_WORDMARK = (
+    "                       _\n"
+    " ___ __ _ _ _  __ _ __| |\n"
+    "(_-</ _` | ' \\/ _` / _` |\n"
+    "/__/\\__,_|_||_\\__,_\\__,_|"
 )
+SHELL_LOGO = "\n".join(f"[{GOLD}]{_line}[/]" for _line in _WORDMARK.split("\n"))
 
 WELCOME = f"Welcome to {NAME}!"
 

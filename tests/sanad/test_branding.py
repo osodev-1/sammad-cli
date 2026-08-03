@@ -18,13 +18,14 @@ def test_product_name_is_rebranded_with_upstream_attribution():
     assert branding.NAME == "sanad"
 
 
-def test_shell_logo_is_valid_markup_and_aligned():
-    # Renders without raising; a 3-row gem with equal-width rows.
+def test_shell_logo_is_the_gold_sanad_wordmark():
+    # The welcome logo is the "sanad" figlet wordmark, rendered in brand gold as
+    # valid Rich markup (four rows, non-empty).
     text = Text.from_markup(branding.SHELL_LOGO)
     rows = text.plain.split("\n")
-    assert len(rows) == 3
-    assert len({len(r) for r in rows}) == 1  # all rows same display width
-    assert "◆" in text.plain  # the rust diamond accent
+    assert len(rows) == 4
+    assert text.plain.strip()  # renders non-empty
+    assert branding.GOLD in branding.SHELL_LOGO  # painted in the brand gold
     assert branding.WELCOME == "Welcome to sanad!"
 
 
