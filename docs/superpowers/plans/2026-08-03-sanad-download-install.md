@@ -2,16 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development or superpowers:executing-plans. Steps use `- [ ]` checkboxes.
 >
-> **Where this runs:** TWO repos. **(A)** the Next.js/Vercel app (plans #1/#2) — serves the install scripts + `/download` page. **(B)** the **sanad CLI repo** (this repo, `sammad-cli`) — the PyPI publish workflow. Implements **Spec #4** — `2026-08-03-sanad-download-install-design.md`.
+> **Where this runs:** TWO repos. **(A)** the Next.js/Vercel app (plans #1/#2) — serves the install scripts + `/download` page. **(B)** the **sanad CLI repo** (this repo, `sammad-cli`) — the private-index publish workflow. Implements **Spec #4** — `2026-08-03-sanad-download-install-design.md`.
 
 **Goal:** Make "get sanad" a single copy-paste line on macOS/Linux/Windows, with no manual Python or uv setup, landing the user at `sanad login`.
 
-**Architecture:** `sanad` is published to **PyPI**; the installer installs **uv** (which pulls the right Python 3.14 itself) then `uv tool install sanad`. `sanadcode.com` serves stable, versionless `install.sh` / `install.ps1` routes + a `/download` page.
+**Architecture:** `sanad` is published to a **private PyPI-compatible index**; the installer installs **uv** (which pulls the right Python 3.14 itself) then `uv tool install sanad --default-index "$SANAD_INDEX_URL"`. `sanadcode.com` serves stable, versionless `install.sh` / `install.ps1` routes (each carrying a read-only index token) + a `/download` page.
 
 **Tech Stack:** Vercel route handlers (return raw scripts) · Next.js page · GitHub Actions + `uv build`/`uv publish` in the CLI repo.
 
 ## Global Constraints
-- **Distribution = PyPI (public), install via uv.** Package name `sanad` (confirm it's claimable). Version = the CLI's `constant.VERSION`.
+- **Distribution = private index (`SANAD_INDEX_URL`), install via uv.** `sanad` is published to a private PyPI-compatible index, not public PyPI; the served install script carries a read-only index token so the one-liner still works. Version = the CLI's `constant.VERSION`.
 - Install one-liners are **stable + versionless** (always latest): `curl -fsSL https://sanadcode.com/install.sh | sh` and (PowerShell) `irm https://sanadcode.com/install.ps1 | iex`.
 - Scripts served over **HTTPS**, correct content-types; installer **must not** auto-run `sanad login` (it opens a browser + writes the keychain — needs consent).
 - The CLI already disables upstream auto-update; any updater is an explicit `sanad`/uv action.
@@ -38,13 +38,15 @@ app/download/page.tsx         # OS-detect + copy buttons + manual fallback
 ```sh
 #!/bin/sh
 set -e
+# Served from sanadcode.com with a read-only index token baked in:
+SANAD_INDEX_URL="https://<READ_TOKEN>@pkgs.sanadcode.com/simple/"
 if ! command -v uv >/dev/null 2>&1; then
   echo "· installing uv (Python toolchain manager) …"
   curl -LsSf https://astral.sh/uv/install.sh | sh
   export PATH="$HOME/.local/bin:$PATH"
 fi
 echo "· installing sanad …"
-uv tool install sanad
+uv tool install sanad --default-index "$SANAD_INDEX_URL"
 echo ""
 echo "✓ sanad installed. Next:  sanad login"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *)
@@ -64,12 +66,13 @@ Route: `export const GET = () => new Response(SCRIPT, { headers: { "content-type
 - [ ] **Step 2: Run → fail. Step 3: Implement** — return:
 
 ```powershell
+$env:SANAD_INDEX_URL = "https://<READ_TOKEN>@pkgs.sanadcode.com/simple/"
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
   Write-Host "· installing uv ..."
   irm https://astral.sh/uv/install.ps1 | iex
 }
 Write-Host "· installing sanad ..."
-uv tool install sanad
+uv tool install sanad --default-index $env:SANAD_INDEX_URL
 Write-Host "`n> sanad installed. Next:  sanad login"
 ```
 
@@ -83,12 +86,12 @@ Write-Host "`n> sanad installed. Next:  sanad login"
 - [ ] **Step 2:** Add a manual fallback block (`uv tool install sanad`, or `pipx install sanad`) + a "verify: `sanad --version`" line + a link to docs and to `sanad login`.
 - [ ] **Step 3: Commit:** `feat(download): /download page with copy-paste installers`.
 
-### Task 4 (CLI repo): PyPI release workflow
+### Task 4 (CLI repo): private-index release workflow
 
 **Files:** Create `.github/workflows/release.yml` in **this** repo; verify `pyproject.toml` has the `sanad` package metadata + `[project.scripts] sanad = ...` (already present).
 
 - [ ] **Step 1:** Confirm build works locally: `UV_PYTHON=3.12 uv build` (sdist + wheel) — actually use the repo's pinned Python (3.14): `uv build`. Inspect `dist/`.
-- [ ] **Step 2: Workflow** — on a `v*` tag: checkout, `astral-sh/setup-uv`, `uv build`, `uv publish` with `PYPI_TOKEN` (repo secret). Guard: only publish if the tag matches `constant.VERSION`.
+- [ ] **Step 2: Workflow** — on a `v*` tag: checkout, `astral-sh/setup-uv`, `uv build`, `uv publish` to the **private index** with `SANAD_PUBLISH_URL` + `SANAD_INDEX_TOKEN` (repo secrets). Guard: only publish if the tag matches `constant.VERSION`.
 
 ```yaml
 name: release
@@ -100,10 +103,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv build
-      - run: uv publish --token ${{ secrets.PYPI_TOKEN }}
+      - run: uv publish --publish-url ${{ secrets.SANAD_PUBLISH_URL }} --token ${{ secrets.SANAD_INDEX_TOKEN }}
 ```
 
-- [ ] **Step 3: Commit:** `ci(release): build + publish sanad to PyPI on tag` (authored as Omar, per this repo's rule).
+- [ ] **Step 3: Commit:** `ci(release): build + publish sanad to the private index on tag` (authored as Omar, per this repo's rule).
 
 ### Task 5: install E2E
 

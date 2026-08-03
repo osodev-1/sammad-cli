@@ -5,13 +5,11 @@
 (Spec #1's web surface).
 **Stack:** static install scripts served by the Vercel app + a package registry.
 
-> **Decisions to confirm (defaults picked):**
-> 1. **Distribution channel** (default): publish `sanad` to **PyPI (public)**, install via
->    `uv tool install sanad`. ← alternatives: a private index (`--index-url`), or standalone
->    binaries (PyInstaller) if you want zero-Python installs. PyPI+uv is by far the least work.
-> 2. **Bootstrap** (default): the installer installs **uv**, which then pulls the correct
->    **Python 3.14** automatically — the user never installs Python by hand.
-> 3. **Windows:** PowerShell script (bash isn't native on Windows).
+> **Decisions (locked 2026-08-03):** distribution = **private index** — `sanad` is published
+> to a private PyPI-compatible index (`SANAD_INDEX_URL`), **not** public PyPI, so it isn't
+> `pip install`-able by the world. The install script (served from sanadcode.com) carries a
+> **read-only index token** so the copy-paste one-liner still works. Bootstrap = **uv**
+> (installs uv → the right Python 3.14). Windows = PowerShell. `sanad upgrade` deferred.
 
 ## 1. Purpose
 
@@ -31,13 +29,14 @@ and versionless (always latest).
 
 `install.sh` (POSIX sh):
 1. If `uv` is missing → install it: `curl -LsSf https://astral.sh/uv/install.sh | sh`.
-2. `uv tool install sanad` — uv resolves + fetches Python 3.14 and installs the `sanad`
-   console script onto the user's PATH (`~/.local/bin`).
+2. `uv tool install sanad --default-index "$SANAD_INDEX_URL"` — installs from the private
+   index (the served script sets `SANAD_INDEX_URL`, which embeds the read token); uv resolves
+   + fetches Python 3.14 and puts the `sanad` console script on PATH (`~/.local/bin`).
 3. Print next steps: "✓ Installed. Run: `sanad login`".
 4. Detect if `~/.local/bin` isn't on PATH and tell the user how to add it.
 
 `install.ps1` mirrors this: install uv via `irm https://astral.sh/uv/install.ps1 | iex`, then
-`uv tool install sanad`, then the same guidance.
+`uv tool install sanad --default-index $env:SANAD_INDEX_URL`, then the same guidance.
 
 *(uv is the right bootstrap because the CLI already targets Python 3.14 and uv installs the
 interpreter itself — see the CLI's ONBOARDING.)*
@@ -50,16 +49,20 @@ interpreter itself — see the CLI's ONBOARDING.)*
 - (Optional) a "verify" line showing the expected `sanad --version`.
 
 ## 5. Publishing (release flow for this CLI repo)
-- Build with `uv build`; publish with `uv publish` (or `twine`) to PyPI on tagged releases.
-- The package name `sanad` must be available/claimed on PyPI. Version = `constant.VERSION`.
-- CI: on a version tag, build + publish; the install URLs then serve the new version with no
-  change (uv always installs latest).
+- Build with `uv build`; publish with `uv publish --publish-url "$SANAD_PUBLISH_URL"` (the
+  private index's upload endpoint) on tagged releases. Version = `constant.VERSION`.
+- CI: on a version tag, build + publish to the private index; the install URLs then serve the
+  new version with no change (uv always installs latest from `SANAD_INDEX_URL`).
 
 ## 6. Security
 - Serve install scripts over HTTPS only; consider publishing a checksum + a
   `curl … | sh`-skeptic-friendly "read it first" note (link to the raw script).
 - Do **not** auto-run `sanad login` inside the installer without consent — print the command
   and let the user run it (a login triggers a browser + keychain write).
+- The private-index **read token** baked into the served install script is effectively public
+  (anyone can fetch the script) — use a **read-only, rotatable** token scoped to pulling the
+  `sanad` package. The goal is keeping `sanad` off public PyPI / `pip` search, not perfect
+  secrecy; per-user index auth would break the frictionless one-liner.
 
 ## 7. Testing
 - Run `install.sh` in a clean `ubuntu` and `debian` container and a fresh macOS shell →
@@ -67,8 +70,9 @@ interpreter itself — see the CLI's ONBOARDING.)*
 - Run `install.ps1` in a clean Windows PowerShell → same.
 - A smoke check that both routes return the script with the right content-type.
 
-## 8. Open questions
-- PyPI (public) vs private index — do you want `sanad` publicly `pip install`-able?
-- Standalone binaries (no Python at all) later, for locked-down enterprise machines?
-- Auto-update: the CLI's upstream auto-update is disabled (governed); do you want a
-  `sanad upgrade` that runs `uv tool upgrade sanad`?
+## 8. Open questions / deferred
+- Which private index to host on (self-hosted devpi · Azure Artifacts · GCP Artifact Registry
+  · Gemfury · AWS CodeArtifact) — an ops choice; the spec only assumes a PyPI-compatible
+  `SANAD_INDEX_URL` + upload endpoint.
+- Standalone binaries (no Python at all) for locked-down enterprise machines — later.
+- `sanad upgrade` (thin `uv tool upgrade sanad` wrapper) — deferred to post-launch.

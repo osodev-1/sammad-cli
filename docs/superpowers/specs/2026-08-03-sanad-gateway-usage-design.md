@@ -6,17 +6,12 @@
 persistent connections. Default target: a container on **Railway / Fly.io / Azure Container
 Apps**.
 
-> **Decisions to confirm (defaults picked):**
-> 1. **Runtime-token validation** (the big one): **signed JWT** minted by the control plane,
->    verified locally by the gateway with a shared public key (stateless, low-latency), with
->    revocation handled by short TTL (~10 min) + a lightweight revocation check. ← alternative
->    is opaque tokens introspected against the control-plane DB on every call (simpler,
->    higher latency). Recommending JWT.
-> 2. **Hosting:** a container (Railway to start). ← not Vercel.
-> 3. **Foundry auth:** the gateway holds Azure Foundry credentials (API key or managed
->    identity); confirm which.
-> 4. **Cost model:** meter *requests* + token counts; `cost` stored in micro-cents for
->    reporting only (billing is request-quota based per Spec #2).
+> **Decisions (locked 2026-08-03):** runtime token = **signed JWT** (control plane signs,
+> gateway verifies locally with the public key; revocation = short ~10-min TTL + a
+> control-plane revocation-list the gateway checks — **no Redis**) · hosting = **Railway**
+> (not Vercel) · Foundry auth = **API key** in env · cost model = request-quota (token counts
+> + `cost` in micro-cents are reporting-only) · **streaming-only** · the gateway writes
+> `usage_events` directly via a shared `DATABASE_URL`.
 
 ## 1. Purpose
 
@@ -93,8 +88,4 @@ Authorization: Bearer <runtimeToken>
   real gateway + Foundry; point it here.
 
 ## 8. Open questions
-- Redis vs a control-plane revocation endpoint for sub-TTL revocation.
-- Whether the gateway writes `usage_events` directly (shared DB) or via a control-plane
-  metering endpoint (cleaner boundary, one more hop).
-- Concurrency / rate limits per org at the gateway.
-- Do non-streaming requests need support, or is streaming-only fine? (CLI streams.)
+- Concurrency / rate limits per org at the gateway (tune under load).

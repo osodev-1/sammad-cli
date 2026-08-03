@@ -14,6 +14,7 @@
 - **Runtime token = signed JWT.** Control plane signs with a private key (`RUNTIME_JWT_PRIVATE_KEY`); the gateway verifies with the public key (`RUNTIME_JWT_PUBLIC_KEY`). Claims: `{ sub:userId, org:orgId, sid:cliSessionId, fam:familyId, iat, exp }`, `exp` ≈ 10 min.
 - **Alias→deployment map** is authoritative (from Spec #1): `gpt-5.3-codex`→`gpt-5.3-codex`, `kimi-k2.7-code`→`FW-Kimi-K2.7-Code`, `deepseek-v4-pro`→`DeepSeek-V4-Pro`, `codestral`→`Codestral-2501`, `mistral-small`→`mistral-small-2503`.
 - The gateway is the **only writer** of `usage_events`; it never exposes Foundry creds to the CLI.
+- **Hosting = Railway** (Node process, not Vercel). **Foundry auth = API key** in env (`FOUNDRY_ENDPOINT` + `FOUNDRY_API_KEY`). Revocation = short JWT TTL + a control-plane revocation-list the gateway checks (no Redis). Streaming-only.
 - The CLI hits `POST {gatewayBaseUrl}/chat/completions` with `Authorization: Bearer <jwt>` and `{ model:<alias>, stream:true }` → OpenAI SSE back, terminated by `data: [DONE]`.
 - `GET /api/v1/usage` (control plane, bearer session token) returns `{ used, limit, periodEnd, byModel:[{alias,requests,tokensIn,tokensOut}] }` — **shape frozen by the shipped CLI.**
 

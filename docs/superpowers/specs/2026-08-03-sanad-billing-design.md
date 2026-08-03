@@ -5,14 +5,10 @@
 tables and the "org-scoped entitlement" model.
 **Stack:** Next.js/Vercel + Stripe + Drizzle/Neon (as #1).
 
-> **Decisions to confirm (I picked defaults — correct any):**
-> 1. **Plan tiers & prices** (default below): Free $0 · Pro $20/mo · Team $30/seat/mo ·
->    Enterprise custom. ← your call on names + numbers.
-> 2. **Free-tier quota** (default): 200 agent requests / month per personal org.
-> 3. **Metering vs. seats:** Pro/Team priced per *seat* (flat for Pro = 1 seat); usage above
->    quota is *blocked* (429), not billed as overage. ← confirm you don't want usage-based
->    (metered) billing at launch.
-> 4. **Enterprise:** manual (sales-set) subscription rows, not self-serve Checkout.
+> **Decisions (locked 2026-08-03):** Free $0 · Pro $20/mo · Team $30/seat/mo · Enterprise
+> custom · free-tier quota **200 requests/month** per personal org · usage over quota is
+> **blocked** (429), never metered/billed as overage · Enterprise = **manual sales-set**
+> subscription rows (no self-serve enterprise Checkout).
 
 ## 1. Purpose
 

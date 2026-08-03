@@ -15,9 +15,9 @@
   `stripeSubscriptionId`, `currentPeriodEnd`. Never trust the client for entitlement.
 - **Idempotent** webhooks: dedupe by Stripe event id in a `stripe_events` table; handlers
   must be safe to replay.
-- **Plans** (defaults — confirm with owner before creating Stripe prices): Free $0 (1 seat,
-  200 req/mo) · Pro $20/mo (1 seat, 3000 req/mo) · Team $30/seat/mo (N seats, 3000/seat) ·
-  Enterprise custom. `quota` stored as jsonb `{ "requestsPerMonth": <n> }`.
+- **Plans** (locked): Free $0 (1 seat, 200 req/mo) · Pro $20/mo (1 seat, 3000 req/mo) ·
+  Team $30/seat/mo (N seats, 3000/seat) · Enterprise custom. `quota` stored as jsonb
+  `{ "requestsPerMonth": <n> }`.
 - Org ↔ Stripe customer mapping is **server-authored** (Checkout `client_reference_id` +
   metadata `orgId`), never user-supplied.
 - Verify webhook signatures with `STRIPE_WEBHOOK_SECRET`; never log full events.
