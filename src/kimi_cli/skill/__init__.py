@@ -25,9 +25,9 @@ SkillScope = Literal["builtin", "user", "project", "extra"]
 """Where a skill was discovered from.
 
 - ``builtin``: bundled with kimi-cli
-- ``user``: from the user's home (``~/.kimi/skills``, ``~/.agents/skills``, ...)
+- ``user``: from the user's home (``~/.sanad/skills``, ``~/.agents/skills``, ...)
 - ``project``: from the current project's working directory
-  (``<work_dir>/.kimi/skills``, ``<work_dir>/.agents/skills``, ...)
+  (``<work_dir>/.sanad/skills``, ``<work_dir>/.agents/skills``, ...)
 - ``extra``: from ``extra_skill_dirs`` config or ``--skills-dir`` override
 """
 
@@ -68,10 +68,10 @@ def _get_user_brand_skills_dir_candidates() -> tuple[KaosPath, ...]:
     """
     Get user-level brand skills directory candidates in priority order.
 
-    Brand group: ``~/.kimi/skills`` > ``~/.claude/skills`` > ``~/.codex/skills``
+    Brand group: ``~/.sanad/skills`` > ``~/.claude/skills`` > ``~/.codex/skills``
     """
     return (
-        KaosPath.home() / ".kimi" / "skills",
+        KaosPath.home() / ".sanad" / "skills",
         KaosPath.home() / ".claude" / "skills",
         KaosPath.home() / ".codex" / "skills",
     )
@@ -90,10 +90,10 @@ def _get_project_brand_skills_dir_candidates(work_dir: KaosPath) -> tuple[KaosPa
     """
     Get project-level brand skills directory candidates in priority order.
 
-    Brand group: ``.kimi/skills`` > ``.claude/skills`` > ``.codex/skills``
+    Brand group: ``.sanad/skills`` > ``.claude/skills`` > ``.codex/skills``
     """
     return (
-        work_dir / ".kimi" / "skills",
+        work_dir / ".sanad" / "skills",
         work_dir / ".claude" / "skills",
         work_dir / ".codex" / "skills",
     )

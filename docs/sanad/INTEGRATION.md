@@ -114,9 +114,12 @@ have to reconcile a handful of small, deliberate edits.
 | `src/kimi_cli/ui/shell/usage.py` | governed "no model" hint in `/usage` |
 | `src/kimi_cli/share.py` | data dir default `~/.kimi` → `~/.sanad` (`get_share_dir`; `KIMI_SHARE_DIR` env name kept for test compat) |
 | `src/kimi_cli/tools/plan/heroes.py` | plans dir → `~/.sanad/plans` |
+| `src/kimi_cli/skill/__init__.py` | brand skill search dir `.kimi/skills` → `.sanad/skills` (`.claude`/`.codex` kept) |
 | `pyproject.toml` | `[project.scripts]` `sanad = …`; deps `keyring`, `httpx` |
 | `tests/acp/test_protocol_v1.py` | asserts the rebranded ACP `agent_info.name` |
 | `tests/core/test_startup_imports.py` | asserts the rebranded `--version` prefix |
+| `tests/core/test_skill.py` | brand skill dir → `.sanad/skills` |
+| `tests/core/test_skills_prompt.py` | brand skill dir → `.sanad/skills` |
 
 Verify the surface hasn't drifted before/after a rebase:
 
@@ -126,7 +129,7 @@ git diff --stat <base>...HEAD \
      ':(exclude)docs/sanad' ':(exclude)NOTICE' ':(exclude)pyproject.toml' ':(exclude)uv.lock'
 ```
 
-Anything in that output beyond the nine `src/…` files and two `tests/…` files
+Anything in that output beyond the ten `src/…` files and four `tests/…` files
 above is unplanned drift — fold it back into `sanad/` or document why.
 
 ## Phased plan

@@ -138,7 +138,7 @@ async def test_discovered_skills_carry_scope(tmp_path, monkeypatch):
     )
 
     home_dir = tmp_path / "home"
-    user_brand = home_dir / ".kimi" / "skills"
+    user_brand = home_dir / ".sanad" / "skills"
     user_brand.mkdir(parents=True)
     (user_brand / "user-skill").mkdir()
     (user_brand / "user-skill" / "SKILL.md").write_text(
@@ -149,7 +149,7 @@ async def test_discovered_skills_carry_scope(tmp_path, monkeypatch):
     monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path / "share"))
 
     work_dir = tmp_path / "project"
-    proj_brand = work_dir / ".kimi" / "skills"
+    proj_brand = work_dir / ".sanad" / "skills"
     proj_brand.mkdir(parents=True)
     (proj_brand / "proj-skill").mkdir()
     (proj_brand / "proj-skill" / "SKILL.md").write_text(
@@ -199,7 +199,7 @@ async def test_end_to_end_project_override_renders_correctly(tmp_path, monkeypat
 
     # 2. User scope (via monkeypatched home dir)
     home_dir = tmp_path / "home"
-    user_brand = home_dir / ".kimi" / "skills"
+    user_brand = home_dir / ".sanad" / "skills"
     user_brand.mkdir(parents=True)
     (user_brand / "foo").mkdir()
     (user_brand / "foo" / "SKILL.md").write_text(
@@ -211,7 +211,7 @@ async def test_end_to_end_project_override_renders_correctly(tmp_path, monkeypat
 
     # 3. Project scope
     work_dir = tmp_path / "project"
-    proj_brand = work_dir / ".kimi" / "skills"
+    proj_brand = work_dir / ".sanad" / "skills"
     proj_brand.mkdir(parents=True)
     (proj_brand / "foo").mkdir()
     proj_foo_md = proj_brand / "foo" / "SKILL.md"
