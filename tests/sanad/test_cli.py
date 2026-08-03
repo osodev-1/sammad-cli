@@ -79,6 +79,32 @@ def test_whoami_shows_identity(monkeypatch):
     assert "owner" in result.output
 
 
+def test_usage_shows_summary(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/usage"
+        return ok(
+            {
+                "used": 42,
+                "limit": 200,
+                "periodEnd": "2026-09-01T00:00:00Z",
+                "byModel": [{"alias": "kimi-k2.7-code", "requests": 30}],
+            }
+        )
+
+    install_session(monkeypatch, handler, token="sess-xyz")
+    result = runner.invoke(cli_mod.sanad_app, ["usage"])
+    assert result.exit_code == 0, result.output
+    assert "42 / 200" in result.output
+    assert "kimi-k2.7-code" in result.output
+
+
+def test_usage_not_logged_in_exits_nonzero(monkeypatch):
+    install_session(monkeypatch, lambda req: ok({}))
+    result = runner.invoke(cli_mod.sanad_app, ["usage"])
+    assert result.exit_code == 1
+    assert "not signed in" in result.output.lower()
+
+
 def test_logout_clears_and_reports(monkeypatch):
     session = install_session(monkeypatch, lambda req: httpx.Response(204), token="sess-xyz")
     result = runner.invoke(cli_mod.sanad_app, ["logout"])

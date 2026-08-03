@@ -152,6 +152,28 @@ def whoami() -> None:
 
 
 @sanad_app.command()
+def usage() -> None:
+    """Show this period's usage against your plan's quota."""
+    console = Console()
+    session = _build_session()
+    try:
+        summary = session.usage()
+    except SanadError as exc:
+        _fail(console, exc)
+    finally:
+        session.close()
+
+    console.print("used:  ", style=MUTED, end="")
+    console.print(f"{summary.used} / {summary.limit} requests", style=SAND)
+    if summary.period_end:
+        console.print("resets:", style=MUTED, end="")
+        console.print(f" {summary.period_end}", style=SAND)
+    for m in summary.by_model:
+        console.print(f"  {m.alias:<15} ", style=MUTED, end="")
+        console.print(f"{m.requests} req", style=SAND)
+
+
+@sanad_app.command()
 def logout() -> None:
     """Revoke the current session and clear the local credential."""
     console = Console()

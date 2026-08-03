@@ -229,9 +229,10 @@ The contract already exists, which makes this tractable:
 ## 11. Open questions / deferred
 
 - **Free-tier quota numbers** (requests or tokens/month) → decide in #2 (billing).
-- **Usage endpoint for the CLI:** the dashboard widget is day-one; exposing usage to a
-  `sanad usage` command needs a small CLI addition + a `GET /api/v1/usage` endpoint — track
-  as a minor follow-on, not part of #1's frozen contract.
+- **Usage endpoint:** the `sanad usage` command + its `GET /api/v1/usage` client are **now
+  implemented in the CLI**, so the backend must serve `GET /api/v1/usage` (bearer-authed)
+  returning `{ used, limit, periodEnd, byModel: [{ alias, requests, tokensIn, tokensOut }] }`.
+  Shape + metering source in Spec #3.
 - **Enterprise org onboarding** (who subscribes an SSO org, seat self-service) → #2.
 - **CLI rename `sammad` → `sanad`** and the `https://sanadcode.com` default base URL are
   **already done** in the CLI (commit `59490b5e`) — no backend action needed.

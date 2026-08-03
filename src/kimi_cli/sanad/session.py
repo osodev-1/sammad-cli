@@ -18,7 +18,7 @@ from kimi_cli.config import Config, save_config
 from kimi_cli.sanad.client import SanadClient
 from kimi_cli.sanad.errors import NotLoggedIn, SanadError
 from kimi_cli.sanad.keychain import KeychainStore
-from kimi_cli.sanad.models import DevicePoll, DeviceStart, Me, MintResponse
+from kimi_cli.sanad.models import DevicePoll, DeviceStart, Me, MintResponse, UsageSummary
 from kimi_cli.sanad.provider import PROVIDER_NAME, build_model, build_provider
 from kimi_cli.sanad.settings import SanadSettings
 
@@ -83,6 +83,9 @@ class SanadSession:
 
     def whoami(self) -> Me:
         return self._client.me(self.require_token())
+
+    def usage(self) -> UsageSummary:
+        return self._client.usage(self.require_token())
 
     def logout(self) -> None:
         """Best-effort server-side logout, then clear the local token.

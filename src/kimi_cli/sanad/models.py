@@ -74,3 +74,19 @@ class MintResponse(_Camel):
     # starts on and must match one of the entries' ``name``.
     model_settings: list[ModelSettings]
     default_model_alias: str
+
+
+class UsageByModel(_Camel):
+    alias: str
+    requests: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+
+
+class UsageSummary(_Camel):
+    """Current-period usage against the org's plan quota (requests-based)."""
+
+    used: int
+    limit: int
+    period_end: str | None = None
+    by_model: list[UsageByModel] = []

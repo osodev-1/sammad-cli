@@ -12,7 +12,7 @@ from collections.abc import Callable
 import httpx
 
 from kimi_cli.sanad.errors import SanadError
-from kimi_cli.sanad.models import DevicePoll, DeviceStart, Me, MintResponse
+from kimi_cli.sanad.models import DevicePoll, DeviceStart, Me, MintResponse, UsageSummary
 from kimi_cli.sanad.settings import SanadSettings
 
 
@@ -91,6 +91,11 @@ class SanadClient:
 
     def logout(self, session_token: str) -> None:
         self._request("POST", "/api/v1/auth/logout", session_token=session_token)
+
+    def usage(self, session_token: str) -> UsageSummary:
+        return UsageSummary.model_validate(
+            self._request("GET", "/api/v1/usage", session_token=session_token)
+        )
 
     # -- runtime tokens ---------------------------------------------------
     def mint_runtime_token(self, session_token: str) -> MintResponse:

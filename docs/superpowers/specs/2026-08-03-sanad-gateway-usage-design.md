@@ -74,6 +74,10 @@ Authorization: Bearer <runtimeToken>
   backs both the quota check (step 3) and the Spec #1 dashboard widget / the `sanad usage`
   command.
 - Quota window = subscription `currentPeriodEnd` (monthly). Reset implicitly by period.
+- **CLI/dashboard read API:** the control plane serves `GET /api/v1/usage` (bearer session
+  token) returning the current-period summary that the shipped `sanad usage` command and the
+  dashboard widget render: `{ used, limit, periodEnd, byModel: [{ alias, requests, tokensIn,
+  tokensOut }] }` (`used`/`limit` in requests; `used` = sum of `byModel[].requests`).
 
 ## 6. Config the gateway holds
 - Azure Foundry endpoint + credentials (API key or managed identity).

@@ -89,6 +89,23 @@ def test_logout_clears_local_token_even_if_server_fails() -> None:
     assert kc.token is None
 
 
+def test_usage_requires_token_and_delegates() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/usage"
+        return ok({"used": 5, "limit": 200, "periodEnd": None, "byModel": []})
+
+    session, _ = make_session(handler, token="sess-xyz")
+    summary = session.usage()
+    assert summary.used == 5
+    assert summary.limit == 200
+
+
+def test_usage_without_token_raises_not_logged_in() -> None:
+    session, _ = make_session(lambda req: ok({}))
+    with pytest.raises(NotLoggedIn):
+        session.usage()
+
+
 def test_configure_run_registers_every_alias_and_sets_default(tmp_path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/runtime-tokens"

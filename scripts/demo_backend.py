@@ -7,6 +7,7 @@ For hands-on testing of the sanad CLI without the full TypeScript backend
   POST /api/v1/auth/device/start   -> device code (auto-approves on poll)
   POST /api/v1/auth/device/poll    -> completes immediately with a session token
   GET  /api/v1/auth/me             -> demo identity
+  GET  /api/v1/usage               -> demo usage summary
   POST /api/v1/auth/logout         -> 204
   POST /api/v1/runtime-tokens      -> mint (gateway_base_url points back here)
   POST /api/v1/runtime-tokens/renew  -> new expiry
@@ -76,6 +77,29 @@ class Handler(BaseHTTPRequestHandler):
                     "membershipId": "demo-membership",
                     "role": "owner",
                     "permissions": ["agent.run"],
+                }
+            )
+        elif self.path == "/api/v1/usage":
+            # Illustrative freemium usage against a free-tier quota (sandbox only).
+            self._data(
+                {
+                    "used": 42,
+                    "limit": 200,
+                    "periodEnd": _iso(20 * 24 * 3600),
+                    "byModel": [
+                        {
+                            "alias": "kimi-k2.7-code",
+                            "requests": 30,
+                            "tokensIn": 120000,
+                            "tokensOut": 45000,
+                        },
+                        {
+                            "alias": "gpt-5.3-codex",
+                            "requests": 12,
+                            "tokensIn": 60000,
+                            "tokensOut": 20000,
+                        },
+                    ],
                 }
             )
         else:

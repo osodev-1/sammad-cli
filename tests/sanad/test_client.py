@@ -112,3 +112,33 @@ def test_mint_parses_model_settings_and_gateway():
 def test_logout_204_is_none():
     client = make_client(lambda req: httpx.Response(204))
     assert client.logout("sess") is None
+
+
+def test_usage_parses_summary():
+    def handler(req):
+        assert req.url.path == "/api/v1/usage"
+        assert req.headers["authorization"] == "Bearer sess-xyz"
+        return ok(
+            {
+                "used": 42,
+                "limit": 200,
+                "periodEnd": "2026-09-01T00:00:00Z",
+                "byModel": [
+                    {
+                        "alias": "kimi-k2.7-code",
+                        "requests": 30,
+                        "tokensIn": 1000,
+                        "tokensOut": 2000,
+                    },
+                    {"alias": "gpt-5.3-codex", "requests": 12},
+                ],
+            }
+        )
+
+    summary = make_client(handler).usage("sess-xyz")
+    assert summary.used == 42
+    assert summary.limit == 200
+    assert summary.period_end == "2026-09-01T00:00:00Z"
+    assert [m.alias for m in summary.by_model] == ["kimi-k2.7-code", "gpt-5.3-codex"]
+    assert summary.by_model[0].requests == 30
+    assert summary.by_model[1].tokens_in == 0  # omitted fields default to 0
