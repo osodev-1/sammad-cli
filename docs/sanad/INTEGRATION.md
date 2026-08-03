@@ -106,12 +106,14 @@ have to reconcile a handful of small, deliberate edits.
 | file | change |
 |---|---|
 | `src/kimi_cli/constant.py` | `NAME = "sanad"` + `UPSTREAM_NAME`; user agent → `sanad/…` |
-| `src/kimi_cli/cli/__init__.py` | process title + `--version` string; nothing else |
+| `src/kimi_cli/cli/__init__.py` | process title + `--version` string; `~/.sanad` in the config-path help |
 | `src/kimi_cli/__main__.py` | `--version` string |
 | `src/kimi_cli/app.py` | drop Moonshot `/login`/`/upgrade` welcome tips; governed "Model not set" hint |
 | `src/kimi_cli/ui/shell/__init__.py` | welcome logo/header/border from `sanad.branding`; suppress `/login`, `/logout`, and the `setup` alias (via `sanad.shell`); governed re-auth / "no model" hints |
 | `src/kimi_cli/ui/shell/slash.py` | governed "no models" hint in `/model` |
 | `src/kimi_cli/ui/shell/usage.py` | governed "no model" hint in `/usage` |
+| `src/kimi_cli/share.py` | data dir default `~/.kimi` → `~/.sanad` (`get_share_dir`; `KIMI_SHARE_DIR` env name kept for test compat) |
+| `src/kimi_cli/tools/plan/heroes.py` | plans dir → `~/.sanad/plans` |
 | `pyproject.toml` | `[project.scripts]` `sanad = …`; deps `keyring`, `httpx` |
 | `tests/acp/test_protocol_v1.py` | asserts the rebranded ACP `agent_info.name` |
 | `tests/core/test_startup_imports.py` | asserts the rebranded `--version` prefix |
@@ -124,7 +126,7 @@ git diff --stat <base>...HEAD \
      ':(exclude)docs/sanad' ':(exclude)NOTICE' ':(exclude)pyproject.toml' ':(exclude)uv.lock'
 ```
 
-Anything in that output beyond the seven `src/…` files and two `tests/…` files
+Anything in that output beyond the nine `src/…` files and two `tests/…` files
 above is unplanned drift — fold it back into `sanad/` or document why.
 
 ## Phased plan

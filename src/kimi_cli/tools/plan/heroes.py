@@ -5,7 +5,9 @@ from __future__ import annotations
 import secrets
 from pathlib import Path
 
-PLANS_DIR = Path.home() / ".kimi" / "plans"
+from kimi_cli.constant import NAME
+
+PLANS_DIR = Path.home() / f".{NAME}" / "plans"
 
 HERO_NAMES: list[str] = [
     # --- Marvel ---
