@@ -221,7 +221,7 @@ The contract already exists, which makes this tractable:
   exact shapes — build a contract-test suite that asserts each endpoint matches.
 - **Unit:** the device-flow state machine, entitlement/seat checks, token issue/renew/revoke.
 - **Integration:** Clerk **test mode** for sign-in; Stripe test mode for billing (#2).
-- **E2E:** the CLI repo's gated `tests/sammad/test_integration.py` already drives a real
+- **E2E:** the CLI repo's gated `tests/sanad/test_integration.py` already drives a real
   `sanad login` → mint → streamed turn → revoke against a demo backend — **point it at a
   Vercel preview deploy** and it becomes the live end-to-end test. `test_smoke.py` covers a
   real gateway turn.
@@ -233,5 +233,5 @@ The contract already exists, which makes this tractable:
   `sanad usage` command needs a small CLI addition + a `GET /api/v1/usage` endpoint — track
   as a minor follow-on, not part of #1's frozen contract.
 - **Enterprise org onboarding** (who subscribes an SSO org, seat self-service) → #2.
-- **CLI rename `sammad` → `sanad`** and default base URL → separate CLI change, already
-  scoped, independent of this backend work.
+- **CLI rename `sammad` → `sanad`** and the `https://sanadcode.com` default base URL are
+  **already done** in the CLI (commit `59490b5e`) — no backend action needed.

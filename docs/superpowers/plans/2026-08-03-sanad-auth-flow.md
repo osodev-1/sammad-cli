@@ -375,7 +375,7 @@ export const ALIAS_TO_DEPLOYMENT: Record<string,string> = {
 
 - [ ] **Step 1: Oracle suite.** For every frozen endpoint, assert the response matches the spec §4 shapes with a Zod schema mirroring the CLI's models (`DeviceStart`, `DevicePoll`, `Me`, `MintResponse`). This is the regression guard that the CLI will keep working. Run → PASS.
 
-- [ ] **Step 2: Live E2E note (README).** Document: deploy a Vercel preview, set `SANAD_API_BASE_URL=<preview-url>` and run the CLI repo's gated `tests/sammad/test_integration.py` against it (drives real `sanad login` → mint → stream → revoke). Also document required env: `DATABASE_URL`, Clerk keys, `GATEWAY_BASE_URL`, `APP_URL`, Clerk webhook secret.
+- [ ] **Step 2: Live E2E note (README).** Document: deploy a Vercel preview, set `SANAD_API_BASE_URL=<preview-url>` and run the CLI repo's gated `tests/sanad/test_integration.py` against it (drives real `sanad login` → mint → stream → revoke). Also document required env: `DATABASE_URL`, Clerk keys, `GATEWAY_BASE_URL`, `APP_URL`, Clerk webhook secret.
 
 - [ ] **Step 3: Commit.** `git commit -m "test: contract oracle + e2e wiring docs"`.
 
