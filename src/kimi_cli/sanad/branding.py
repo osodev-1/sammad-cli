@@ -1,6 +1,6 @@
 """sanad brand palette and banner.
 
-The shell welcome shows the "sanad" wordmark (a figlet logotype) in gold ink on
+The shell welcome shows the "sanad" wordmark (a figlet logotype) in white on
 near-black; the leaning-figure pun from the app icon stays in the icon, not the
 ASCII art. Kept here as data so the skin and the auth commands share one source.
 """
@@ -22,8 +22,9 @@ SAND = "#e6cf9a"
 RUST = "#c85f27"
 INK = "#141210"
 MUTED = "#8a7f6d"
+WHITE = "#ffffff"
 
-# The shell welcome wordmark: the "sanad" logotype (a figlet rendering) in gold
+# The shell welcome wordmark: the "sanad" logotype (a figlet rendering) in white
 # ink. The leaning-figure pun from the app icon reads as noise at ASCII scale, so
 # the terminal uses the clean wordmark and the icon carries the figure. Rendered
 # via Rich markup; wrapping each line keeps the ``\`` and backtick glyphs literal
@@ -34,7 +35,7 @@ _WORDMARK = (
     "(_-</ _` | ' \\/ _` / _` |\n"
     "/__/\\__,_|_||_\\__,_\\__,_|"
 )
-SHELL_LOGO = "\n".join(f"[{GOLD}]{_line}[/]" for _line in _WORDMARK.split("\n"))
+SHELL_LOGO = "\n".join(f"[{WHITE}]{_line}[/]" for _line in _WORDMARK.split("\n"))
 
 WELCOME = f"Welcome to {NAME}!"
 

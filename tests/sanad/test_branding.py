@@ -18,14 +18,14 @@ def test_product_name_is_rebranded_with_upstream_attribution():
     assert branding.NAME == "sanad"
 
 
-def test_shell_logo_is_the_gold_sanad_wordmark():
-    # The welcome logo is the "sanad" figlet wordmark, rendered in brand gold as
+def test_shell_logo_is_the_white_sanad_wordmark():
+    # The welcome logo is the "sanad" figlet wordmark, rendered in white as
     # valid Rich markup (four rows, non-empty).
     text = Text.from_markup(branding.SHELL_LOGO)
     rows = text.plain.split("\n")
     assert len(rows) == 4
     assert text.plain.strip()  # renders non-empty
-    assert branding.GOLD in branding.SHELL_LOGO  # painted in the brand gold
+    assert branding.WHITE in branding.SHELL_LOGO  # painted in white
     assert branding.WELCOME == "Welcome to sanad!"
 
 
