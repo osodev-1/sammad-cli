@@ -1,6 +1,6 @@
 """Governance shims for the interactive shell.
 
-A governed sammad session authenticates only through ``sammad login`` (the
+A governed sanad session authenticates only through ``sanad login`` (the
 brokered Entra device flow) and routes every model call through the gateway.
 Upstream's in-shell provider-OAuth commands — ``/login``, ``/logout``, and the
 ``setup`` alias — target Moonshot's auth (``auth.kimi.com``) and would let a user

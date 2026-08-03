@@ -731,7 +731,7 @@ class KimiCLI:
             welcome_info.append(
                 WelcomeInfoItem(
                     name="Model",
-                    value="not set — start a session with 'sammad run'",
+                    value="not set — start a session with 'sanad run'",
                     level=WelcomeInfoItem.Level.WARN,
                 )
             )
@@ -754,9 +754,9 @@ class KimiCLI:
                     level=WelcomeInfoItem.Level.INFO,
                 )
             )
-        # sammad fork: upstream added a "/login to use Kimi for Coding" tip and a
+        # sanad fork: upstream added a "/login to use Kimi for Coding" tip and a
         # "/upgrade to the new Kimi Code" nudge here. Both point at Moonshot flows
-        # that do not apply to a governed sammad deployment, so they are removed.
+        # that do not apply to a governed sanad deployment, so they are removed.
         async with self._env():
             shell = Shell(self._soul, welcome_info=welcome_info, prefill_text=prefill_text)
             return await shell.run(command)

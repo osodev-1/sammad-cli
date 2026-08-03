@@ -1,5 +1,5 @@
-from kimi_cli.sammad.models import MintResponse
-from kimi_cli.sammad.provider import build_model, build_provider
+from kimi_cli.sanad.models import MintResponse
+from kimi_cli.sanad.provider import build_model, build_provider
 
 MINT = MintResponse.model_validate(
     {
@@ -35,4 +35,4 @@ def test_build_model_maps_capabilities_and_context():
     assert m.max_context_size == 128000
     # "thinking" maps through; "tool_use" is dropped (inherent, not a capability).
     assert m.capabilities == {"thinking"}
-    assert m.provider == "sammad-gateway"
+    assert m.provider == "sanad-gateway"

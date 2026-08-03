@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""A zero-dependency local stand-in for the sammad control plane + gateway.
+"""A zero-dependency local stand-in for the sanad control plane + gateway.
 
-For hands-on testing of the sammad CLI without the full TypeScript backend
+For hands-on testing of the sanad CLI without the full TypeScript backend
 (no Postgres/Redis/docker). It implements just the endpoints the CLI calls:
 
   POST /api/v1/auth/device/start   -> device code (auto-approves on poll)
@@ -17,7 +17,7 @@ This is a DEMO fake: it does no real auth and issues non-secret tokens. It is
 not the product and must never be used outside a local sandbox.
 
     python scripts/demo_backend.py            # listens on 127.0.0.1:4101
-    SAMMAD_DEMO_PORT=4200 python scripts/demo_backend.py
+    SANAD_DEMO_PORT=4200 python scripts/demo_backend.py
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-PORT = int(os.environ.get("SAMMAD_DEMO_PORT", "4101"))
+PORT = int(os.environ.get("SANAD_DEMO_PORT", "4101"))
 HOST = "127.0.0.1"
 
 
@@ -36,7 +36,7 @@ def _iso(delta_seconds: int = 0) -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "sammad-demo/0"
+    server_version = "sanad-demo/0"
 
     # -- helpers ----------------------------------------------------------
     def _send(self, status: int, payload: dict | None) -> None:
@@ -87,9 +87,9 @@ class Handler(BaseHTTPRequestHandler):
             self._data(
                 {
                     "deviceAuthId": "demo-device",
-                    "userCode": "SAMMAD-DEMO",
+                    "userCode": "SANAD-DEMO",
                     "verificationUri": f"http://{HOST}:{PORT}/device",
-                    "verificationUriComplete": f"http://{HOST}:{PORT}/device?code=SAMMAD-DEMO",
+                    "verificationUriComplete": f"http://{HOST}:{PORT}/device?code=SANAD-DEMO",
                     "expiresAt": _iso(600),
                     "pollIntervalSeconds": 1,
                 },
@@ -150,7 +150,7 @@ class Handler(BaseHTTPRequestHandler):
     def _stream_completion(self, model: str) -> None:
         chunks = [
             {"delta": {"role": "assistant"}},
-            {"delta": {"content": "Hello from the sammad demo gateway — "}},
+            {"delta": {"content": "Hello from the sanad demo gateway — "}},
             {"delta": {"content": "your governed session is working."}},
             {"delta": {}, "finish_reason": "stop"},
         ]
@@ -172,7 +172,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"sammad demo backend on http://{HOST}:{PORT}  (Ctrl-C to stop)")
+    print(f"sanad demo backend on http://{HOST}:{PORT}  (Ctrl-C to stop)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

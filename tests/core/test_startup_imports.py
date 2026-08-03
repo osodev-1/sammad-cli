@@ -145,7 +145,7 @@ with redirect_stdout(stdout):
     exit_code = main(["--version"])
 
 assert exit_code == 0
-assert stdout.getvalue().startswith("sammad, ")
+assert stdout.getvalue().startswith("sanad, ")
 assert "kimi_cli.cli" not in sys.modules
 print("ok")
 """

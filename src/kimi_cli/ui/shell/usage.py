@@ -40,7 +40,7 @@ async def usage(app: Shell, args: str):
     assert isinstance(app.soul, KimiSoul)
     if app.soul.runtime.llm is None:
         console.print(
-            "[red]No model configured for this session. Restart with [bold]sammad run[/bold].[/red]"
+            "[red]No model configured for this session. Restart with [bold]sanad run[/bold].[/red]"
         )
         return
 

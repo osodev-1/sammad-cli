@@ -8,11 +8,11 @@ import httpx
 import pytest
 
 from kimi_cli.config import get_default_config
-from kimi_cli.sammad.client import SammadClient
-from kimi_cli.sammad.errors import NotLoggedIn, SammadError
-from kimi_cli.sammad.models import MintResponse
-from kimi_cli.sammad.session import RuntimeTokenRenewer, SammadSession
-from kimi_cli.sammad.settings import SammadSettings
+from kimi_cli.sanad.client import SanadClient
+from kimi_cli.sanad.errors import NotLoggedIn, SanadError
+from kimi_cli.sanad.models import MintResponse
+from kimi_cli.sanad.session import RuntimeTokenRenewer, SanadSession
+from kimi_cli.sanad.settings import SanadSettings
 
 BASE = "http://cp.test"
 
@@ -35,10 +35,10 @@ def ok(data: dict) -> httpx.Response:
     return httpx.Response(200, json={"data": data, "meta": {"requestId": "r"}})
 
 
-def make_session(handler, *, token: str | None = None) -> tuple[SammadSession, FakeKeychain]:
-    client = SammadClient(SammadSettings(api_base_url=BASE), transport=httpx.MockTransport(handler))
+def make_session(handler, *, token: str | None = None) -> tuple[SanadSession, FakeKeychain]:
+    client = SanadClient(SanadSettings(api_base_url=BASE), transport=httpx.MockTransport(handler))
     kc = FakeKeychain(token)
-    return SammadSession(client=client, keychain=kc), kc  # type: ignore[arg-type]
+    return SanadSession(client=client, keychain=kc), kc  # type: ignore[arg-type]
 
 
 def test_login_stores_session_token() -> None:
@@ -125,7 +125,7 @@ def test_configure_run_registers_every_alias_and_sets_default(tmp_path) -> None:
     # Every alias becomes its own model entry, keyed by alias name, all pointing
     # at the single gateway provider — so `/model <alias>` works in-session.
     for alias in ("gpt-5.3-codex", "kimi-k2.7-code", "codestral"):
-        assert config.models[alias].provider == "sammad-gateway"
+        assert config.models[alias].provider == "sanad-gateway"
         assert config.models[alias].model == alias
     # The default is the named alias, even though it is not first in the list.
     assert config.default_model == "kimi-k2.7-code"
@@ -162,7 +162,7 @@ def _mint(expires_minutes: int = 10, absolute_hours: int = 24) -> MintResponse:
 
 
 class FakeRenewClient:
-    def __init__(self, new_expiry: str | None = None, error: SammadError | None = None) -> None:
+    def __init__(self, new_expiry: str | None = None, error: SanadError | None = None) -> None:
         self.new_expiry = new_expiry
         self.error = error
         self.calls = 0
@@ -214,8 +214,8 @@ def test_renew_once_stops_at_absolute_cap_without_calling() -> None:
 
 
 def test_renew_once_stops_on_nonretryable_error() -> None:
-    errors: list[SammadError] = []
-    client = FakeRenewClient(error=SammadError("revoked", "gone", status=401, retryable=False))
+    errors: list[SanadError] = []
+    client = FakeRenewClient(error=SanadError("revoked", "gone", status=401, retryable=False))
     r = RuntimeTokenRenewer(
         client,  # type: ignore[arg-type]
         "sess",

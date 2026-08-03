@@ -1,6 +1,6 @@
-"""End-to-end against the live sammad backend (the `pnpm demo` stack).
+"""End-to-end against the live sanad backend (the `pnpm demo` stack).
 
-Gated on SAMMAD_DEMO_API_BASE_URL so it never runs in normal CI. Proves the
+Gated on SANAD_DEMO_API_BASE_URL so it never runs in normal CI. Proves the
 full client path — device flow, session, runtime-token mint, a streamed turn
 through the gateway, and revoke/logout — against real services.
 """
@@ -13,17 +13,17 @@ import re
 import httpx
 import pytest
 
-from kimi_cli.sammad.client import SammadClient
-from kimi_cli.sammad.errors import SammadError
-from kimi_cli.sammad.provider import build_model, build_provider
-from kimi_cli.sammad.settings import SammadSettings
+from kimi_cli.sanad.client import SanadClient
+from kimi_cli.sanad.errors import SanadError
+from kimi_cli.sanad.provider import build_model, build_provider
+from kimi_cli.sanad.settings import SanadSettings
 
-API = os.environ.get("SAMMAD_DEMO_API_BASE_URL")
-pytestmark = pytest.mark.skipif(not API, reason="SAMMAD_DEMO_API_BASE_URL not set")
+API = os.environ.get("SANAD_DEMO_API_BASE_URL")
+pytestmark = pytest.mark.skipif(not API, reason="SANAD_DEMO_API_BASE_URL not set")
 
 
 def test_full_flow_against_demo_backend():
-    client = SammadClient(SammadSettings(api_base_url=API))
+    client = SanadClient(SanadSettings(api_base_url=API))
 
     # device flow — the demo IdP auto-approves
     start = client.device_start()
@@ -55,7 +55,7 @@ def test_full_flow_against_demo_backend():
             json={
                 "model": model.model,
                 "stream": True,
-                "messages": [{"role": "user", "content": "hello from the sammad fork"}],
+                "messages": [{"role": "user", "content": "hello from the sanad fork"}],
             },
             timeout=15,
         )
@@ -69,5 +69,5 @@ def test_full_flow_against_demo_backend():
     # revoke + logout close everything
     client.revoke_runtime_token_family(token, mint.family_id)
     client.logout(token)
-    with pytest.raises(SammadError):
+    with pytest.raises(SanadError):
         client.me(token)

@@ -26,11 +26,11 @@ from kimi_cli import logger
 from kimi_cli.background import list_task_views
 from kimi_cli.llm import model_display_name
 from kimi_cli.notifications import NotificationManager, NotificationWatcher
-from kimi_cli.sammad.branding import GOLD as _BRAND_BORDER
-from kimi_cli.sammad.branding import NAME as _BRAND_NAME
-from kimi_cli.sammad.branding import SHELL_LOGO as _LOGO
-from kimi_cli.sammad.branding import WELCOME as _WELCOME
-from kimi_cli.sammad.shell import suppress_governed_commands
+from kimi_cli.sanad.branding import GOLD as _BRAND_BORDER
+from kimi_cli.sanad.branding import NAME as _BRAND_NAME
+from kimi_cli.sanad.branding import SHELL_LOGO as _LOGO
+from kimi_cli.sanad.branding import WELCOME as _WELCOME
+from kimi_cli.sanad.shell import suppress_governed_commands
 from kimi_cli.soul import LLMNotSet, LLMNotSupported, MaxStepsReached, RunCancelled, Soul, run_soul
 from kimi_cli.soul.kimisoul import FLOW_COMMAND_PREFIX, KimiSoul
 from kimi_cli.ui.shell import update as _update_mod
@@ -208,9 +208,9 @@ class Shell:
         self._exit_after_run = False
         soul_slash_commands = list(soul.available_slash_commands)
         shell_slash_commands = shell_slash_registry.list_commands()
-        # sammad(governance): drop upstream's Moonshot-OAuth slash commands
+        # sanad(governance): drop upstream's Moonshot-OAuth slash commands
         # (/login, /logout, and the `setup` alias) — a governed session signs in
-        # via `sammad login`, never in-shell provider OAuth. See sammad.shell.
+        # via `sanad login`, never in-shell provider OAuth. See sanad.shell.
         soul_slash_commands = suppress_governed_commands(soul_slash_commands)
         shell_slash_commands = suppress_governed_commands(shell_slash_commands)
         self._available_slash_commands: dict[str, SlashCommand[Any]] = {
@@ -976,7 +976,7 @@ class Shell:
             logger.exception("LLM not set:")
             console.print(
                 "[red]No model configured for this session. "
-                "Restart with [bold]sammad run[/bold].[/red]"
+                "Restart with [bold]sanad run[/bold].[/red]"
             )
         except LLMNotSupported as e:
             # actually unsupported input/mode should already be blocked by prompt session
@@ -987,8 +987,8 @@ class Shell:
             if isinstance(e, APIStatusError) and e.status_code == 401:
                 console.print(
                     "[red]Authorization failed. Your session may have expired.[/red]\n"
-                    "[dim]Run [bold]sammad login[/bold], then start a new session with "
-                    "[bold]sammad run[/bold].[/dim]\n"
+                    "[dim]Run [bold]sanad login[/bold], then start a new session with "
+                    "[bold]sanad run[/bold].[/dim]\n"
                     f"[dim]Server: {e}[/dim]"
                 )
             elif isinstance(e, APIStatusError) and e.status_code == 402:

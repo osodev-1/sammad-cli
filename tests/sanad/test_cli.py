@@ -1,24 +1,24 @@
-"""Command tests for the sammad Typer app (fake session, no network)."""
+"""Command tests for the sanad Typer app (fake session, no network)."""
 
 from __future__ import annotations
 
 import httpx
 from typer.testing import CliRunner
 
-from kimi_cli.sammad import cli as cli_mod
-from kimi_cli.sammad.client import SammadClient
-from kimi_cli.sammad.session import SammadSession
-from kimi_cli.sammad.settings import SammadSettings
-from tests.sammad.test_session import FakeKeychain, ok
+from kimi_cli.sanad import cli as cli_mod
+from kimi_cli.sanad.client import SanadClient
+from kimi_cli.sanad.session import SanadSession
+from kimi_cli.sanad.settings import SanadSettings
+from tests.sanad.test_session import FakeKeychain, ok
 
 runner = CliRunner()
 
 
 def install_session(monkeypatch, handler, *, token=None):
-    client = SammadClient(
-        SammadSettings(api_base_url="http://cp.test"), transport=httpx.MockTransport(handler)
+    client = SanadClient(
+        SanadSettings(api_base_url="http://cp.test"), transport=httpx.MockTransport(handler)
     )
-    session = SammadSession(client=client, keychain=FakeKeychain(token))  # type: ignore[arg-type]
+    session = SanadSession(client=client, keychain=FakeKeychain(token))  # type: ignore[arg-type]
     monkeypatch.setattr(cli_mod, "_build_session", lambda: session)
     return session
 
@@ -46,7 +46,7 @@ def test_login_prints_prompt_and_success(monkeypatch):
         )
 
     session = install_session(monkeypatch, handler)
-    result = runner.invoke(cli_mod.sammad_app, ["login"])
+    result = runner.invoke(cli_mod.sanad_app, ["login"])
 
     assert result.exit_code == 0, result.output
     assert "WXYZ" in result.output
@@ -56,7 +56,7 @@ def test_login_prints_prompt_and_success(monkeypatch):
 
 def test_whoami_not_logged_in_exits_nonzero(monkeypatch):
     install_session(monkeypatch, lambda req: ok({}))
-    result = runner.invoke(cli_mod.sammad_app, ["whoami"])
+    result = runner.invoke(cli_mod.sanad_app, ["whoami"])
     assert result.exit_code == 1
     assert "not signed in" in result.output.lower()
 
@@ -74,14 +74,14 @@ def test_whoami_shows_identity(monkeypatch):
         )
 
     install_session(monkeypatch, handler, token="sess-xyz")
-    result = runner.invoke(cli_mod.sammad_app, ["whoami"])
+    result = runner.invoke(cli_mod.sanad_app, ["whoami"])
     assert result.exit_code == 0, result.output
     assert "owner" in result.output
 
 
 def test_logout_clears_and_reports(monkeypatch):
     session = install_session(monkeypatch, lambda req: httpx.Response(204), token="sess-xyz")
-    result = runner.invoke(cli_mod.sammad_app, ["logout"])
+    result = runner.invoke(cli_mod.sanad_app, ["logout"])
     assert result.exit_code == 0, result.output
     assert "Signed out" in result.output
     assert session.stored_token() is None
@@ -100,21 +100,21 @@ def test_doctor_reports_valid_session(monkeypatch):
         )
 
     install_session(monkeypatch, handler, token="sess-xyz")
-    result = runner.invoke(cli_mod.sammad_app, ["doctor"])
+    result = runner.invoke(cli_mod.sanad_app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "session valid" in result.output
 
 
 def test_doctor_when_not_signed_in(monkeypatch):
     install_session(monkeypatch, lambda req: ok({}))
-    result = runner.invoke(cli_mod.sammad_app, ["doctor"])
+    result = runner.invoke(cli_mod.sanad_app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "not signed in" in result.output.lower()
 
 
 def test_run_not_logged_in_fails_fast(monkeypatch):
     install_session(monkeypatch, lambda req: ok({}))
-    result = runner.invoke(cli_mod.sammad_app, ["run"])
+    result = runner.invoke(cli_mod.sanad_app, ["run"])
     assert result.exit_code == 1
     assert "not signed in" in result.output.lower()
 

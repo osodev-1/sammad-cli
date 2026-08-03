@@ -196,7 +196,7 @@ async def model(app: Shell, args: str):
     if not config.models:
         console.print(
             "[yellow]No models available for this session. "
-            "Restart with [bold]sammad run[/bold] (or run [bold]sammad doctor[/bold]).[/yellow]"
+            "Restart with [bold]sanad run[/bold] (or run [bold]sanad doctor[/bold]).[/yellow]"
         )
         return
 

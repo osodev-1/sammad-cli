@@ -1,8 +1,8 @@
-"""sammad CLI commands: SSO login/logout/whoami/doctor and a governed ``run``.
+"""sanad CLI commands: SSO login/logout/whoami/doctor and a governed ``run``.
 
 These are net-new and self-contained so upstream rebases stay cheap. Command
-bodies stay thin — all lifecycle logic lives in :mod:`kimi_cli.sammad.session`.
-The console script ``sammad`` dispatches here; ``sammad run`` mints a runtime
+bodies stay thin — all lifecycle logic lives in :mod:`kimi_cli.sanad.session`.
+The console script ``sanad`` dispatches here; ``sanad run`` mints a runtime
 token, writes the gateway provider config, keeps it alive, and launches the
 kimi agent against it.
 """
@@ -16,7 +16,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
-from kimi_cli.sammad.branding import (
+from kimi_cli.sanad.branding import (
     GOLD,
     MUTED,
     RUST,
@@ -24,10 +24,10 @@ from kimi_cli.sammad.branding import (
     about_text,
     print_banner,
 )
-from kimi_cli.sammad.errors import SammadError
-from kimi_cli.sammad.models import DeviceStart
-from kimi_cli.sammad.session import SammadSession
-from kimi_cli.sammad.settings import SammadSettings
+from kimi_cli.sanad.errors import SanadError
+from kimi_cli.sanad.models import DeviceStart
+from kimi_cli.sanad.session import SanadSession
+from kimi_cli.sanad.settings import SanadSettings
 
 
 def _version_callback(value: bool) -> None:
@@ -38,15 +38,15 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-sammad_app = typer.Typer(
+sanad_app = typer.Typer(
     add_completion=False,
     context_settings={"help_option_names": ["-h", "--help"]},
-    help="sammad — governed, SSO-first agent workspace.",
+    help="sanad — governed, SSO-first agent workspace.",
     no_args_is_help=True,
 )
 
 
-@sammad_app.callback()
+@sanad_app.callback()
 def _root(
     version: Annotated[
         bool,
@@ -59,15 +59,15 @@ def _root(
         ),
     ] = False,
 ) -> None:
-    """sammad — governed, SSO-first agent workspace."""
+    """sanad — governed, SSO-first agent workspace."""
 
 
-def _build_session() -> SammadSession:
+def _build_session() -> SanadSession:
     """Seam for tests: return a session bound to the configured control plane."""
-    return SammadSession(SammadSettings.load())
+    return SanadSession(SanadSettings.load())
 
 
-# Governance defaults applied to the agent's environment on ``sammad run``.
+# Governance defaults applied to the agent's environment on ``sanad run``.
 # Upstream's telemetry sink egresses to a Moonshot endpoint and its auto-update
 # checks/pulls upstream kimi-cli releases — both are inappropriate for a
 # governed enterprise fork. We disable them by default (fail-closed on data
@@ -84,12 +84,12 @@ def _apply_governed_env(env: MutableMapping[str, str]) -> None:
         env.setdefault(key, value)
 
 
-def _fail(console: Console, exc: SammadError) -> None:
+def _fail(console: Console, exc: SanadError) -> None:
     console.print(f"✗ {exc.message}", style=f"bold {RUST}")
     raise typer.Exit(code=1)
 
 
-@sammad_app.command()
+@sanad_app.command()
 def login() -> None:
     """Sign in with your organization identity (Entra device flow)."""
     console = Console()
@@ -108,7 +108,7 @@ def login() -> None:
     try:
         with console.status("Waiting for approval…", spinner="dots"):
             result = session.login(on_prompt=_prompt)
-    except SammadError as exc:
+    except SanadError as exc:
         _fail(console, exc)
     finally:
         session.close()
@@ -120,9 +120,9 @@ def login() -> None:
     console.print(f"✓ Signed in as {who}{where}", style="bold green")
 
 
-@sammad_app.command()
+@sanad_app.command()
 def about() -> None:
-    """Show sammad's version and upstream provenance."""
+    """Show sanad's version and upstream provenance."""
     from kimi_cli.constant import get_version
 
     console = Console()
@@ -131,14 +131,14 @@ def about() -> None:
     console.print(about_text(get_version(), upstream_version=get_version()))
 
 
-@sammad_app.command()
+@sanad_app.command()
 def whoami() -> None:
     """Show the signed-in identity, organization, and role."""
     console = Console()
     session = _build_session()
     try:
         me = session.whoami()
-    except SammadError as exc:
+    except SanadError as exc:
         _fail(console, exc)
     finally:
         session.close()
@@ -151,25 +151,25 @@ def whoami() -> None:
     console.print(me.role, style=GOLD)
 
 
-@sammad_app.command()
+@sanad_app.command()
 def logout() -> None:
     """Revoke the current session and clear the local credential."""
     console = Console()
     session = _build_session()
     try:
         session.logout()
-    except SammadError as exc:
+    except SanadError as exc:
         _fail(console, exc)
     finally:
         session.close()
     console.print("✓ Signed out.", style="bold green")
 
 
-@sammad_app.command()
+@sanad_app.command()
 def doctor() -> None:
-    """Diagnose the sammad setup: keychain, control plane, and session."""
+    """Diagnose the sanad setup: keychain, control plane, and session."""
     console = Console()
-    settings = SammadSettings.load()
+    settings = SanadSettings.load()
     session = _build_session()
     ok = True
 
@@ -180,13 +180,13 @@ def doctor() -> None:
     try:
         token = session.stored_token()
         console.print("✓ keychain reachable", style="green")
-    except SammadError as exc:
+    except SanadError as exc:
         ok = False
         token = None
         console.print(f"✗ keychain: {exc.message}", style=RUST)
 
     if not token:
-        console.print("• not signed in — run `sammad login`", style=MUTED)
+        console.print("• not signed in — run `sanad login`", style=MUTED)
         session.close()
         if not ok:
             raise typer.Exit(code=1)
@@ -196,7 +196,7 @@ def doctor() -> None:
     try:
         me = session.whoami()
         console.print(f"✓ session valid ({me.role})", style="green")
-    except SammadError as exc:
+    except SanadError as exc:
         ok = False
         console.print(f"✗ session: {exc.message}", style=RUST)
     finally:
@@ -206,14 +206,14 @@ def doctor() -> None:
         raise typer.Exit(code=1)
 
 
-@sammad_app.command(
+@sanad_app.command(
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def run(ctx: typer.Context) -> None:
     """Launch the governed agent: mint a runtime token, then start the agent.
 
     Extra arguments after ``run`` are passed straight through to the underlying
-    agent (e.g. ``sammad run -p "fix the build"``).
+    agent (e.g. ``sanad run -p "fix the build"``).
     """
     from kimi_cli.config import load_config
 
@@ -226,7 +226,7 @@ def run(ctx: typer.Context) -> None:
         session.require_token()  # fail fast before touching on-disk config
         config = load_config()
         mint = session.configure_run(config)
-    except SammadError as exc:
+    except SanadError as exc:
         session.close()
         _fail(console, exc)
         return
@@ -236,14 +236,14 @@ def run(ctx: typer.Context) -> None:
     try:
         from kimi_cli.cli import cli
 
-        cli(args=list(ctx.args), prog_name="sammad", standalone_mode=True)
+        cli(args=list(ctx.args), prog_name="sanad", standalone_mode=True)
     finally:
         renewer.stop()
         session.close()
 
 
 def main() -> None:
-    sammad_app()
+    sanad_app()
 
 
 if __name__ == "__main__":

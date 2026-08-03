@@ -1,13 +1,13 @@
 """The governed shell drops upstream's Moonshot-OAuth slash commands.
 
-A governed sammad session authenticates only through `sammad login` and routes
+A governed sanad session authenticates only through `sanad login` and routes
 models through the gateway, so upstream's in-shell `/login`, `/logout`, and the
 `setup` alias (provider OAuth against auth.kimi.com) must not be reachable.
 """
 
 from __future__ import annotations
 
-from kimi_cli.sammad.shell import SUPPRESSED_SLASH_COMMANDS, suppress_governed_commands
+from kimi_cli.sanad.shell import SUPPRESSED_SLASH_COMMANDS, suppress_governed_commands
 
 
 class _Cmd:

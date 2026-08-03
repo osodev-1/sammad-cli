@@ -1,4 +1,4 @@
-"""sammad brand palette and banner.
+"""sanad brand palette and banner.
 
 Carried from the backend repo's CLI design reference: a cross-stitch / pixel
 mark in gold and sand on near-black ink, with a rust-orange diamond accent.
@@ -10,10 +10,10 @@ from __future__ import annotations
 from rich.console import Console
 from rich.text import Text
 
-NAME = "sammad"
+NAME = "sanad"
 TAGLINE = "governed agent workspace"
 
-# sammad is a downstream fork of Kimi Code CLI; keep the provenance visible.
+# sanad is a downstream fork of Kimi Code CLI; keep the provenance visible.
 UPSTREAM_NAME = "Kimi Code CLI"
 
 # Palette (truecolor hex). Names mirror the design reference.
@@ -24,7 +24,7 @@ INK = "#141210"
 MUTED = "#8a7f6d"
 
 # The cross-stitch mark for the shell welcome: a gold gem/diamond echoing the
-# sammad emblem's central rhombus, with the rust diamond as its heart. Uses the
+# sanad emblem's central rhombus, with the rust diamond as its heart. Uses the
 # quadrant block glyphs that render cleanly in the target terminals; each of the
 # three rows is the same display width so it stays aligned. ``Text.from_markup``
 # renders this.
@@ -52,7 +52,7 @@ def print_banner(console: Console | None = None) -> None:
 
 
 def about_text(version: str, upstream_version: str | None = None) -> Text:
-    """Multi-line 'about' block: sammad identity + upstream attribution."""
+    """Multi-line 'about' block: sanad identity + upstream attribution."""
     text = Text()
     text.append(f"{NAME} ", style=f"bold {SAND}")
     text.append(f"v{version}\n", style=GOLD)

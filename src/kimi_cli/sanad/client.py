@@ -1,7 +1,7 @@
-"""Synchronous client for the sammad control plane (device flow + runtime tokens).
+"""Synchronous client for the sanad control plane (device flow + runtime tokens).
 
 The CLI only ever holds an opaque session token (ADR-016). Every response is
-parsed into a typed model; error envelopes become :class:`SammadError`.
+parsed into a typed model; error envelopes become :class:`SanadError`.
 """
 
 from __future__ import annotations
@@ -11,15 +11,15 @@ from collections.abc import Callable
 
 import httpx
 
-from kimi_cli.sammad.errors import SammadError
-from kimi_cli.sammad.models import DevicePoll, DeviceStart, Me, MintResponse
-from kimi_cli.sammad.settings import SammadSettings
+from kimi_cli.sanad.errors import SanadError
+from kimi_cli.sanad.models import DevicePoll, DeviceStart, Me, MintResponse
+from kimi_cli.sanad.settings import SanadSettings
 
 
-class SammadClient:
+class SanadClient:
     def __init__(
         self,
-        settings: SammadSettings,
+        settings: SanadSettings,
         *,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
@@ -45,8 +45,8 @@ class SammadClient:
         try:
             resp = self._http.request(method, path, json=json, headers=headers)
         except httpx.HTTPError as exc:
-            raise SammadError(
-                "network_error", f"Could not reach the sammad control plane: {exc}", retryable=True
+            raise SanadError(
+                "network_error", f"Could not reach the sanad control plane: {exc}", retryable=True
             ) from exc
         if resp.status_code == 204:
             return None
@@ -59,13 +59,13 @@ class SammadClient:
         if resp.status_code >= 400:
             err = payload.get("error") if isinstance(payload, dict) else None
             if isinstance(err, dict):
-                raise SammadError(
+                raise SanadError(
                     str(err.get("code", "internal_error")),
                     str(err.get("message", "Request failed.")),
                     status=resp.status_code,
                     retryable=bool(err.get("retryable")),
                 )
-            raise SammadError(
+            raise SanadError(
                 "internal_error",
                 f"HTTP {resp.status_code}",
                 status=resp.status_code,
@@ -129,7 +129,7 @@ class SammadClient:
         started = now()
         while True:
             if now() - started > budget:
-                raise SammadError("device_authorization_expired", "Sign-in timed out.", status=410)
+                raise SanadError("device_authorization_expired", "Sign-in timed out.", status=410)
             result = self.device_poll(start.device_auth_id)
             if result.status == "complete":
                 return result
@@ -138,7 +138,7 @@ class SammadClient:
     def close(self) -> None:
         self._http.close()
 
-    def __enter__(self) -> SammadClient:
+    def __enter__(self) -> SanadClient:
         return self
 
     def __exit__(self, *exc: object) -> None:

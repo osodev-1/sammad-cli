@@ -5,9 +5,9 @@ against the fake-IdP ``pnpm demo`` stack). Because a real Entra device login
 cannot complete non-interactively, the tester supplies an already-obtained CLI
 session token out of band:
 
-    SAMMAD_SMOKE_API_BASE_URL=https://<control-plane> \
-    SAMMAD_SMOKE_SESSION_TOKEN=<opaque session token from `sammad login`> \
-        uv run pytest tests/sammad/test_smoke.py -v
+    SANAD_SMOKE_API_BASE_URL=https://<control-plane> \
+    SANAD_SMOKE_SESSION_TOKEN=<opaque session token from `sanad login`> \
+        uv run pytest tests/sanad/test_smoke.py -v
 
 It mints a real runtime token, builds the gateway provider/model exactly as the
 CLI does, streams one real completion through the Foundry-backed gateway, then
@@ -24,21 +24,21 @@ import re
 import httpx
 import pytest
 
-from kimi_cli.sammad.client import SammadClient
-from kimi_cli.sammad.provider import build_model, build_provider
-from kimi_cli.sammad.settings import SammadSettings
+from kimi_cli.sanad.client import SanadClient
+from kimi_cli.sanad.provider import build_model, build_provider
+from kimi_cli.sanad.settings import SanadSettings
 
-API = os.environ.get("SAMMAD_SMOKE_API_BASE_URL")
-SESSION_TOKEN = os.environ.get("SAMMAD_SMOKE_SESSION_TOKEN")
+API = os.environ.get("SANAD_SMOKE_API_BASE_URL")
+SESSION_TOKEN = os.environ.get("SANAD_SMOKE_SESSION_TOKEN")
 
 pytestmark = pytest.mark.skipif(
     not (API and SESSION_TOKEN),
-    reason="set SAMMAD_SMOKE_API_BASE_URL and SAMMAD_SMOKE_SESSION_TOKEN to run the real smoke",
+    reason="set SANAD_SMOKE_API_BASE_URL and SANAD_SMOKE_SESSION_TOKEN to run the real smoke",
 )
 
 
 def test_mint_and_stream_through_real_foundry_gateway():
-    client = SammadClient(SammadSettings(api_base_url=API))
+    client = SanadClient(SanadSettings(api_base_url=API))
 
     # The supplied session token must be valid (proves the control plane is reachable).
     me = client.me(SESSION_TOKEN)

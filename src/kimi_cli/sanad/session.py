@@ -3,7 +3,7 @@
 This is the one place that owns the opaque CLI session token lifecycle
 (ADR-016) and the in-place runtime-token renewal loop (ADR-017). Commands call
 into it; it never prints — a caller-supplied callback surfaces the device-flow
-prompt so the UI layer stays in :mod:`kimi_cli.sammad.cli`.
+prompt so the UI layer stays in :mod:`kimi_cli.sanad.cli`.
 """
 
 from __future__ import annotations
@@ -15,12 +15,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kimi_cli.config import Config, save_config
-from kimi_cli.sammad.client import SammadClient
-from kimi_cli.sammad.errors import NotLoggedIn, SammadError
-from kimi_cli.sammad.keychain import KeychainStore
-from kimi_cli.sammad.models import DevicePoll, DeviceStart, Me, MintResponse
-from kimi_cli.sammad.provider import PROVIDER_NAME, build_model, build_provider
-from kimi_cli.sammad.settings import SammadSettings
+from kimi_cli.sanad.client import SanadClient
+from kimi_cli.sanad.errors import NotLoggedIn, SanadError
+from kimi_cli.sanad.keychain import KeychainStore
+from kimi_cli.sanad.models import DevicePoll, DeviceStart, Me, MintResponse
+from kimi_cli.sanad.provider import PROVIDER_NAME, build_model, build_provider
+from kimi_cli.sanad.settings import SanadSettings
 
 
 def _parse_iso(value: str) -> datetime:
@@ -29,18 +29,18 @@ def _parse_iso(value: str) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
-class SammadSession:
+class SanadSession:
     """Stateful facade over the client + keychain for one control plane."""
 
     def __init__(
         self,
-        settings: SammadSettings | None = None,
+        settings: SanadSettings | None = None,
         *,
-        client: SammadClient | None = None,
+        client: SanadClient | None = None,
         keychain: KeychainStore | None = None,
     ) -> None:
-        self._settings = settings or SammadSettings.load()
-        self._client = client or SammadClient(self._settings)
+        self._settings = settings or SanadSettings.load()
+        self._client = client or SanadClient(self._settings)
         self._keychain = keychain or KeychainStore(self._settings.api_base_url)
 
     # -- token storage ----------------------------------------------------
@@ -75,7 +75,7 @@ class SammadSession:
             kwargs["now"] = now
         result = self._client.poll_until_complete(start, **kwargs)  # type: ignore[arg-type]
         if not result.cli_session_token:
-            raise SammadError(
+            raise SanadError(
                 "login_incomplete", "Sign-in completed without a session token.", status=502
             )
         self._keychain.set(result.cli_session_token)
@@ -92,7 +92,7 @@ class SammadSession:
         """
         token = self._keychain.get()
         if token:
-            with contextlib.suppress(SammadError):
+            with contextlib.suppress(SanadError):
                 self._client.logout(token)
         self._keychain.delete()
 
@@ -131,12 +131,12 @@ class RuntimeTokenRenewer:
     """Keeps a runtime token alive in place until its absolute expiry (ADR-017).
 
     Renewal extends the *same* token's expiry server-side, so the config written
-    by :meth:`SammadSession.configure_run` never needs rewriting.
+    by :meth:`SanadSession.configure_run` never needs rewriting.
     """
 
     def __init__(
         self,
-        client: SammadClient,
+        client: SanadClient,
         session_token: str,
         mint: MintResponse,
         *,
@@ -144,7 +144,7 @@ class RuntimeTokenRenewer:
         min_sleep_seconds: float = 5.0,
         sleep: Callable[[float], None] | None = None,
         now: Callable[[], datetime] | None = None,
-        on_error: Callable[[SammadError], None] | None = None,
+        on_error: Callable[[SanadError], None] | None = None,
     ) -> None:
         self._client = client
         self._session_token = session_token
@@ -176,7 +176,7 @@ class RuntimeTokenRenewer:
             expires_at = self._client.renew_runtime_token(self._session_token, self._token_id)
             if expires_at:
                 self._expires_at = _parse_iso(expires_at)
-        except SammadError as exc:
+        except SanadError as exc:
             if self._on_error is not None:
                 self._on_error(exc)
             if not exc.retryable:
@@ -194,7 +194,7 @@ class RuntimeTokenRenewer:
     def start(self) -> None:
         if self._thread is not None:
             return
-        self._thread = threading.Thread(target=self._run, name="sammad-token-renewer", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="sanad-token-renewer", daemon=True)
         self._thread.start()
 
     def stop(self, *, timeout: float = 5.0) -> None:

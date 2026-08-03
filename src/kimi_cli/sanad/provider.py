@@ -11,11 +11,11 @@ from __future__ import annotations
 from pydantic import SecretStr
 
 from kimi_cli.config import LLMModel, LLMProvider
-from kimi_cli.sammad.models import MintResponse, ModelSettings
+from kimi_cli.sanad.models import MintResponse, ModelSettings
 
-PROVIDER_NAME = "sammad-gateway"
+PROVIDER_NAME = "sanad-gateway"
 
-# sammad model-capability names -> kimi ModelCapability names. "tool_use" is
+# sanad model-capability names -> kimi ModelCapability names. "tool_use" is
 # inherent in kimi and is not a ModelCapability, so it is dropped.
 _CAPABILITY_MAP = {"thinking": "thinking"}
 

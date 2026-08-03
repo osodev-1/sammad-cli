@@ -1,4 +1,4 @@
-"""Typed models for the sammad control-plane responses.
+"""Typed models for the sanad control-plane responses.
 
 Fields are snake_case; the backend speaks camelCase, so an alias generator maps
 them. Every response is parsed from ``unknown`` via ``model_validate``.
@@ -70,7 +70,7 @@ class MintResponse(_Camel):
     absolute_expires_at: str
     gateway_base_url: str
     # One entry per allowed alias; the ``name`` fields enumerate the aliases the
-    # user may select. ``default_model_alias`` names which one ``sammad run``
+    # user may select. ``default_model_alias`` names which one ``sanad run``
     # starts on and must match one of the entries' ``name``.
     model_settings: list[ModelSettings]
     default_model_alias: str

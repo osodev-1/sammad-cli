@@ -5,8 +5,8 @@ from __future__ import annotations
 import keyring
 from keyring.errors import KeyringError
 
-from kimi_cli.sammad.errors import KeychainUnavailable
-from kimi_cli.sammad.settings import KEYCHAIN_SERVICE
+from kimi_cli.sanad.errors import KeychainUnavailable
+from kimi_cli.sanad.settings import KEYCHAIN_SERVICE
 
 
 class KeychainStore:

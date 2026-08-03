@@ -1,9 +1,9 @@
-"""Stable, safe error type for the sammad control-plane client."""
+"""Stable, safe error type for the sanad control-plane client."""
 
 from __future__ import annotations
 
 
-class SammadError(Exception):
+class SanadError(Exception):
     """Carries the backend's machine error code so commands can map it cleanly."""
 
     def __init__(
@@ -21,23 +21,23 @@ class SammadError(Exception):
         self.retryable = retryable
 
 
-class NotLoggedIn(SammadError):
-    """No session token is stored; the user must run ``sammad login`` first."""
+class NotLoggedIn(SanadError):
+    """No session token is stored; the user must run ``sanad login`` first."""
 
     def __init__(self) -> None:
         super().__init__(
             "not_logged_in",
-            "You are not signed in. Run `sammad login` to authenticate.",
+            "You are not signed in. Run `sanad login` to authenticate.",
         )
 
 
-class KeychainUnavailable(SammadError):
-    """No OS keychain is available; sammad never falls back to plaintext."""
+class KeychainUnavailable(SanadError):
+    """No OS keychain is available; sanad never falls back to plaintext."""
 
     def __init__(self, cause: object | None = None) -> None:
         super().__init__(
             "keychain_unavailable",
-            "No OS keychain is available. sammad stores its session token only in the "
+            "No OS keychain is available. sanad stores its session token only in the "
             "system keychain (macOS Keychain, Windows Credential Manager, or a Secret "
             "Service provider such as GNOME Keyring on Linux). Unlock or install one and "
             "retry — a plaintext fallback is intentionally not supported.",

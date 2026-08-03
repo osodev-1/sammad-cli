@@ -1,19 +1,19 @@
-"""Unit tests for the sammad client — no network, httpx.MockTransport."""
+"""Unit tests for the sanad client — no network, httpx.MockTransport."""
 
 from __future__ import annotations
 
 import httpx
 import pytest
 
-from kimi_cli.sammad.client import SammadClient
-from kimi_cli.sammad.errors import SammadError
-from kimi_cli.sammad.settings import SammadSettings
+from kimi_cli.sanad.client import SanadClient
+from kimi_cli.sanad.errors import SanadError
+from kimi_cli.sanad.settings import SanadSettings
 
 BASE = "http://cp.test"
 
 
 def make_client(handler):
-    return SammadClient(SammadSettings(api_base_url=BASE), transport=httpx.MockTransport(handler))
+    return SanadClient(SanadSettings(api_base_url=BASE), transport=httpx.MockTransport(handler))
 
 
 def ok(data):
@@ -69,9 +69,9 @@ def test_device_start_and_poll_pending_then_complete():
     assert calls["poll"] == 2
 
 
-def test_error_envelope_becomes_sammad_error():
+def test_error_envelope_becomes_sanad_error():
     client = make_client(lambda req: err(403, "tenant_not_allowed"))
-    with pytest.raises(SammadError) as excinfo:
+    with pytest.raises(SanadError) as excinfo:
         client.device_poll("dev_x")
     assert excinfo.value.code == "tenant_not_allowed"
     assert excinfo.value.status == 403
