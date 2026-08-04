@@ -19,12 +19,15 @@ Vitest. Deploys to Vercel.
 
 This is a pnpm workspace:
 
-| Path                   | What it is                                  |
-| ---------------------- | ------------------------------------------- |
-| `artifacts/sanad-web`  | The Next.js control plane                   |
-| `artifacts/api-server` | Express API service                         |
-| `lib/*`                | Shared packages (db, schemas, integrations) |
-| `scripts`              | Operational scripts                         |
+| Path                   | What it is                                       |
+| ---------------------- | ------------------------------------------------ |
+| `artifacts/sanad-web`  | The Next.js control plane                        |
+| `artifacts/api-server` | Express API service                              |
+| `lib/db`               | Drizzle schema and database client               |
+| `lib/api-zod`          | Shared Zod schemas                               |
+| `lib/api-spec`         | OpenAPI specification                            |
+| `lib/api-client-react` | Generated React client                           |
+| `scripts`              | Operational scripts (migrations, Stripe seeding) |
 
 ## Running it
 
@@ -40,5 +43,6 @@ committed example file contains placeholders only, no live credentials.
 ## Tests
 
 ```sh
-pnpm --filter @workspace/sanad-web run test
+pnpm --filter @workspace/sanad-web run test        # vitest
+pnpm --filter @workspace/sanad-web run typecheck
 ```
