@@ -2,76 +2,39 @@ import Stripe from "stripe";
 import { StripeSync, runMigrations } from "stripe-replit-sync";
 
 /**
- * Fetches Stripe credentials from the Replit connection API.
- * Not cached -- tokens can rotate, so fetch fresh each time.
+ * Stripe credentials from the environment.
+ *
+ * These were previously fetched from Replit's connector API at runtime; that
+ * coupling is gone now that the control plane runs on Railway. Set
+ * `STRIPE_SECRET_KEY` (required) and `STRIPE_WEBHOOK_SECRET` (needed for
+ * webhook signature verification) as service variables.
  */
-async function getStripeCredentials(): Promise<{
-  secretKey: string;
-  webhookSecret?: string;
-}> {
-  const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
-  const xReplitToken = process.env.REPL_IDENTITY
-    ? "repl " + process.env.REPL_IDENTITY
-    : process.env.WEB_REPL_RENEWAL
-      ? "depl " + process.env.WEB_REPL_RENEWAL
-      : null;
-
-  if (!hostname || !xReplitToken) {
-    throw new Error(
-      "Missing Replit environment variables. " +
-        "Ensure the Stripe integration is connected via the Integrations tab."
-    );
+function getStripeCredentials(): { secretKey: string; webhookSecret?: string } {
+  const secretKey = process.env.STRIPE_SECRET_KEY;
+  if (!secretKey) {
+    throw new Error("STRIPE_SECRET_KEY environment variable is required");
   }
-
-  const resp = await fetch(
-    `https://${hostname}/api/v2/connection?include_secrets=true&connector_names=stripe`,
-    {
-      headers: { Accept: "application/json", X_REPLIT_TOKEN: xReplitToken },
-      signal: AbortSignal.timeout(10_000),
-    }
-  );
-
-  if (!resp.ok) {
-    throw new Error(
-      `Failed to fetch Stripe credentials: ${resp.status} ${resp.statusText}`
-    );
-  }
-
-  const data = await resp.json();
-  const settings = data.items?.[0]?.settings;
-
-  // Replit Stripe connector uses `secret` (not `secret_key`) for the API key
-  if (!settings?.secret) {
-    throw new Error(
-      "Stripe integration not connected or missing secret key. " +
-        "Connect Stripe via the Integrations tab first."
-    );
-  }
-
   return {
-    secretKey: settings.secret as string,
-    webhookSecret: settings.webhook_secret as string | undefined,
+    secretKey,
+    webhookSecret: process.env.STRIPE_WEBHOOK_SECRET || undefined,
   };
 }
 
-/**
- * Returns a fresh authenticated Stripe client.
- * Not cached -- fetches credentials on every call so rotated keys are picked up.
- */
+/** Returns an authenticated Stripe client. */
 export async function getUncachableStripeClient(): Promise<Stripe> {
-  const { secretKey } = await getStripeCredentials();
+  const { secretKey } = getStripeCredentials();
   return new Stripe(secretKey);
 }
 
 /** Returns the Stripe webhook signing secret for manual event verification. */
 export async function getStripeWebhookSecret(): Promise<string> {
-  const { webhookSecret } = await getStripeCredentials();
+  const { webhookSecret } = getStripeCredentials();
   return webhookSecret ?? "";
 }
 
 /**
- * Returns a fresh StripeSync instance for webhook processing and data sync.
- * Always runs runMigrations first (idempotent).
+ * Returns a StripeSync instance for webhook processing and data sync.
+ * Runs the (idempotent) sync-table migrations first.
  */
 export async function getStripeSync(): Promise<StripeSync> {
   const databaseUrl = process.env.NEON_DATABASE_URL;
@@ -79,10 +42,10 @@ export async function getStripeSync(): Promise<StripeSync> {
     throw new Error("NEON_DATABASE_URL environment variable is required");
   }
 
-  // runMigrations is idempotent — safe to call on every request
+  // Idempotent — safe to call on every request.
   await runMigrations({ databaseUrl });
 
-  const { secretKey, webhookSecret } = await getStripeCredentials();
+  const { secretKey, webhookSecret } = getStripeCredentials();
   return new StripeSync({
     poolConfig: { connectionString: databaseUrl },
     stripeSecretKey: secretKey,
