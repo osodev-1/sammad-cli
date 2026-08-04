@@ -37,9 +37,9 @@ export async function getStripeWebhookSecret(): Promise<string> {
  * Runs the (idempotent) sync-table migrations first.
  */
 export async function getStripeSync(): Promise<StripeSync> {
-  const databaseUrl = process.env.NEON_DATABASE_URL;
+  const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
-    throw new Error("NEON_DATABASE_URL environment variable is required");
+    throw new Error("DATABASE_URL environment variable is required");
   }
 
   // Idempotent — safe to call on every request.

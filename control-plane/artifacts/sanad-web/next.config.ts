@@ -8,7 +8,7 @@ const nextConfig: NextConfig = {
   // The pnpm workspace root (control-plane/) is two levels up. Point file
   // tracing there so hoisted `catalog:` deps land in the standalone output.
   outputFileTracingRoot: path.join(__dirname, "../../"),
-  serverExternalPackages: ["@neondatabase/serverless"],
+  serverExternalPackages: ["pg"],
   // `next build` and `next dev` share .next by default, so building while the
   // dev server is up overwrites the chunks it is still serving. The browser
   // then 404s on its own JS and rejects with a non-Error event object — which

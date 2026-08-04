@@ -30,11 +30,11 @@ ARG CLERK_PUBLISHABLE_KEY=""
 # hoisted workspace root, so a filtered install would miss them.
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
-# next build imports server modules that construct the Neon client at import
-# time, so a DB URL must be present or the build throws. This is a throwaway:
-# Neon's HTTP driver is lazy (no connection at build), it never reaches the
-# runner stage or the client bundle, and Railway injects the real one at runtime.
-RUN NEON_DATABASE_URL="postgresql://build:build@localhost:5432/build" \
+# next build imports server modules that build the pg pool at import time, so
+# DATABASE_URL must be set or the build can throw. This is a throwaway — the pg
+# pool is lazy (no connection at build), it never reaches the runner stage or
+# the client bundle, and Railway injects the real one at runtime.
+RUN DATABASE_URL="postgresql://build:build@localhost:5432/build" \
     CLERK_PUBLISHABLE_KEY="${CLERK_PUBLISHABLE_KEY}" \
     pnpm --filter @workspace/sanad-web build
 
