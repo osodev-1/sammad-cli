@@ -4,7 +4,33 @@ import { ok, err } from "@/lib/http/envelope";
 import { db } from "@/lib/db";
 import { usageEvents } from "@/lib/db/schema";
 import { verifyRuntimeBearer } from "@/lib/tokens/runtime";
+import { verifyBearer } from "@/lib/auth/session";
 import { getOrgUsage } from "@/lib/billing/quota";
+
+/**
+ * Usage READ — the `sanad usage` command. Session-authed (the CLI holds an
+ * opaque *session* token, not a runtime token), it returns the current-period
+ * summary in the CLI's frozen shape:
+ *   { used, limit, periodEnd, byModel:[{ alias, requests, tokensIn, tokensOut }] }
+ * where `used`/`limit` are request counts. Coexists on this path with the POST
+ * ingest below, which the gateway calls with a *runtime* token.
+ */
+export async function GET(req: NextRequest) {
+  const session = await verifyBearer(req);
+  if (!session) {
+    return err(401, "unauthorized", "Invalid or revoked session token");
+  }
+
+  const usage = await getOrgUsage(session.orgId);
+  return ok({
+    used: usage.status.requests.used,
+    limit: usage.status.requests.limit,
+    periodEnd: usage.currentPeriodEnd
+      ? usage.currentPeriodEnd.toISOString()
+      : null,
+    byModel: usage.byModel,
+  });
+}
 
 /**
  * Usage ingest. The gateway calls this after serving a model request, using
