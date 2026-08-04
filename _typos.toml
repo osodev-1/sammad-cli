@@ -1,0 +1,6 @@
+# The spell check in .github/workflows/typos.yml runs over the whole repository
+# on every pull request. control-plane/ is a separate Next.js application that
+# does not share this project's vocabulary or conventions, so it is excluded to
+# keep upstream's CI signal about upstream's code.
+[files]
+extend-exclude = ["control-plane/"]

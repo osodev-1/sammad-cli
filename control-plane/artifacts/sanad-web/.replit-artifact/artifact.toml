@@ -1,0 +1,40 @@
+kind = "web"
+previewPath = "/"
+title = "sanad Control Plane"
+version = "1.0.0"
+id = "Qm4tZvXsL9pRbNc2Wd8Ky"
+
+# Served at "/" so this app owns the entire /api/* namespace, including the
+# frozen CLI contract at /api/v1/*. The api-server scaffold was moved to
+# /__api-server to keep that namespace clear.
+
+[[services]]
+localPort = 3000
+name = "web"
+paths = ["/"]
+
+[services.env]
+PORT = "3000"
+
+[services.development]
+run = "pnpm --filter @workspace/sanad-web run dev"
+
+# Replit-production fallback only. Vercel is the source of truth for real
+# deployments of this app; this block exists so the artifact is runnable here.
+[services.production]
+
+[services.production.build]
+args = ["pnpm", "--filter", "@workspace/sanad-web", "run", "build"]
+
+[services.production.build.env]
+NODE_ENV = "production"
+
+[services.production.run]
+args = ["pnpm", "--filter", "@workspace/sanad-web", "run", "start"]
+
+[services.production.run.env]
+PORT = "3000"
+NODE_ENV = "production"
+
+[services.production.health.startup]
+path = "/api/health"
