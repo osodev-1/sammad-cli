@@ -1,6 +1,13 @@
 import type { NextConfig } from "next";
+import path from "node:path";
 
 const nextConfig: NextConfig = {
+  // Emit a self-contained server bundle so the Railway image can run
+  // `node server.js` without shipping the whole workspace node_modules.
+  output: "standalone",
+  // The pnpm workspace root (control-plane/) is two levels up. Point file
+  // tracing there so hoisted `catalog:` deps land in the standalone output.
+  outputFileTracingRoot: path.join(__dirname, "../../"),
   serverExternalPackages: ["@neondatabase/serverless"],
   // `next build` and `next dev` share .next by default, so building while the
   // dev server is up overwrites the chunks it is still serving. The browser

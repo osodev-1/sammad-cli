@@ -1,0 +1,22 @@
+# Build context is this workspace root. Keep the context lean and never ship
+# local installs, build outputs, VCS, or secrets into the image build.
+**/node_modules
+**/.next
+**/.next-verify
+**/dist
+**/.turbo
+**/coverage
+**/*.log
+**/.DS_Store
+.git
+**/.git
+
+# Never send env files into the build (secrets). The image gets its config from
+# runtime service variables; the example file is documentation only.
+**/.env
+**/.env.*
+
+# Replit build markers — irrelevant off-platform.
+**/.replit-artifact
+**/.replit
+**/replit.nix

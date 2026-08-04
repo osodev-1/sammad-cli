@@ -1,0 +1,87 @@
+name: deploy-sanad-web
+
+# Build the sanad-web (control plane) image, push it to GHCR, then (once
+# configured) tell Railway to redeploy. Secrets are NEVER baked into the image —
+# Railway injects them at runtime. The only build arg is the *publishable*
+# Clerk key, which next.config inlines into the browser bundle.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "control-plane/**"
+      - ".github/workflows/deploy-sanad-web.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-sanad-web-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/sanad-web
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: control-plane
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: control-plane/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @workspace/sanad-web typecheck
+      - run: pnpm --filter @workspace/sanad-web test
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: control-plane
+          file: control-plane/artifacts/sanad-web/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          # Publishable (not secret) — set as a repo *variable*, not a secret.
+          build-args: |
+            CLERK_PUBLISHABLE_KEY=${{ vars.CLERK_PUBLISHABLE_KEY }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    # Skipped until the Railway service is wired. Set repo variable
+    # RAILWAY_SERVICE_SANAD_WEB and secret RAILWAY_TOKEN (a project token) to
+    # enable. The Railway service must be set to deploy the GHCR image above.
+    if: ${{ vars.RAILWAY_SERVICE_SANAD_WEB != '' }}
+    steps:
+      - name: Redeploy on Railway
+        run: |
+          npm i -g @railway/cli
+          railway redeploy --service "${{ vars.RAILWAY_SERVICE_SANAD_WEB }}" --yes
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
