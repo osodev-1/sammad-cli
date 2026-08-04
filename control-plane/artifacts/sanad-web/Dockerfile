@@ -50,5 +50,8 @@ ENV HOSTNAME=0.0.0.0
 # artifacts/sanad-web/ and its node_modules sits at the output root.
 COPY --from=build /workspace/artifacts/sanad-web/.next/standalone ./
 COPY --from=build /workspace/artifacts/sanad-web/.next/static ./artifacts/sanad-web/.next/static
+# Migration SQL for the runtime migrator — instrumentation.ts applies it on boot
+# (when RUN_MIGRATIONS=true). Resolved at /app/artifacts/sanad-web/drizzle.
+COPY --from=build /workspace/artifacts/sanad-web/drizzle ./artifacts/sanad-web/drizzle
 EXPOSE 3000
 CMD ["node", "artifacts/sanad-web/server.js"]
