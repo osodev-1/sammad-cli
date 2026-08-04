@@ -16,7 +16,14 @@ const SESSION = {
   userId: "user_abc",
   orgId: "org_xyz",
 };
-const MEMBERSHIP = { id: "mem_001", role: "admin" };
+const MEMBERSHIP = {
+  id: "mem_001",
+  orgId: SESSION.orgId,
+  userId: SESSION.userId,
+  role: "admin",
+  seatAssigned: true,
+  createdAt: new Date(),
+};
 
 beforeEach(() => {
   vi.clearAllMocks();

@@ -71,7 +71,10 @@ export async function verifyBearer(
 /**
  * Fetch role and membership id for a session's user+org.
  */
-export async function getSessionMembership(userId: string, orgId: string) {
+export async function getSessionMembership(
+  userId: string,
+  orgId: string
+): Promise<typeof memberships.$inferSelect | null> {
   const [m] = await db
     .select()
     .from(memberships)

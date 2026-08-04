@@ -4,7 +4,7 @@ import { and, eq, isNull } from "drizzle-orm";
 let selectRows: unknown[] = [];
 // `.where()` must be awaitable directly (session lookups) AND chainable with
 // `.limit()` (runtime token lookup).
-const selectWhere = vi.fn(() =>
+const selectWhere = vi.fn((_where?: unknown) =>
   Object.assign(Promise.resolve(selectRows), {
     limit: vi.fn(async () => selectRows),
   })
