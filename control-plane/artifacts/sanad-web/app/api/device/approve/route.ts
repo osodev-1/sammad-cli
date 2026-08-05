@@ -3,8 +3,8 @@ import { auth, currentUser } from "@clerk/nextjs/server";
 import { z } from "zod";
 import { ok, err } from "@/lib/http/envelope";
 import { db } from "@/lib/db";
-import { deviceAuthRequests, users } from "@/lib/db/schema";
-import { eq } from "drizzle-orm";
+import { deviceAuthRequests, memberships, users } from "@/lib/db/schema";
+import { and, eq } from "drizzle-orm";
 import { hashToken } from "@/lib/auth/tokens";
 import { mintSession } from "@/lib/auth/session";
 import { requireEntitled } from "@/lib/auth/entitlement";
@@ -68,7 +68,8 @@ export async function POST(req: NextRequest) {
 
   // Determine active org — use personal org if no org is active in the Clerk session
   const clerkUser = await currentUser();
-  const activeOrgId = orgId ?? `personal_${userId}`;
+  const personalOrgId = `personal_${userId}`;
+  let activeOrgId = orgId ?? personalOrgId;
 
   // Ensure the user is provisioned (idempotent)
   await provisionPersonalOrg({
@@ -79,6 +80,24 @@ export async function POST(req: NextRequest) {
         ? `${clerkUser.firstName} ${clerkUser.lastName}`
         : clerkUser?.firstName ?? undefined,
   });
+
+  // A Clerk-active organization that was never provisioned here (no membership
+  // row) must not gate the login — entitlement against an org this control
+  // plane has never seen would always fail with no_plan. Fall back to the
+  // personal org, which provisionPersonalOrg just guaranteed exists.
+  if (activeOrgId !== personalOrgId) {
+    const [member] = await db
+      .select()
+      .from(memberships)
+      .where(
+        and(
+          eq(memberships.orgId, activeOrgId),
+          eq(memberships.userId, userId)
+        )
+      )
+      .limit(1);
+    if (!member) activeOrgId = personalOrgId;
+  }
 
   // Entitlement check
   const ent = await requireEntitled(activeOrgId, userId);
