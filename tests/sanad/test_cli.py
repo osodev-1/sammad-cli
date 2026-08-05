@@ -23,35 +23,83 @@ def install_session(monkeypatch, handler, *, token=None):
     return session
 
 
-def test_login_prints_prompt_and_success(monkeypatch):
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v1/auth/device/start":
-            return ok(
-                {
-                    "deviceAuthId": "dev_1",
-                    "userCode": "WXYZ",
-                    "verificationUri": "https://microsoft.com/devicelogin",
-                    "expiresAt": "2026-07-23T00:10:00Z",
-                    "pollIntervalSeconds": 1,
-                }
-            )
+def _login_handler(request: httpx.Request) -> httpx.Response:
+    if request.url.path == "/api/v1/auth/device/start":
         return ok(
             {
-                "status": "complete",
-                "cliSessionToken": "sess-xyz",
-                "user": {"id": "usr_1", "email": "a@b.test"},
-                "organization": {"id": "org_1", "name": "Northwind", "slug": "nw"},
-                "membership": {"id": "mem_1", "role": "owner"},
+                "deviceAuthId": "dev_1",
+                "userCode": "WXYZ",
+                "verificationUri": "https://microsoft.com/devicelogin",
+                "expiresAt": "2026-07-23T00:10:00Z",
+                "pollIntervalSeconds": 1,
             }
         )
+    return ok(
+        {
+            "status": "complete",
+            "cliSessionToken": "sess-xyz",
+            "user": {"id": "usr_1", "email": "a@b.test"},
+            "organization": {"id": "org_1", "name": "Northwind", "slug": "nw"},
+            "membership": {"id": "mem_1", "role": "owner"},
+        }
+    )
 
-    session = install_session(monkeypatch, handler)
-    result = runner.invoke(cli_mod.sanad_app, ["login"])
+
+def test_login_prints_prompt_and_success(monkeypatch):
+    opened: list[str] = []
+    monkeypatch.setattr(cli_mod.webbrowser, "open", lambda url: opened.append(url) or True)
+    session = install_session(monkeypatch, _login_handler)
+
+    result = runner.invoke(cli_mod.sanad_app, ["login", "--no-run"])
 
     assert result.exit_code == 0, result.output
     assert "WXYZ" in result.output
     assert "a@b.test" in result.output
     assert session.stored_token() == "sess-xyz"
+    # The verification page is surfaced in the browser automatically.
+    assert opened == ["https://microsoft.com/devicelogin"]
+
+
+def test_login_still_prints_url_when_browser_fails(monkeypatch):
+    def _boom(url: str) -> bool:
+        raise OSError("no display")
+
+    monkeypatch.setattr(cli_mod.webbrowser, "open", _boom)
+    install_session(monkeypatch, _login_handler)
+
+    result = runner.invoke(cli_mod.sanad_app, ["login", "--no-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "https://microsoft.com/devicelogin" in result.output
+    assert "WXYZ" in result.output
+
+
+def test_login_launches_workspace_after_signin(monkeypatch):
+    monkeypatch.setattr(cli_mod.webbrowser, "open", lambda url: True)
+    install_session(monkeypatch, _login_handler)
+    launched: list[object] = []
+    monkeypatch.setattr(
+        cli_mod, "_launch_workspace", lambda console, extra_args=(): launched.append(extra_args)
+    )
+
+    result = runner.invoke(cli_mod.sanad_app, ["login"])
+
+    assert result.exit_code == 0, result.output
+    assert launched == [()]
+
+
+def test_login_no_run_skips_workspace_launch(monkeypatch):
+    monkeypatch.setattr(cli_mod.webbrowser, "open", lambda url: True)
+    install_session(monkeypatch, _login_handler)
+    launched: list[object] = []
+    monkeypatch.setattr(
+        cli_mod, "_launch_workspace", lambda console, extra_args=(): launched.append(extra_args)
+    )
+
+    result = runner.invoke(cli_mod.sanad_app, ["login", "--no-run"])
+
+    assert result.exit_code == 0, result.output
+    assert launched == []
 
 
 def test_whoami_not_logged_in_exits_nonzero(monkeypatch):

@@ -10,7 +10,8 @@ kimi agent against it.
 from __future__ import annotations
 
 import os
-from collections.abc import MutableMapping
+import webbrowser
+from collections.abc import MutableMapping, Sequence
 from typing import Annotated
 
 import typer
@@ -89,17 +90,68 @@ def _fail(console: Console, exc: SanadError) -> None:
     raise typer.Exit(code=1)
 
 
+def _launch_workspace(console: Console, extra_args: Sequence[str] = ()) -> None:
+    """Mint a runtime token and hand the terminal to the governed agent.
+
+    Shared by ``sanad run`` and the post-login handoff so signing in flows
+    straight into a working session without a second command.
+    """
+    from kimi_cli.config import load_config
+
+    # Governance posture: no telemetry to Moonshot, no auto-update from upstream.
+    _apply_governed_env(os.environ)
+
+    session = _build_session()
+    try:
+        session.require_token()  # fail fast before touching on-disk config
+        config = load_config()
+        mint = session.configure_run(config)
+    except SanadError as exc:
+        session.close()
+        _fail(console, exc)
+        return
+
+    renewer = session.new_renewer(mint)
+    renewer.start()
+    try:
+        from kimi_cli.cli import cli
+
+        cli(args=list(extra_args), prog_name="sanad", standalone_mode=True)
+    finally:
+        renewer.stop()
+        session.close()
+
+
 @sanad_app.command()
-def login() -> None:
-    """Sign in with your organization identity (Entra device flow)."""
+def login(
+    no_run: Annotated[
+        bool,
+        typer.Option(
+            "--no-run",
+            help="Sign in only; skip launching the workspace afterwards.",
+        ),
+    ] = False,
+) -> None:
+    """Sign in with your organization identity, then launch the workspace."""
     console = Console()
     print_banner(console)
     session = _build_session()
 
     def _prompt(start: DeviceStart) -> None:
         target = start.verification_uri_complete or start.verification_uri
+        # Best effort: surface the approval page in the user's browser. Always
+        # print the URL + code too — the browser may be remote (SSH), headless,
+        # or opened under the wrong profile.
+        try:
+            opened = webbrowser.open(target)
+        except Exception:
+            opened = False
         console.print()
-        console.print("To sign in, open the following URL and confirm the code:")
+        if opened:
+            console.print("Opening your browser to approve the sign-in.")
+            console.print("If nothing opened, visit:")
+        else:
+            console.print("To sign in, open the following URL and confirm the code:")
         console.print(f"  {target}", style=f"bold {SAND}")
         console.print("  code: ", style=MUTED, end="")
         console.print(start.user_code, style=f"bold {GOLD}")
@@ -118,6 +170,11 @@ def login() -> None:
     who = user.email if user else "your account"
     where = f" · {org.name}" if org else ""
     console.print(f"✓ Signed in as {who}{where}", style="bold green")
+
+    if no_run:
+        return
+    console.print()
+    _launch_workspace(console)
 
 
 @sanad_app.command()
@@ -237,31 +294,7 @@ def run(ctx: typer.Context) -> None:
     Extra arguments after ``run`` are passed straight through to the underlying
     agent (e.g. ``sanad run -p "fix the build"``).
     """
-    from kimi_cli.config import load_config
-
-    # Governance posture: no telemetry to Moonshot, no auto-update from upstream.
-    _apply_governed_env(os.environ)
-
-    console = Console()
-    session = _build_session()
-    try:
-        session.require_token()  # fail fast before touching on-disk config
-        config = load_config()
-        mint = session.configure_run(config)
-    except SanadError as exc:
-        session.close()
-        _fail(console, exc)
-        return
-
-    renewer = session.new_renewer(mint)
-    renewer.start()
-    try:
-        from kimi_cli.cli import cli
-
-        cli(args=list(ctx.args), prog_name="sanad", standalone_mode=True)
-    finally:
-        renewer.stop()
-        session.close()
+    _launch_workspace(Console(), ctx.args)
 
 
 def main() -> None:

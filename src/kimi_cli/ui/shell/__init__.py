@@ -265,7 +265,7 @@ class Shell:
                 Text(""),
                 Text(
                     "Your conversation history has been saved. "
-                    "Restart kimi in a valid directory to continue.",
+                    "Restart sanad in a valid directory to continue.",
                     style="dim",
                 ),
             ),

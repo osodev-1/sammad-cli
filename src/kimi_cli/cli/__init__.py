@@ -731,7 +731,7 @@ def kimi(
     def _print_resume_hint(session: Session) -> None:
         """Print a hint for resuming the session after exit."""
         if not session.is_empty():
-            _emit_fatal_error(f"\nTo resume this session: kimi -r {session.id}")
+            _emit_fatal_error(f"\nTo resume this session: sanad run -r {session.id}")
 
     async def _post_run(last_session: Session, exit_code: int) -> None:
         _print_resume_hint(last_session)

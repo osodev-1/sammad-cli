@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 from collections.abc import Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
@@ -622,7 +621,7 @@ async def list_sessions(app: Shell, args: str):
         return
 
     if selected_work_dir != current_session.work_dir:
-        cmd = f"kimi --work-dir {shlex.quote(str(selected_work_dir))} --session {selection}"
+        cmd = f"sanad run --work-dir {shlex.quote(str(selected_work_dir))} --session {selection}"
         console.print(f"[yellow]Session is in a different directory. Run:[/yellow]\n  {cmd}")
         return
 
@@ -722,47 +721,9 @@ def vis(app: Shell, args: str):
     raise SwitchToVis(session_id=session_id)
 
 
-@registry.command
-async def upgrade(app: Shell, args: str):
-    """Install Kimi Code — the faster successor (migrates your config & sessions)"""
-    from kimi_cli.telemetry import track
-    from kimi_cli.ui.shell.migration_nudge import (
-        install_command,
-        install_run_command,
-        verify_command,
-    )
-
-    track("upgrade_invoked")
-
-    cmd = install_command(sys.platform)
-    run_cmd = install_run_command(sys.platform)
-    console.print(
-        "[bold]This will install the new Kimi Code by running:[/bold]\n"
-        f"  [cyan]{cmd}[/cyan]\n"
-        "Your existing config & sessions will be migrated automatically."
-    )
-    try:
-        choice = await ChoiceInput(
-            message="Proceed with installation? (↑↓ navigate, Enter select, Ctrl+C cancel):",
-            options=[("yes", "Yes, install now"), ("no", "No, just show me the command")],
-            default="yes",
-        ).prompt_async()
-    except (EOFError, KeyboardInterrupt):
-        console.print("[grey50]Upgrade cancelled.[/grey50]")
-        return
-
-    if choice != "yes":
-        console.print(f"No problem. To install later, run:\n  [cyan]{cmd}[/cyan]")
-        return
-
-    await app._run_shell_command(run_cmd)  # pyright: ignore[reportPrivateUsage]
-    console.print(
-        "\n[green]The new Kimi Code is installed ✓[/green]  "
-        "Your config & sessions were migrated automatically.\n"
-        "Open a [bold]new terminal[/bold] and run [bold]kimi[/bold] to start it.\n"
-        f"[grey50](Verify with `{verify_command(sys.platform)}` — it should point "
-        "inside ~/.kimi-code.)[/grey50]"
-    )
+# sanad fork: upstream's `/upgrade` command (curl-install of Moonshot's
+# standalone Kimi Code) is removed — it would replace the governed CLI with an
+# ungoverned upstream build.
 
 
 @registry.command

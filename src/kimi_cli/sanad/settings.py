@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-DEFAULT_API_BASE_URL = "https://sanadcode.com"
+# www, not the apex: the apex has no A/AAAA record at the registrar (GoDaddy
+# forwards it), so only the www host actually resolves and serves the API.
+DEFAULT_API_BASE_URL = "https://www.sanadcode.com"
 KEYCHAIN_SERVICE = "sanad-cli"
 
 
