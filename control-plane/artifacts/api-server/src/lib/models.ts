@@ -1,18 +1,21 @@
 /**
- * Alias → Azure AI Foundry deployment name. Must stay in lockstep with the
- * control plane's catalog (sanad-web/lib/models/catalog.ts): the CLI only ever
- * sends the alias (from modelSettings[].name), and the gateway resolves it to
- * the real deployment before calling Foundry.
+ * CLI alias → the RunPod endpoint that serves it. `slug` is a RunPod Public
+ * Endpoint slug (e.g. "moonshot-kimi") or your own serverless endpoint id — both
+ * are reached at api.runpod.ai/v2/{slug}/openai/v1. `model` is the model name
+ * RunPod expects in the request body. Keep in lockstep with sanad-web's
+ * MODEL_CATALOG (lib/models/catalog.ts).
  */
-export const ALIAS_TO_DEPLOYMENT: Record<string, string> = {
-  "kimi-k2.7-code": "FW-Kimi-K2.7-Code",
-  "gpt-5.3-codex": "gpt-5.3-codex",
-  "deepseek-v4-pro": "DeepSeek-V4-Pro",
-  codestral: "Codestral-2501",
-  "mistral-small": "mistral-small-2503",
+export interface RunpodTarget {
+  slug: string;
+  model: string;
+}
+
+export const ALIAS_TO_RUNPOD: Record<string, RunpodTarget> = {
+  // Kimi K3 — a ready-to-use RunPod Public Endpoint (no deployment needed).
+  "kimi-k3": { slug: "moonshot-kimi", model: "kimi-k3" },
 };
 
-/** Resolve an alias to its Foundry deployment, or null if unknown. */
-export function resolveDeployment(alias: string): string | null {
-  return ALIAS_TO_DEPLOYMENT[alias] ?? null;
+/** Resolve a CLI alias to its RunPod target, or null if unknown. */
+export function resolveTarget(alias: string): RunpodTarget | null {
+  return ALIAS_TO_RUNPOD[alias] ?? null;
 }

@@ -1,7 +1,7 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { validateRuntimeToken } from "../lib/runtime-token";
-import { resolveDeployment } from "../lib/models";
-import { foundryChatCompletions } from "../lib/foundry";
+import { resolveTarget } from "../lib/models";
+import { runpodChatCompletions } from "../lib/runpod";
 import { reportUsage } from "../lib/usage";
 import { logger } from "../lib/logger";
 
@@ -67,25 +67,25 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
   // 2. Resolve the alias to a Foundry deployment.
   const body = (req.body ?? {}) as Record<string, unknown>;
   const alias = typeof body.model === "string" ? body.model : "";
-  const deployment = resolveDeployment(alias);
-  if (!deployment) {
+  const target = resolveTarget(alias);
+  if (!target) {
     return sendError(res, 400, "model_not_found", `Unknown model: ${alias || "(none)"}`);
   }
 
-  // 3. Proxy to Foundry (holds the Azure key).
+  // 3. Proxy to RunPod (holds the RunPod API key).
   let upstream;
   try {
-    upstream = await foundryChatCompletions(deployment, body);
+    upstream = await runpodChatCompletions(target.slug, target.model, body);
   } catch (err) {
-    logger.error({ err, alias }, "foundry request failed");
+    logger.error({ err, alias }, "runpod request failed");
     return sendError(res, 502, "upstream_unreachable", "Model provider unreachable", "api_error");
   }
 
   if (!upstream.ok || !upstream.body) {
     const detail = await upstream.text().catch(() => "");
     logger.error(
-      { status: upstream.status, detail: detail.slice(0, 500), alias, deployment },
-      "foundry returned an error"
+      { status: upstream.status, detail: detail.slice(0, 500), alias, slug: target.slug },
+      "runpod returned an error"
     );
     // A 401/403 from Foundry means *our* key is wrong — not the caller's fault.
     const status = upstream.status === 401 || upstream.status === 403 ? 502 : upstream.status;
