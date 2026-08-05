@@ -1,6 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "../db";
 import { subscriptions, memberships, organizations } from "../db/schema";
+import { isOrgComped } from "../billing/comp";
 
 export type EntitlementResult =
   | { ok: true }
@@ -16,6 +17,11 @@ export async function requireEntitled(
   orgId: string,
   userId: string
 ): Promise<EntitlementResult> {
+  // Comp / internal accounts (SANAD_COMP_EMAILS) are entitled unconditionally —
+  // no Stripe subscription required. Checked first so a comped org is never
+  // gated on the presence of an active subscription row.
+  if (await isOrgComped(orgId)) return { ok: true };
+
   // Fetch org type
   const [org] = await db
     .select()

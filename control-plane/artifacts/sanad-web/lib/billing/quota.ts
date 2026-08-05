@@ -9,6 +9,7 @@ import { and, count, eq, gte, sum } from "drizzle-orm";
 import { db } from "../db";
 import { subscriptions, usageEvents } from "../db/schema";
 import { resolveQuota } from "./plans";
+import { isOrgComped, COMP_QUOTA } from "./comp";
 import { computeUsage, type UsageDimension, type UsageStatus } from "./usage";
 
 /**
@@ -69,7 +70,11 @@ export async function getOrgUsage(orgId: string): Promise<OrgUsage> {
     .limit(1);
 
   const plan = sub?.plan ?? "free";
-  const limits = resolveQuota(plan, sub?.quota);
+  // Comped orgs get an effectively-unlimited allowance regardless of their
+  // (possibly missing) subscription row, so the meter never gates them.
+  const limits = (await isOrgComped(orgId))
+    ? COMP_QUOTA
+    : resolveQuota(plan, sub?.quota);
   const periodStart = startOfPeriod(sub?.currentPeriodEnd ?? null);
 
   const rows = await db
