@@ -1,28 +1,27 @@
-name: deploy-sanad-web
+name: deploy-gateway
 
-# Build the sanad-web (control plane) image, push it to GHCR, then (once
-# configured) tell Railway to redeploy. Secrets are NEVER baked into the image —
-# Railway injects them at runtime. The only build arg is the *publishable*
-# Clerk key, which next.config inlines into the browser bundle.
+# Build the sanad-gateway (Azure Foundry proxy) image, push it to GHCR, then
+# (once configured) redeploy it on Railway. No build-time secrets — the Foundry
+# key, DATABASE_URL, etc. are injected at runtime as Railway service variables.
 
 on:
   push:
     branches: [main]
     paths:
-      - "control-plane/artifacts/sanad-web/**"
+      - "control-plane/artifacts/api-server/**"
       - "control-plane/lib/**"
       - "control-plane/pnpm-lock.yaml"
       - "control-plane/pnpm-workspace.yaml"
       - "control-plane/package.json"
-      - ".github/workflows/deploy-sanad-web.yml"
+      - ".github/workflows/deploy-gateway.yml"
   workflow_dispatch:
 
 concurrency:
-  group: deploy-sanad-web-${{ github.ref }}
+  group: deploy-gateway-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/sanad-web
+  IMAGE: ghcr.io/${{ github.repository_owner }}/sanad-gateway
 
 jobs:
   test:
@@ -41,8 +40,8 @@ jobs:
           cache: pnpm
           cache-dependency-path: control-plane/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @workspace/sanad-web typecheck
-      - run: pnpm --filter @workspace/sanad-web test
+      - run: pnpm run typecheck:libs
+      - run: pnpm --filter @workspace/api-server run typecheck
 
   build-and-push:
     needs: test
@@ -63,29 +62,24 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: control-plane
-          file: control-plane/artifacts/sanad-web/Dockerfile
+          file: control-plane/artifacts/api-server/Dockerfile
           platforms: linux/amd64
           push: true
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
-          # Publishable (not secret) — set as a repo *variable*, not a secret.
-          build-args: |
-            CLERK_PUBLISHABLE_KEY=${{ vars.CLERK_PUBLISHABLE_KEY }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
-    # Skipped until the Railway service is wired. Set repo variable
-    # RAILWAY_SERVICE_SANAD_WEB and secret RAILWAY_TOKEN (a project token) to
-    # enable. The Railway service must be set to deploy the GHCR image above.
-    if: ${{ vars.RAILWAY_SERVICE_SANAD_WEB != '' }}
+    # Enable by setting repo variable RAILWAY_SERVICE_GATEWAY + secret RAILWAY_TOKEN.
+    if: ${{ vars.RAILWAY_SERVICE_GATEWAY != '' }}
     steps:
       - name: Redeploy on Railway
         run: |
           npm i -g @railway/cli
-          railway redeploy --service "${{ vars.RAILWAY_SERVICE_SANAD_WEB }}" --yes
+          railway redeploy --service "${{ vars.RAILWAY_SERVICE_GATEWAY }}" --yes
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
