@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Literal, Self
 
@@ -391,11 +394,24 @@ def save_config(config: Config, config_file: Path | None = None):
     logger.debug("Saving config to file: {file}", file=config_file)
     config_file.parent.mkdir(parents=True, exist_ok=True)
     config_data = config.model_dump(mode="json", exclude_none=True)
-    with open(config_file, "w", encoding="utf-8") as f:
-        if config_file.suffix.lower() == ".json":
-            f.write(json.dumps(config_data, ensure_ascii=False, indent=2))
-        else:
-            f.write(tomlkit.dumps(config_data))  # type: ignore[reportUnknownMemberType]
+    if config_file.suffix.lower() == ".json":
+        text = json.dumps(config_data, ensure_ascii=False, indent=2)
+    else:
+        text = tomlkit.dumps(config_data)  # type: ignore[reportUnknownMemberType]
+    # sanad fork: atomic tmp-file + os.replace (the atomic_json_write pattern).
+    # Concurrent `sanad run` sessions rewrite this file at startup; a torn TOML
+    # would brick every subsequent boot.
+    fd, tmp_path = tempfile.mkstemp(dir=config_file.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, config_file)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
 
 
 def _migrate_json_config_to_toml() -> None:
