@@ -102,6 +102,7 @@ describe("POST /api/terminal/session", () => {
       ticket: "tt_abc",
       wsUrl: "wss://terminal.test/ws",
       expiresIn: 60,
+      coldStart: false,
     });
     expect(vi.mocked(provisionPersonalOrg)).toHaveBeenCalled();
     expect(vi.mocked(mintTerminalTicket)).toHaveBeenCalledWith("user_1", "personal_user_1");

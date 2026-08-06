@@ -7,6 +7,8 @@ import { requireEntitled } from "@/lib/auth/entitlement";
 import { isTerminalAllowed } from "@/lib/auth/terminal";
 import { mintTerminalTicket } from "@/lib/auth/terminal-tickets";
 import { provisionPersonalOrg } from "@/lib/clerk/provisioning";
+import { computeMode } from "@/lib/compute/mode";
+import { ensureWorkspaceTask } from "@/lib/compute/workspace";
 
 /**
  * Browser-facing: mint a one-time terminal ticket for the signed-in user.
@@ -69,11 +71,27 @@ export async function POST() {
     return err(403, reason, message);
   }
 
-  const wsUrl = process.env.TERMINAL_WS_URL;
-  if (!wsUrl) {
-    return err(503, "terminal_unavailable", "Terminal service is not configured");
+  let wsUrl: string;
+  let coldStart = false;
+  if (computeMode() === "aws") {
+    // Ensure the user's machine FIRST; the 60s ticket is minted last so its
+    // whole TTL is spent on the browser's connect, never on a cold start.
+    try {
+      const target = await ensureWorkspaceTask(userId);
+      wsUrl = target.wsUrl;
+      coldStart = target.coldStart;
+    } catch (e) {
+      console.error("workspace provisioning failed", e);
+      return err(503, "terminal_unavailable", "Could not start your workspace", true);
+    }
+  } else {
+    const configured = process.env.TERMINAL_WS_URL;
+    if (!configured) {
+      return err(503, "terminal_unavailable", "Terminal service is not configured");
+    }
+    wsUrl = configured;
   }
 
   const { ticket, expiresIn } = await mintTerminalTicket(userId, activeOrgId);
-  return ok({ ticket, wsUrl, expiresIn });
+  return ok({ ticket, wsUrl, expiresIn, coldStart });
 }

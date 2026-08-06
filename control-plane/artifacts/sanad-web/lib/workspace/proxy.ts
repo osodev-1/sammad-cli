@@ -34,20 +34,46 @@ export async function authenticateWorkspace(): Promise<WorkspaceAuth> {
   return { ok: true, userId };
 }
 
-/** Forward a request to the terminal service, injecting service auth headers. */
+/**
+ * Forward a request to the user's workspace, injecting service auth.
+ *
+ * railway mode: the shared multi-user container (secret + explicit user).
+ * aws mode: the user's own machine via the router, authenticated with the
+ * derived per-run bearer. A stopped machine returns 503 from the router; the
+ * client surfaces it as "workspace is waking" and retries.
+ */
 export async function workspaceFetch(
   userId: string,
   path: string,
   init: RequestInit & { duplex?: "half" } = {}
 ): Promise<Response> {
-  const base = process.env.TERMINAL_INTERNAL_URL;
-  const secret = process.env.TERMINAL_SHARED_SECRET;
-  if (!base || !secret) {
-    throw new Error("terminal service is not configured");
-  }
   const headers = new Headers(init.headers);
-  headers.set("x-terminal-secret", secret);
-  headers.set("x-workspace-user", userId);
+  let base: string;
+
+  const { computeMode } = await import("../compute/mode");
+  if (computeMode() === "aws") {
+    const { workspaceTaskAuth } = await import("../compute/workspace");
+    const target = await workspaceTaskAuth(userId);
+    if (!target) {
+      // No machine yet — the workspace page's session POST provisions it.
+      return new Response(
+        JSON.stringify({ error: { code: "workspace_not_ready", message: "Workspace is starting" } }),
+        { status: 503, headers: { "content-type": "application/json" } }
+      );
+    }
+    base = target.baseUrl;
+    headers.set("authorization", `Bearer ${target.token}`);
+  } else {
+    const legacyBase = process.env.TERMINAL_INTERNAL_URL;
+    const secret = process.env.TERMINAL_SHARED_SECRET;
+    if (!legacyBase || !secret) {
+      throw new Error("terminal service is not configured");
+    }
+    base = legacyBase;
+    headers.set("x-terminal-secret", secret);
+    headers.set("x-workspace-user", userId);
+  }
+
   // Streaming request bodies (uploads, file writes) require half duplex.
   if (init.body && !init.duplex) init.duplex = "half";
   return fetch(`${base.replace(/\/+$/, "")}${path}`, { ...init, headers });

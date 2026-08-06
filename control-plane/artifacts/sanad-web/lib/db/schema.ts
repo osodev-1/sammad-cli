@@ -136,6 +136,45 @@ export const usageEvents = pgTable("usage_events", {
     .notNull(),
 });
 
+export const workspaceTasks = pgTable("workspace_tasks", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .unique()
+    .references(() => users.id),
+  // sha256(userId)[:12] — the public routing label (no PII in hostnames).
+  hash12: text("hash12").notNull().unique(),
+  efsAccessPointId: text("efs_access_point_id").notNull(),
+  taskArn: text("task_arn"),
+  taskIp: text("task_ip"),
+  // Per-run nonce the machine credential derives from; rotated every RunTask.
+  runNonce: text("run_nonce"),
+  imageRef: text("image_ref").notNull(),
+  state: text("state").notNull(), // "provisioning" | "ready" | "error"
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const ships = pgTable("ships", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id),
+  orgId: text("org_id")
+    .notNull()
+    .references(() => organizations.id),
+  appSlug: text("app_slug").notNull().unique(),
+  ecrImage: text("ecr_image"),
+  commitSha: text("commit_sha").notNull(),
+  codebuildId: text("codebuild_id"),
+  status: text("status").notNull(), // queued|building|deploying|deployed|failed
+  url: text("url"),
+  error: text("error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+});
+
 export const terminalTickets = pgTable("terminal_tickets", {
   id: text("id").primaryKey(),
   ticketHash: text("ticket_hash").notNull().unique(), // sha256 of the opaque "tt_..." token

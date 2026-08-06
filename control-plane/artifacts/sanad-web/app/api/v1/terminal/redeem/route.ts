@@ -1,12 +1,16 @@
 import { timingSafeEqual } from "crypto";
+import { eq } from "drizzle-orm";
 import { NextRequest } from "next/server";
 import { z } from "zod";
 import { ok, err } from "@/lib/http/envelope";
 import { redeemTerminalTicket } from "@/lib/auth/terminal-tickets";
+import { db } from "@/lib/db";
+import { workspaceTasks } from "@/lib/db/schema";
+import { machineTokenMatches } from "@/lib/compute/tokens";
 
 const Body = z.object({ ticket: z.string().min(1).max(256) });
 
-/** Timing-safe comparison against the shared service secret. */
+/** Timing-safe comparison against the shared service secret (railway mode). */
 function secretMatches(header: string | null): boolean {
   const secret = process.env.TERMINAL_SHARED_SECRET;
   if (!secret || !header) return false;
@@ -15,16 +19,50 @@ function secretMatches(header: string | null): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+type Caller =
+  | { kind: "legacy" }
+  | { kind: "machine"; userId: string }
+  | { kind: "unauthorized" };
+
 /**
- * Server-to-server: the terminal service exchanges a one-time ticket for the
- * CLI session token it will inject into the spawned agent. Gated by
- * X-Terminal-Secret — this route is never called by browsers.
+ * Who is redeeming? Either the legacy shared-secret service, or a workspace
+ * machine presenting its derived credential (token + nonce). For machines we
+ * resolve WHICH user's machine via the nonce and verify the HMAC — and later
+ * require the ticket to belong to that same user, so a stolen ticket can
+ * never be redeemed through someone else's machine.
  */
+async function identifyCaller(req: NextRequest): Promise<Caller> {
+  const machineToken = req.headers.get("x-machine-token");
+  const machineNonce = req.headers.get("x-machine-nonce");
+  if (machineToken && machineNonce) {
+    const [row] = await db
+      .select()
+      .from(workspaceTasks)
+      .where(eq(workspaceTasks.runNonce, machineNonce))
+      .limit(1);
+    if (!row) return { kind: "unauthorized" };
+    try {
+      if (!machineTokenMatches(machineToken, row.userId, machineNonce)) {
+        return { kind: "unauthorized" };
+      }
+    } catch {
+      return { kind: "unauthorized" }; // TERMINAL_MACHINE_KEY unset
+    }
+    return { kind: "machine", userId: row.userId };
+  }
+  if (secretMatches(req.headers.get("x-terminal-secret"))) {
+    return { kind: "legacy" };
+  }
+  return { kind: "unauthorized" };
+}
+
 export async function POST(req: NextRequest) {
-  if (!process.env.TERMINAL_SHARED_SECRET) {
+  if (!process.env.TERMINAL_SHARED_SECRET && !process.env.TERMINAL_MACHINE_KEY) {
     return err(503, "terminal_unavailable", "Terminal redeem is not configured");
   }
-  if (!secretMatches(req.headers.get("x-terminal-secret"))) {
+
+  const caller = await identifyCaller(req);
+  if (caller.kind === "unauthorized") {
     return err(401, "unauthorized", "Invalid terminal service credential");
   }
 
@@ -48,6 +86,16 @@ export async function POST(req: NextRequest) {
       return err(410, "ticket_expired", "Ticket has expired");
     }
     return err(409, "conflict", "Ticket already redeemed");
+  }
+
+  // Cross-user enforcement: a machine may only redeem its own user's tickets.
+  // (The ticket is burned either way — an attacker gains nothing but a log line.)
+  if (caller.kind === "machine" && result.userId !== caller.userId) {
+    console.error("cross-user redeem blocked", {
+      machineUser: caller.userId,
+      ticketUser: result.userId,
+    });
+    return err(403, "forbidden", "Ticket does not belong to this workspace");
   }
 
   return ok({
