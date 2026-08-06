@@ -47,14 +47,26 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
   const termCounter = useRef(1);
   const viewCounter = useRef(0);
 
-  const refresh = useCallback(async () => {
+  /* While the workspace machine is waking (snapshot 503s), back off instead
+     of hammering every tick — the first success resets to normal cadence. */
+  const snapshotFails = useRef(0);
+  const snapshotNextAt = useRef(0);
+
+  const refresh = useCallback(async (force = false) => {
+    if (!force && Date.now() < snapshotNextAt.current) return;
     setPolling(true);
     try {
       const res = await fetch("/api/workspace/snapshot");
       if (res.ok) {
+        snapshotFails.current = 0;
+        snapshotNextAt.current = 0;
         const body = await res.json();
         const next: WsEntry[] | undefined = body?.data?.entries;
         if (Array.isArray(next)) setEntries(next);
+      } else {
+        snapshotFails.current += 1;
+        const backoff = Math.min(POLL_MS * 2 ** snapshotFails.current, 30_000);
+        snapshotNextAt.current = Date.now() + backoff;
       }
     } catch {
       /* transient — next poll will retry */
@@ -65,7 +77,7 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
 
   /* Poll while the page is visible; the Page Visibility API pauses it. */
   useEffect(() => {
-    void refresh();
+    void refresh(true);
     const tick = () => {
       if (document.visibilityState === "visible") void refresh();
     };
@@ -79,6 +91,12 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [refresh]);
+
+  /* The moment a terminal connects the workspace is definitely up — skip any
+     pending backoff so the file tree fills in right away. */
+  useEffect(() => {
+    if (Object.values(phases).some((p) => p.tag === "live")) void refresh(true);
+  }, [phases, refresh]);
 
   useEffect(() => {
     if (!notice) return;

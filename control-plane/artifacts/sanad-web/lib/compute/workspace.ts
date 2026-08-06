@@ -20,6 +20,7 @@ import {
   ensureAccessPoint,
   registerTaskDefinition,
   runWorkspaceTask,
+  stopTask,
   type AwsComputeConfig,
 } from "./aws";
 import { deriveMachineToken, workspaceHash } from "./tokens";
@@ -57,6 +58,18 @@ async function waitForRunning(
     await sleep(RUN_POLL_MS);
   }
   throw new Error("workspace task did not reach RUNNING in time");
+}
+
+async function probeHealthz(url: string, timeoutMs = 3_000): Promise<boolean> {
+  try {
+    const res = await fetch(url, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 async function waitForAgentd(baseUrl: string): Promise<void> {
@@ -133,13 +146,28 @@ export async function ensureWorkspaceTask(userId: string): Promise<WorkspaceTarg
           .set({ taskIp: privateIp, updatedAt: new Date() })
           .where(eq(workspaceTasks.id, row.id));
       }
-      return {
-        hash12: row.hash12,
-        wsUrl: `${baseUrl.replace("https://", "wss://")}/ws`,
-        baseUrl,
-        agentdToken: deriveMachineToken(userId, row.runNonce),
-        coldStart: false,
-      };
+      // "RUNNING" at ECS is not "reachable": verify agentd answers through
+      // the router — the same path the browser is about to use.
+      if (await probeHealthz(`${baseUrl}/healthz`)) {
+        return {
+          hash12: row.hash12,
+          wsUrl: `${baseUrl.replace("https://", "wss://")}/ws`,
+          baseUrl,
+          agentdToken: deriveMachineToken(userId, row.runNonce),
+          coldStart: false,
+        };
+      }
+      // Unreachable. If the ingress itself is down, the task is likely fine —
+      // never stop it (it may be mid-task); surface a retryable error instead.
+      const host = process.env.COMPUTE_HOST ?? "compute.sanadcode.com";
+      if (!(await probeHealthz(`https://${host}/healthz`))) {
+        throw new Error("compute ingress is unavailable — retry shortly");
+      }
+      // Ingress healthy but the task doesn't answer: a zombie. Replace it.
+      console.error(
+        `workspace task ${row.taskArn} is RUNNING but unreachable — replacing`
+      );
+      await stopTask(config, row.taskArn).catch(() => {});
     }
   }
 

@@ -19,7 +19,7 @@ import { XTERM_OPTIONS } from "@/lib/terminal/xtermTheme";
 import { button, size, type } from "../ui/theme";
 
 export type TerminalPhase =
-  | { tag: "connecting" }
+  | { tag: "connecting"; waking?: boolean }
   | { tag: "live" }
   | { tag: "exited"; code: number | null }
   | { tag: "conflict"; kind: "taken_over" | "refused" }
@@ -182,6 +182,12 @@ export default function TerminalPanel({ visible, onPhaseChange }: Props) {
 
     setPhase({ tag: "connecting" });
 
+    /* A session mint that takes more than a moment means the workspace
+       machine is cold-starting — say so instead of a silent "connecting". */
+    const wakingTimer = window.setTimeout(() => {
+      setPhase((p) => (p.tag === "connecting" ? { tag: "connecting", waking: true } : p));
+    }, 3_000);
+
     (async () => {
       let res: Response;
       try {
@@ -285,6 +291,7 @@ export default function TerminalPanel({ visible, onPhaseChange }: Props) {
     return () => {
       cancelled = true;
       ac.abort();
+      window.clearTimeout(wakingTimer);
       for (const d of subs) d.dispose();
       if (ping !== null) window.clearInterval(ping);
       wsRef.current = null;
@@ -324,7 +331,13 @@ interface OverlayCopy {
 function overlayFor(phase: TerminalPhase): OverlayCopy | null {
   switch (phase.tag) {
     case "connecting":
-      return { title: "connecting…", body: "", cta: "" };
+      return phase.waking
+        ? {
+            title: "Waking your workspace…",
+            body: "Your machine is starting up. The first start after a rest can take about a minute.",
+            cta: "",
+          }
+        : { title: "connecting…", body: "", cta: "" };
     case "disconnected":
       return {
         title: "Connection lost",

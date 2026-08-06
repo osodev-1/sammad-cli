@@ -4,6 +4,7 @@
  * user-supplied Host header, which is the whole thing being tested here.
  */
 import http from "node:http";
+import net from "node:net";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
@@ -15,6 +16,7 @@ const HASH = "abc123def456";
 
 let target: http.Server;
 let router: http.Server;
+let wss: WebSocketServer;
 let routerPort: number;
 let targetPort: number;
 
@@ -49,7 +51,7 @@ beforeAll(async () => {
     });
     res.end(`echo:${req.url}`);
   });
-  const wss = new WebSocketServer({ server: target, path: "/ws" });
+  wss = new WebSocketServer({ server: target, path: "/ws" });
   wss.on("connection", (ws) => ws.on("message", (m) => ws.send(`pong:${m}`)));
   await new Promise<void>((r) => target.listen(0, "127.0.0.1", r));
   targetPort = (target.address() as AddressInfo).port;
@@ -72,6 +74,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Proxied WS/RST leftovers hold sockets open — upgraded sockets are not
+  // covered by closeAllConnections, so terminate the WS clients directly.
+  for (const client of wss.clients) client.terminate();
+  wss.close();
+  router.closeAllConnections();
+  target.closeAllConnections();
   await new Promise((r) => router.close(r));
   await new Promise((r) => target.close(r));
 });
@@ -117,5 +125,71 @@ describe("router proxying", () => {
     });
     expect(reply).toBe("pong:marco");
     ws.close();
+  });
+});
+
+describe("router crash resilience", () => {
+  it("survives a client RST mid-upgrade (during the route lookup)", async () => {
+    // Reproduces the outage: the raw socket dies while resolve() awaits the
+    // control plane. Pre-fix, the socket's 'error' event had no listener and
+    // killed the process (vitest would die with it).
+    const sock = net.connect(routerPort, "127.0.0.1");
+    await new Promise<void>((r) => sock.on("connect", r));
+    sock.write(
+      `GET /u/${HASH}/ws HTTP/1.1\r\n` +
+        "Host: compute.sanadcode.com\r\n" +
+        "Connection: Upgrade\r\nUpgrade: websocket\r\n" +
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+        "Sec-WebSocket-Version: 13\r\n\r\n"
+    );
+    sock.resetAndDestroy(); // RST, not FIN — the aggressive teardown browsers do
+    await new Promise((r) => setTimeout(r, 100));
+
+    const res = await get("/healthz", "compute.sanadcode.com");
+    expect(res.status).toBe(200); // still alive
+  });
+
+  it("survives a WS upgrade to a dead workspace and keeps serving", async () => {
+    // Point resolution at a port nobody listens on (a stopped task's IP).
+    const deadConfig = loadConfig({
+      ROUTER_SHARED_SECRET: "rsec",
+      CONTROL_PLANE_URL: "https://cp.test",
+      AGENTD_PORT: "1", // connection refused
+      PREVIEW_PORTS: "1",
+    } as NodeJS.ProcessEnv);
+    const deadTable = new RouteTable(deadConfig, (async () =>
+      new Response(JSON.stringify({ data: { taskIp: "127.0.0.1" } }), {
+        status: 200,
+      })) as unknown as typeof fetch);
+    const deadRouter = createServer(deadConfig, deadTable);
+    await new Promise<void>((r) => deadRouter.listen(0, "127.0.0.1", r));
+    const deadPort = (deadRouter.address() as AddressInfo).port;
+
+    const ws = new WebSocket(`ws://127.0.0.1:${deadPort}/u/${HASH}/ws`, {
+      headers: { host: "compute.sanadcode.com" },
+    });
+    await new Promise<void>((resolve) => {
+      ws.on("error", () => resolve()); // upgrade fails — that's expected
+      ws.on("close", () => resolve());
+    });
+
+    const alive = await new Promise<number>((resolve, reject) => {
+      http
+        .get(
+          {
+            host: "127.0.0.1",
+            port: deadPort,
+            path: "/healthz",
+            headers: { host: "compute.sanadcode.com" },
+          },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          }
+        )
+        .on("error", reject);
+    });
+    expect(alive).toBe(200);
+    await new Promise((r) => deadRouter.close(r));
   });
 });
