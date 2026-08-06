@@ -81,3 +81,22 @@ describe("workspace model", () => {
     expect(formatBytes(3 * 1024 * 1024)).toBe("3.0 MB");
   });
 });
+
+describe("browser view helpers", () => {
+  it("identifies browser-viewable files", async () => {
+    const { isBrowserViewable } = await import("@/lib/terminal/workspace-model");
+    expect(isBrowserViewable("index.html")).toBe(true);
+    expect(isBrowserViewable("legacy.htm")).toBe(true);
+    expect(isBrowserViewable("logo.svg")).toBe(true);
+    expect(isBrowserViewable("main.py")).toBe(false);
+    expect(isBrowserViewable("report.pdf")).toBe(false);
+  });
+
+  it("builds preview URLs with per-segment encoding; passes absolute URLs through", async () => {
+    const { previewUrl } = await import("@/lib/terminal/workspace-model");
+    expect(previewUrl("site/index.html")).toBe("/api/workspace/preview/site/index.html");
+    expect(previewUrl("my site/a b.html")).toBe("/api/workspace/preview/my%20site/a%20b.html");
+    expect(previewUrl("/leading/slash.html")).toBe("/api/workspace/preview/leading/slash.html");
+    expect(previewUrl("https://x.example:3000/app")).toBe("https://x.example:3000/app");
+  });
+});

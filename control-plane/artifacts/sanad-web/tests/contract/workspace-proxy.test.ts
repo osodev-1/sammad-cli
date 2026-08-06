@@ -105,3 +105,57 @@ describe("workspace proxy routes", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe("preview route + HTML hardening", () => {
+  it("preview route sends the sandbox CSP and preserves content-type", async () => {
+    signIn();
+    fetchMock.mockResolvedValue(
+      new Response("<h1>hi</h1>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8", "x-file-name": "index.html" },
+      })
+    );
+    const { GET } = await import("@/app/api/workspace/preview/[...path]/route");
+    const res = await GET(
+      new NextRequest("http://localhost/api/workspace/preview/site/index.html"),
+      { params: Promise.resolve({ path: ["site", "index.html"] }) }
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    expect(res.headers.get("content-security-policy")).toBe(
+      "sandbox allow-scripts allow-forms; frame-ancestors 'self'"
+    );
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+  });
+
+  it("the plain file route neuters inline HTML to text/plain", async () => {
+    signIn();
+    fetchMock.mockResolvedValue(
+      new Response("<h1>hi</h1>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8", "x-file-name": "index.html" },
+      })
+    );
+    const { GET } = await import("@/app/api/workspace/file/route");
+    const res = await GET(
+      new NextRequest("http://localhost/api/workspace/file?path=index.html")
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+
+    // Downloads keep the true type (not rendered by the browser).
+    fetchMock.mockResolvedValue(
+      new Response("<h1>hi</h1>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8", "x-file-name": "index.html" },
+      })
+    );
+    const dl = await GET(
+      new NextRequest("http://localhost/api/workspace/file?path=index.html&download=1")
+    );
+    expect(dl.headers.get("content-type")).toContain("text/html");
+    expect(dl.headers.get("content-disposition")).toContain("attachment");
+  });
+});

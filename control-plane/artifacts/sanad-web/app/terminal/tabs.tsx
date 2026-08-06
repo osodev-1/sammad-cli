@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { CSSProperties } from "react";
-import { CrossOutlineIcon, DownloadIcon } from "../ui/icons";
+import type { CSSProperties, ReactNode } from "react";
+import { CrossOutlineIcon, DownloadIcon, GlobeIcon } from "../ui/icons";
 import { button, size, type } from "../ui/theme";
 import {
   isTextEditable,
@@ -22,23 +22,33 @@ export interface TerminalTabInfo {
   label: string;
 }
 
+export interface BrowserTab {
+  id: string; // "view-N"
+  url: string; // workspace path or absolute http(s) URL
+  title: string;
+}
+
 export function TabsBar({
   terminals,
+  viewTabs,
   fileTabs,
   active,
   canAddTerminal,
   onSelect,
   onCloseFile,
   onCloseTerminal,
+  onCloseView,
   onNewTerminal,
 }: {
   terminals: TerminalTabInfo[];
+  viewTabs: BrowserTab[];
   fileTabs: WorkspaceTab[];
   active: string;
   canAddTerminal: boolean;
   onSelect: (id: string) => void;
   onCloseFile: (path: string) => void;
   onCloseTerminal: (id: string) => void;
+  onCloseView: (id: string) => void;
   onNewTerminal: () => void;
 }) {
   return (
@@ -62,6 +72,16 @@ export function TabsBar({
           +
         </button>
       )}
+      {viewTabs.map((t) => (
+        <Tab
+          key={t.id}
+          label={t.title}
+          icon={<GlobeIcon size={12} strokeWidth={1.8} />}
+          active={active === t.id}
+          onSelect={() => onSelect(t.id)}
+          onClose={() => onCloseView(t.id)}
+        />
+      ))}
       {fileTabs.map((t) => (
         <Tab
           key={t.path}
@@ -77,11 +97,13 @@ export function TabsBar({
 
 function Tab({
   label,
+  icon,
   active,
   onSelect,
   onClose,
 }: {
   label: string;
+  icon?: ReactNode;
   active: boolean;
   onSelect: () => void;
   onClose?: () => void;
@@ -94,6 +116,7 @@ function Tab({
         if (e.button === 1) onClose?.();
       }}
     >
+      {icon}
       <span style={s.tabLabel}>{label}</span>
       {onClose && (
         <button

@@ -5,18 +5,21 @@ import type { CSSProperties } from "react";
 import Nav from "../ui/Nav";
 import TerminalFrame from "../ui/TerminalFrame";
 import ArtifactsStrip from "./ArtifactsStrip";
+import BrowserPanel from "./BrowserPanel";
 import FileTree from "./FileTree";
 import StatusBar from "./StatusBar";
 import TerminalPanel, { type TerminalPhase } from "./TerminalPanel";
 import {
   FilePreview,
   TabsBar,
+  type BrowserTab,
   type TerminalTabInfo,
   type WorkspaceTab,
 } from "./tabs";
 import {
   buildTree,
   detectArtifacts,
+  isBrowserViewable,
   type WsEntry,
 } from "@/lib/terminal/workspace-model";
 
@@ -36,11 +39,13 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
     { id: "term-1", label: "Terminal" },
   ]);
   const [fileTabs, setFileTabs] = useState<WorkspaceTab[]>([]);
+  const [viewTabs, setViewTabs] = useState<BrowserTab[]>([]);
   const [active, setActive] = useState<string>("term-1");
   const [phases, setPhases] = useState<Record<string, TerminalPhase>>({});
   const [notice, setNotice] = useState<string | null>(null);
   const sessionStart = useRef<number>(Date.now() / 1000);
   const termCounter = useRef(1);
+  const viewCounter = useRef(0);
 
   const refresh = useCallback(async () => {
     setPolling(true);
@@ -88,6 +93,7 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
   );
 
   const isTerminalActive = terminals.some((t) => t.id === active);
+  const activeView = viewTabs.find((v) => v.id === active) ?? null;
 
   const openFile = useCallback((path: string) => {
     const name = path.split("/").pop() ?? path;
@@ -95,6 +101,53 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
       prev.some((t) => t.path === path) ? prev : [...prev, { path, name }]
     );
     setActive(path);
+  }, []);
+
+  const viewTitle = (url: string): string => {
+    if (/^https?:\/\//i.test(url)) {
+      try {
+        return new URL(url).host;
+      } catch {
+        return url;
+      }
+    }
+    return url.split("/").pop() || url;
+  };
+
+  /* Updaters stay pure — companion setActive happens alongside (the #185 lesson). */
+  const openInBrowser = useCallback(
+    (pathOrUrl: string) => {
+      const existing = viewTabs.find((v) => v.url === pathOrUrl);
+      if (existing) {
+        setActive(existing.id);
+        return;
+      }
+      viewCounter.current += 1;
+      const tab: BrowserTab = {
+        id: `view-${viewCounter.current}`,
+        url: pathOrUrl,
+        title: viewTitle(pathOrUrl),
+      };
+      setViewTabs((prev) =>
+        prev.some((v) => v.url === pathOrUrl) ? prev : [...prev, tab]
+      );
+      setActive(tab.id);
+    },
+    [viewTabs]
+  );
+
+  const closeView = useCallback(
+    (id: string) => {
+      setViewTabs((prev) => prev.filter((v) => v.id !== id));
+      setActive((current) => (current === id ? terminals[0].id : current));
+    },
+    [terminals]
+  );
+
+  const navigateView = useCallback((id: string, nextUrl: string) => {
+    setViewTabs((prev) =>
+      prev.map((v) => (v.id === id ? { ...v, url: nextUrl, title: viewTitle(nextUrl) } : v))
+    );
   }, []);
 
   const closeFile = useCallback(
@@ -154,11 +207,13 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
       return next.length === prev.length ? prev : next;
     });
     setActive((current) =>
-      terminals.some((t) => t.id === current) || known.has(current)
+      terminals.some((t) => t.id === current) ||
+      viewTabs.some((v) => v.id === current) ||
+      known.has(current)
         ? current
         : terminals[0].id
     );
-  }, [entries, terminals]);
+  }, [entries, terminals, viewTabs]);
 
   /* Status bar shows the active terminal's state (or the first one's). */
   const statusPhase: TerminalPhase =
@@ -179,6 +234,7 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
             tree={tree}
             busy={polling}
             onOpenFile={openFile}
+            onOpenInBrowser={openInBrowser}
             onRefresh={() => void refresh()}
             onError={setNotice}
           />
@@ -186,12 +242,14 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
         <main style={s.main}>
           <TabsBar
             terminals={terminals}
+            viewTabs={viewTabs}
             fileTabs={fileTabs}
             active={active}
             canAddTerminal={terminals.length < MAX_TERMINALS}
             onSelect={setActive}
             onCloseFile={closeFile}
             onCloseTerminal={closeTerminal}
+            onCloseView={closeView}
             onNewTerminal={addTerminal}
           />
           <div style={s.panelArea}>
@@ -215,11 +273,21 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
                 />
               </TerminalFrame>
             ))}
-            {!isTerminalActive && active && (
+            {activeView && (
+              <BrowserPanel
+                key={activeView.id}
+                url={activeView.url}
+                onNavigate={(u) => navigateView(activeView.id, u)}
+              />
+            )}
+            {!isTerminalActive && !activeView && active && (
               <FilePreview key={active} path={active} />
             )}
           </div>
-          <ArtifactsStrip artifacts={artifacts} onOpen={openFile} />
+          <ArtifactsStrip
+            artifacts={artifacts}
+            onOpen={(p) => (isBrowserViewable(p) ? openInBrowser(p) : openFile(p))}
+          />
         </main>
       </div>
       <StatusBar phase={statusPhase} />

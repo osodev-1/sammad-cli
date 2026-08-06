@@ -83,7 +83,16 @@ export function relayStream(upstream: Response, disposition: "inline" | "attachm
     );
   }
   const headers = new Headers();
-  headers.set("content-type", upstream.headers.get("content-type") ?? "application/octet-stream");
+  let contentType = upstream.headers.get("content-type") ?? "application/octet-stream";
+  // This route must NEVER render executable HTML: an inline text/html response
+  // would execute workspace content same-origin on www.sanadcode.com with the
+  // user's cookies. The sandboxed /api/workspace/preview route is the only
+  // sanctioned HTML renderer.
+  if (disposition === "inline" && /html|xml/i.test(contentType)) {
+    contentType = "text/plain; charset=utf-8";
+  }
+  headers.set("content-type", contentType);
+  headers.set("x-content-type-options", "nosniff");
   const length = upstream.headers.get("content-length");
   if (length) headers.set("content-length", length);
   const name = upstream.headers.get("x-file-name") ?? "file";

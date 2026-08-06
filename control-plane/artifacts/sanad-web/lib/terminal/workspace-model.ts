@@ -30,7 +30,8 @@ const EXT_KINDS: Record<string, FileKind> = {
   json: "data", yaml: "data", yml: "data", csv: "data", toml: "data",
   js: "code", jsx: "code", ts: "code", tsx: "code", py: "code", rs: "code",
   go: "code", rb: "code", java: "code", c: "code", h: "code", cpp: "code",
-  sh: "code", bash: "code", zsh: "code", css: "code", html: "code", sql: "code",
+  sh: "code", bash: "code", zsh: "code", css: "code", html: "code", htm: "code",
+  sql: "code",
 };
 
 export function extension(name: string): string {
@@ -54,7 +55,7 @@ export type PreviewKind =
 
 const CODE_EXTS = new Set([
   "js", "jsx", "ts", "tsx", "py", "rs", "go", "rb", "java", "c", "h", "cpp",
-  "sh", "bash", "zsh", "css", "html", "sql", "toml", "yaml", "yml", "txt",
+  "sh", "bash", "zsh", "css", "html", "htm", "sql", "toml", "yaml", "yml", "txt",
   "env", "ini", "cfg", "log", "xml", "rst",
 ]);
 
@@ -72,6 +73,27 @@ export function previewKind(name: string): PreviewKind {
 /** Text-editable = anything we render as text (markdown/code/json/csv). */
 export function isTextEditable(name: string): boolean {
   return ["markdown", "code", "json", "csv"].includes(previewKind(name));
+}
+
+/** Renderable in the browser view (the sandboxed preview surface). */
+export function isBrowserViewable(name: string): boolean {
+  return ["html", "htm", "svg"].includes(extension(name));
+}
+
+/**
+ * URL for the browser view. Workspace paths go through the sandboxed preview
+ * route (per-segment encoded so relative assets resolve back through it);
+ * absolute http(s) URLs pass through untouched — forward-compat with the
+ * compute preview subdomains.
+ */
+export function previewUrl(pathOrUrl: string): string {
+  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
+  const encoded = pathOrUrl
+    .split("/")
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join("/");
+  return `/api/workspace/preview/${encoded}`;
 }
 
 export interface TreeNode extends WsEntry {

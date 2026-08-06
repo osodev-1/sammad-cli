@@ -17,12 +17,19 @@ import {
   UploadIcon,
 } from "../ui/icons";
 import { input, type } from "../ui/theme";
-import { fileKind, type FileKind, type TreeNode } from "@/lib/terminal/workspace-model";
+import {
+  fileKind,
+  isBrowserViewable,
+  type FileKind,
+  type TreeNode,
+} from "@/lib/terminal/workspace-model";
 
 interface Props {
   tree: TreeNode[];
   busy: boolean;
   onOpenFile: (path: string) => void;
+  /** Open in the sandboxed browser view (html/htm/svg, or a dir's index.html). */
+  onOpenInBrowser: (path: string) => void;
   onRefresh: () => void;
   /** Perform a workspace mutation then refresh; errors surface as alerts. */
   onError: (message: string) => void;
@@ -63,7 +70,14 @@ async function api(path: string, init?: RequestInit): Promise<void> {
   }
 }
 
-export default function FileTree({ tree, busy, onOpenFile, onRefresh, onError }: Props) {
+export default function FileTree({
+  tree,
+  busy,
+  onOpenFile,
+  onOpenInBrowser,
+  onRefresh,
+  onError,
+}: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
@@ -383,8 +397,20 @@ export default function FileTree({ tree, busy, onOpenFile, onRefresh, onError }:
                       fileInput.current?.click();
                     }}
                   />
+                  {menu.node.children.some((c) => c.name === "index.html") && (
+                    <MenuItem
+                      label="Open in browser"
+                      onClick={() => onOpenInBrowser(`${menu.node!.path}/index.html`)}
+                    />
+                  )}
                   <div style={s.menuRule} />
                 </>
+              )}
+              {menu.node.kind === "file" && isBrowserViewable(menu.node.name) && (
+                <MenuItem
+                  label="Open in browser"
+                  onClick={() => onOpenInBrowser(menu.node!.path)}
+                />
               )}
               <MenuItem label="Rename" onClick={() => setRenaming(menu.node!.path)} />
               <MenuItem label="Move to…" onClick={() => doMove(menu.node!)} />
