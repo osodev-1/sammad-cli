@@ -49,6 +49,86 @@ allow() { # sg-id proto port source-sg-id|cidr
 # ------------------------------------------------------------------ certs ---
 cert_arn_for() { aws acm list-certificates --includes keyTypes=RSA_2048,EC_prime256v1 --query "CertificateSummaryList[?DomainName=='$1'].CertificateArn | [0]" --output text; }
 
+# ----------------------------------------------------------- router phase ---
+# Deploys the sanad-router ECS service behind the ALB. Run AFTER `finish` and
+# after the sanad-router image exists in ECR:
+#     ROUTER_SHARED_SECRET=<same value as on sanad-web> bash bootstrap.sh router
+if [ "$PHASE" = "router" ]; then
+  : "${ROUTER_SHARED_SECRET:?set ROUTER_SHARED_SECRET=<value> (same as sanad-web)}"
+  say "ROUTER: target group + listener rules + ECS service"
+  VPC=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text)
+  SUBNETS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC" --query 'Subnets[].SubnetId' --output text)
+  ROUTER_SG=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=sanad-router-sg" "Name=vpc-id,Values=$VPC" --query 'SecurityGroups[0].GroupId' --output text)
+  ALB_ARN=$(aws elbv2 describe-load-balancers --names sanad-compute --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+  LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" --query "Listeners[?Port==\`443\`].ListenerArn | [0]" --output text)
+  [ "$LISTENER" = "None" ] && { echo "ERROR: run 'bash bootstrap.sh finish' first"; exit 1; }
+
+  TG_ARN=$(aws elbv2 describe-target-groups --names sanad-router --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null)
+  if [ "$TG_ARN" = "None" ] || [ -z "$TG_ARN" ]; then
+    TG_ARN=$(aws elbv2 create-target-group --name sanad-router --protocol HTTP --port 8080 \
+      --vpc-id "$VPC" --target-type ip --health-check-path /healthz \
+      --query 'TargetGroups[0].TargetGroupArn' --output text)
+    note "created target group"
+  else
+    note "target group exists"
+  fi
+
+  # Host rules: compute + preview hosts → router. (apps hosts come with Phase E.)
+  EXISTING_RULES=$(aws elbv2 describe-rules --listener-arn "$LISTENER" --query 'Rules[].Conditions[].HostHeaderConfig.Values[]' --output text 2>/dev/null || true)
+  if ! grep -q "compute.sanadcode.com" <<<"$EXISTING_RULES"; then
+    aws elbv2 create-rule --listener-arn "$LISTENER" --priority 10 \
+      --conditions "Field=host-header,HostHeaderConfig={Values=[compute.sanadcode.com]}" \
+      --actions "Type=forward,TargetGroupArn=$TG_ARN" >/dev/null
+    note "rule: compute.sanadcode.com → router"
+  fi
+  if ! grep -q "preview.sanadcode.com" <<<"$EXISTING_RULES"; then
+    aws elbv2 create-rule --listener-arn "$LISTENER" --priority 11 \
+      --conditions "Field=host-header,HostHeaderConfig={Values=[*.preview.sanadcode.com]}" \
+      --actions "Type=forward,TargetGroupArn=$TG_ARN" >/dev/null
+    note "rule: *.preview.sanadcode.com → router"
+  fi
+
+  say "router task definition + service"
+  cat > /tmp/sanad-router-td.json <<TDEOF
+{
+  "family": "sanad-router",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::$ACCT:role/sanad-task-execution",
+  "containerDefinitions": [{
+    "name": "router",
+    "image": "$ACCT.dkr.ecr.$REGION.amazonaws.com/sanad-router:latest",
+    "essential": true,
+    "portMappings": [{"containerPort": 8080, "protocol": "tcp"}],
+    "environment": [
+      {"name": "ROUTER_SHARED_SECRET", "value": "$ROUTER_SHARED_SECRET"},
+      {"name": "CONTROL_PLANE_URL", "value": "https://www.sanadcode.com"}
+    ],
+    "logConfiguration": {"logDriver": "awslogs", "options": {
+      "awslogs-group": "/sanad/workspaces", "awslogs-region": "$REGION", "awslogs-stream-prefix": "router"}}
+  }]
+}
+TDEOF
+  TD_ARN=$(aws ecs register-task-definition --cli-input-json file:///tmp/sanad-router-td.json --query 'taskDefinition.taskDefinitionArn' --output text)
+  note "task definition: $TD_ARN"
+
+  SUBNET_LIST=$(echo $SUBNETS | tr ' ' ',')
+  if aws ecs describe-services --cluster sanad-workspaces --services sanad-router --query 'services[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
+    aws ecs update-service --cluster sanad-workspaces --service sanad-router --task-definition "$TD_ARN" --force-new-deployment >/dev/null
+    note "service updated"
+  else
+    aws ecs create-service --cluster sanad-workspaces --service-name sanad-router \
+      --task-definition "$TD_ARN" --desired-count 1 --launch-type FARGATE \
+      --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_LIST],securityGroups=[$ROUTER_SG],assignPublicIp=ENABLED}" \
+      --load-balancers "targetGroupArn=$TG_ARN,containerName=router,containerPort=8080" >/dev/null
+    note "service created"
+  fi
+  say "DONE — router deploying; verify:  curl https://compute.sanadcode.com/healthz"
+  exit 0
+fi
+
 if [ "$PHASE" = "finish" ]; then
   say "FINISH: waiting for certificates, then creating the HTTPS listener"
   ALB_ARN=$(aws elbv2 describe-load-balancers --names sanad-compute --query 'LoadBalancers[0].LoadBalancerArn' --output text)
