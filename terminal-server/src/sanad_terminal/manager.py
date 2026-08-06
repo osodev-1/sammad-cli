@@ -1,9 +1,14 @@
-"""One live terminal per user, replace semantics.
+"""Concurrent terminals per user, capped, evict-oldest.
 
-A stale tab must never lock the user out: a new connection evicts the old one
-(error `session_replaced` + close 4409) and only proceeds after the old PTY is
-fully reaped — which also serializes same-user access to the unlocked
-config.toml the CLI rewrites at startup.
+Each WebSocket connection is its own session (own PTY, own agent process).
+A user may hold up to `max_per_user` at once; opening one more evicts their
+OLDEST session (error `session_replaced` + close 4409) so a pile of stale tabs
+can never lock the user out. Eviction awaits the old PTY's full reap before
+the new spawn proceeds, which also serializes same-user startup writes.
+
+Concurrent same-user agents share one KIMI_SHARE_DIR; the config file they
+each rewrite at startup is safe because the fork's save_config is atomic
+(tmp + os.replace) — last writer wins, never a torn file.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ class _WebSocketLike(Protocol):
 
 @dataclass
 class ActiveSession:
+    conn_id: str
     user_id: str
     pty: PtySession
     websocket: _WebSocketLike
@@ -36,38 +42,42 @@ class ActiveSession:
 
 
 class SessionManager:
-    def __init__(self) -> None:
-        self._sessions: dict[str, ActiveSession] = {}
+    def __init__(self, *, max_per_user: int = 3) -> None:
+        self._max_per_user = max(1, max_per_user)
+        self._sessions: dict[str, ActiveSession] = {}  # conn_id → session
         self._lock = asyncio.Lock()
 
     @property
     def count(self) -> int:
         return len(self._sessions)
 
-    def get(self, user_id: str) -> ActiveSession | None:
-        return self._sessions.get(user_id)
+    def count_for(self, user_id: str) -> int:
+        return sum(1 for s in self._sessions.values() if s.user_id == user_id)
 
     async def claim(self, user_id: str) -> None:
-        """Evict any existing session for user_id and wait for its full reap."""
+        """Make room for one more session for user_id (evict oldest if at cap)."""
         async with self._lock:
-            old = self._sessions.pop(user_id, None)
-            if old is None:
-                return
-            logger.info("replacing live session for {}", user_id)
-            with contextlib.suppress(Exception):
-                await old.websocket.send_text(error_frame("session_replaced"))
-            with contextlib.suppress(Exception):
-                await old.websocket.close(code=CLOSE_REPLACED, reason="replaced")
-            await old.pty.terminate()
+            while self.count_for(user_id) >= self._max_per_user:
+                oldest = min(
+                    (s for s in self._sessions.values() if s.user_id == user_id),
+                    key=lambda s: s.started_at,
+                )
+                del self._sessions[oldest.conn_id]
+                logger.info("evicting oldest session for {} (conn {})", user_id, oldest.conn_id)
+                with contextlib.suppress(Exception):
+                    await oldest.websocket.send_text(error_frame("session_replaced"))
+                with contextlib.suppress(Exception):
+                    await oldest.websocket.close(code=CLOSE_REPLACED, reason="replaced")
+                await oldest.pty.terminate()
 
     def register(self, session: ActiveSession) -> None:
-        self._sessions[session.user_id] = session
+        self._sessions[session.conn_id] = session
 
     def unregister(self, session: ActiveSession) -> None:
-        # Only remove if this exact session is still the registered one — a
-        # replacement may already have taken the slot.
-        if self._sessions.get(session.user_id) is session:
-            del self._sessions[session.user_id]
+        # Only remove if this exact session still owns the slot — an eviction
+        # may already have removed it.
+        if self._sessions.get(session.conn_id) is session:
+            del self._sessions[session.conn_id]
 
     async def shutdown(self) -> None:
         async with self._lock:

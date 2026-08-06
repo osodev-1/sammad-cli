@@ -161,9 +161,12 @@ def test_browser_origin_enforced(tmp_path: Path):
             assert json.loads(msg["text"])["code"] == "invalid_ticket"
 
 
-def test_second_connect_replaces_first(tmp_path: Path):
+def test_connect_over_cap_replaces_oldest(tmp_path: Path):
     identities = {"tt_a": IDENTITY, "tt_b": IDENTITY}
-    app = create_app(make_settings(tmp_path), make_control_plane(identities))
+    app = create_app(
+        make_settings(tmp_path, max_sessions_per_user=1),
+        make_control_plane(identities),
+    )
     with TestClient(app) as client, client.websocket_connect("/ws") as first:
         first.send_text(json.dumps({"type": "auth", "ticket": "tt_a"}))
         drain_until_ready(first)
@@ -184,6 +187,50 @@ def test_second_connect_replaces_first(tmp_path: Path):
 
             ready = drain_until_ready(second)
             assert ready["userId"] == "user_1"
+
+
+def test_concurrent_sessions_within_cap_coexist(tmp_path: Path):
+    identities = {"tt_a": IDENTITY, "tt_b": IDENTITY, "tt_c": IDENTITY}
+    app = create_app(
+        make_settings(tmp_path, max_sessions_per_user=2),
+        make_control_plane(identities),
+    )
+    with (
+        TestClient(app) as client,
+        client.websocket_connect("/ws") as first,
+        client.websocket_connect("/ws") as second,
+    ):
+        first.send_text(json.dumps({"type": "auth", "ticket": "tt_a"}))
+        drain_until_ready(first)
+        second.send_text(json.dumps({"type": "auth", "ticket": "tt_b"}))
+        drain_until_ready(second)
+
+        # Both live at once.
+        assert client.get("/healthz").json()["activeSessions"] == 2
+
+        # Both echo independently.
+        first.send_bytes(b"one\n")
+        second.send_bytes(b"two\n")
+        buf1 = b""
+        while b"one" not in buf1:
+            msg = first.receive()
+            if msg.get("bytes"):
+                buf1 += msg["bytes"]
+        buf2 = b""
+        while b"two" not in buf2:
+            msg = second.receive()
+            if msg.get("bytes"):
+                buf2 += msg["bytes"]
+
+        # A third connect evicts the OLDEST (first), not the newest.
+        with client.websocket_connect("/ws") as third:
+            third.send_text(json.dumps({"type": "auth", "ticket": "tt_c"}))
+            while True:
+                msg = first.receive()
+                if msg["type"] == "websocket.close":
+                    assert msg["code"] == 4409
+                    break
+            drain_until_ready(third)
 
 
 def test_healthz_counts_sessions(tmp_path: Path):

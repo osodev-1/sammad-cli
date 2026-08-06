@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -50,7 +51,7 @@ def create_app(
 ) -> FastAPI:
     resolved = settings or TerminalSettings.load()
     cp = control_plane or ControlPlaneClient(resolved.control_plane_url, resolved.shared_secret)
-    manager = SessionManager()
+    manager = SessionManager(max_per_user=resolved.max_sessions_per_user)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -125,7 +126,7 @@ def create_app(
         user_id = identity.user_id
         cols, rows = clamp_size(frame.cols, frame.rows)
 
-        # -- one live session per user (replace) -------------------------------
+        # -- capped concurrent sessions per user (evict oldest at the cap) -----
         await manager.claim(user_id)
 
         # -- workspace + spawn -------------------------------------------------
@@ -152,7 +153,7 @@ def create_app(
             await _safe_close(ws, CLOSE_INTERNAL)
             return
 
-        session = ActiveSession(user_id=user_id, pty=pty, websocket=ws)
+        session = ActiveSession(conn_id=str(uuid.uuid4()), user_id=user_id, pty=pty, websocket=ws)
         manager.register(session)
         await _safe_send(ws, ready_frame(user_id, cols, rows))
         logger.info("session started user={} pid={}", user_id, pty.pid)

@@ -124,6 +124,19 @@ def test_sanitize_filename():
         wfs.sanitize_filename("..")
 
 
+def test_sanitize_preserves_names_exactly():
+    # Spaces, parens, unicode — kept verbatim (the uploaded name IS the name).
+    assert wfs.sanitize_filename("My Report (final) v2.pdf") == "My Report (final) v2.pdf"
+    assert wfs.sanitize_filename(" leading and trailing ") == " leading and trailing "
+    assert wfs.sanitize_filename("تقرير نهائي.pdf") == "تقرير نهائي.pdf"
+
+
+def test_sanitize_repairs_latin1_mojibake():
+    original = "تقرير.pdf"
+    mojibake = original.encode("utf-8").decode("latin-1")
+    assert wfs.sanitize_filename(mojibake) == original
+
+
 def test_zip_directory_and_whole_workspace(root: Path):
     spool = wfs.build_zip(root, "docs")
     with zipfile.ZipFile(io.BytesIO(spool.read())) as zf:

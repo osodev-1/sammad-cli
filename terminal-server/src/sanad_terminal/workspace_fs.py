@@ -11,6 +11,7 @@ escapes are undetectable by path and are accepted under dogfood same-UID
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import tempfile
@@ -180,9 +181,17 @@ def search(root: Path, query: str, *, max_results: int = SEARCH_MAX_RESULTS) -> 
 
 
 def sanitize_filename(name: str) -> str:
-    """Uploads: keep only the basename, drop path separators and null bytes."""
-    base = os.path.basename(name.replace("\\", "/")).replace("\x00", "").strip()
-    if base in ("", ".", ".."):
+    """Uploads keep their EXACT name — only path separators and NULs go.
+
+    Some hops decode the multipart filename header as latin-1, turning UTF-8
+    names (e.g. Arabic) into mojibake; when a latin-1→utf-8 round-trip decodes
+    cleanly we adopt the repair. Pure-ASCII names round-trip unchanged, and
+    already-correct non-ASCII strings fail the encode step and are kept as-is.
+    """
+    with contextlib.suppress(UnicodeEncodeError, UnicodeDecodeError):
+        name = name.encode("latin-1").decode("utf-8")
+    base = os.path.basename(name.replace("\\", "/")).replace("\x00", "")
+    if base.strip() in ("", ".", ".."):
         raise PathViolation(f"invalid filename: {name!r}")
     return base
 
@@ -198,7 +207,7 @@ def build_zip(root: Path, rel: str) -> BinaryIO:
     if not target.exists():
         raise NotFound(rel)
 
-    # noqa-justified: the spool intentionally outlives this function — the
+    # SIM115 suppressed: the spool intentionally outlives this function — the
     # streaming response reads it and closes it in its finally block.
     spool: BinaryIO = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024)  # noqa: SIM115
     root_resolved = root.resolve()
