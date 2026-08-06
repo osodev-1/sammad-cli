@@ -10,7 +10,9 @@ FROM python:3.14-slim-bookworm AS build
 COPY --from=ghcr.io/astral-sh/uv:0.8.5 /uv /bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0
 WORKDIR /app
-COPY pyproject.toml uv.lock README.md ./
+# CHANGELOG.md/LICENSE are symlink targets inside src/ and packages/ — the
+# kimi-cli wheel build reads them through those links.
+COPY pyproject.toml uv.lock README.md CHANGELOG.md LICENSE ./
 COPY packages/ packages/
 COPY sdks/ sdks/
 COPY src/ src/
