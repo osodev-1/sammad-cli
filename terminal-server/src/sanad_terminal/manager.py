@@ -1,14 +1,15 @@
-"""Concurrent terminals per user, capped, evict-oldest.
+"""Session registry: capped concurrency, detach/reattach, evict-oldest.
 
-Each WebSocket connection is its own session (own PTY, own agent process).
-A user may hold up to `max_per_user` at once; opening one more evicts their
-OLDEST session (error `session_replaced` + close 4409) so a pile of stale tabs
-can never lock the user out. Eviction awaits the old PTY's full reap before
-the new spawn proceeds, which also serializes same-user startup writes.
+Each WebSocket connection owns one agent session — but the session outlives
+the socket. A dropped connection DETACHES: the PTY keeps running, its output
+drains into the reattach ring, and a later connection from the same user
+ADOPTS the most recently detached session (screen replayed from the ring)
+instead of spawning a new agent. Detached sessions are reaped after a grace
+window by the sweeper.
 
-Concurrent same-user agents share one KIMI_SHARE_DIR; the config file they
-each rewrite at startup is safe because the fork's save_config is atomic
-(tmp + os.replace) — last writer wins, never a torn file.
+A user holds at most `max_per_user` sessions (live + detached). Opening one
+more evicts the OLDEST, so stale tabs can never lock the user out. Eviction
+awaits the old PTY's full reap before the new spawn proceeds.
 """
 
 from __future__ import annotations
@@ -35,17 +36,50 @@ class ActiveSession:
     conn_id: str
     user_id: str
     pty: PtySession
-    websocket: _WebSocketLike
+    websocket: _WebSocketLike | None
     started_at: float = field(default_factory=time.monotonic)
     last_input_at: float = field(default_factory=time.monotonic)
     warned_idle: bool = False
+    detached_at: float | None = None
+    drainer: asyncio.Task[None] | None = None
 
 
 class SessionManager:
-    def __init__(self, *, max_per_user: int = 3) -> None:
+    def __init__(
+        self,
+        *,
+        max_per_user: int = 3,
+        detach_grace_seconds: float = 900.0,
+        max_session_seconds: float = 14400.0,
+    ) -> None:
         self._max_per_user = max(1, max_per_user)
+        self._detach_grace = detach_grace_seconds
+        self._max_session = max_session_seconds
         self._sessions: dict[str, ActiveSession] = {}  # conn_id → session
         self._lock = asyncio.Lock()
+        self._sweeper: asyncio.Task[None] | None = None
+
+    # -- lifecycle -------------------------------------------------------------
+
+    def start(self) -> None:
+        if self._sweeper is None:
+            self._sweeper = asyncio.get_running_loop().create_task(self._sweep_loop())
+
+    async def shutdown(self) -> None:
+        if self._sweeper is not None:
+            self._sweeper.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._sweeper
+            self._sweeper = None
+        async with self._lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        for s in sessions:
+            self._stop_drainer(s)
+            with contextlib.suppress(Exception):
+                await s.pty.terminate()
+
+    # -- queries ---------------------------------------------------------------
 
     @property
     def count(self) -> int:
@@ -54,8 +88,14 @@ class SessionManager:
     def count_for(self, user_id: str) -> int:
         return sum(1 for s in self._sessions.values() if s.user_id == user_id)
 
+    @property
+    def detached_count(self) -> int:
+        return sum(1 for s in self._sessions.values() if s.detached_at is not None)
+
+    # -- claim / register ------------------------------------------------------
+
     async def claim(self, user_id: str) -> None:
-        """Make room for one more session for user_id (evict oldest if at cap)."""
+        """Make room for one more session for user_id (evict oldest at cap)."""
         async with self._lock:
             while self.count_for(user_id) >= self._max_per_user:
                 oldest = min(
@@ -64,25 +104,107 @@ class SessionManager:
                 )
                 del self._sessions[oldest.conn_id]
                 logger.info("evicting oldest session for {} (conn {})", user_id, oldest.conn_id)
-                with contextlib.suppress(Exception):
-                    await oldest.websocket.send_text(error_frame("session_replaced"))
-                with contextlib.suppress(Exception):
-                    await oldest.websocket.close(code=CLOSE_REPLACED, reason="replaced")
+                self._stop_drainer(oldest)
+                if oldest.websocket is not None:
+                    with contextlib.suppress(Exception):
+                        await oldest.websocket.send_text(error_frame("session_replaced"))
+                    with contextlib.suppress(Exception):
+                        await oldest.websocket.close(code=CLOSE_REPLACED, reason="replaced")
                 await oldest.pty.terminate()
 
     def register(self, session: ActiveSession) -> None:
         self._sessions[session.conn_id] = session
 
     def unregister(self, session: ActiveSession) -> None:
-        # Only remove if this exact session still owns the slot — an eviction
-        # may already have removed it.
         if self._sessions.get(session.conn_id) is session:
             del self._sessions[session.conn_id]
 
-    async def shutdown(self) -> None:
+    # -- detach / reattach -----------------------------------------------------
+
+    def detach(self, session: ActiveSession) -> None:
+        """Socket gone; keep the agent alive and drain its output to the ring."""
+        session.websocket = None
+        session.detached_at = time.monotonic()
+
+        async def _drain() -> None:
+            # Chunks are already ring-buffered at read time; this just keeps
+            # the live queue empty so the agent never blocks on backpressure.
+            while await session.pty.read_output() is not None:
+                pass
+
+        session.drainer = asyncio.get_running_loop().create_task(_drain())
+        logger.info(
+            "session detached user={} conn={} (grace {}s)",
+            session.user_id,
+            session.conn_id,
+            int(self._detach_grace),
+        )
+
+    async def pop_detached(self, user_id: str) -> ActiveSession | None:
+        """Adopt the most recently detached, still-running session for user_id."""
         async with self._lock:
-            sessions = list(self._sessions.values())
-            self._sessions.clear()
-        for s in sessions:
-            with contextlib.suppress(Exception):
-                await s.pty.terminate()
+            candidates = sorted(
+                (
+                    s
+                    for s in self._sessions.values()
+                    if s.user_id == user_id and s.detached_at is not None
+                ),
+                key=lambda s: s.detached_at or 0.0,
+                reverse=True,
+            )
+            for session in candidates:
+                if session.pty.exited.is_set():
+                    del self._sessions[session.conn_id]
+                    self._stop_drainer(session)
+                    with contextlib.suppress(Exception):
+                        await session.pty.terminate()
+                    continue
+                session.detached_at = None
+                return session
+            return None
+
+    async def finish_attach(self, session: ActiveSession) -> bytes:
+        """Stop the drainer and return the replay snapshot for the new socket."""
+        self._stop_drainer(session)
+        if session.drainer is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await session.drainer
+            session.drainer = None
+        session.pty.drain_pending_nowait()
+        return session.pty.ring_snapshot()
+
+    def _stop_drainer(self, session: ActiveSession) -> None:
+        if session.drainer is not None and not session.drainer.done():
+            session.drainer.cancel()
+
+    # -- sweeper ---------------------------------------------------------------
+
+    async def _sweep_loop(self) -> None:
+        while True:
+            await asyncio.sleep(15.0)
+            now = time.monotonic()
+            doomed: list[ActiveSession] = []
+            async with self._lock:
+                for session in list(self._sessions.values()):
+                    expired_detach = (
+                        session.detached_at is not None
+                        and now - session.detached_at > self._detach_grace
+                    )
+                    dead = session.detached_at is not None and session.pty.exited.is_set()
+                    over_lifetime = now - session.started_at > self._max_session
+                    if expired_detach or dead or over_lifetime:
+                        del self._sessions[session.conn_id]
+                        doomed.append(session)
+            for session in doomed:
+                logger.info(
+                    "sweeping session user={} conn={} detached={}",
+                    session.user_id,
+                    session.conn_id,
+                    session.detached_at is not None,
+                )
+                self._stop_drainer(session)
+                if session.websocket is not None:
+                    with contextlib.suppress(Exception):
+                        await session.websocket.close(code=1000, reason="expired")
+                with contextlib.suppress(Exception):
+                    await session.pty.terminate()

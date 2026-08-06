@@ -9,6 +9,7 @@ loop.add_reader, and a graceful SIGHUP→SIGTERM→SIGKILL reap.
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import errno
 import fcntl
@@ -29,6 +30,10 @@ _READ_CHUNK = 65536
 # backpressure instead of unbounded memory.
 _HIGH_WATER = 1 * 1024 * 1024
 _LOW_WATER = 256 * 1024
+# Recent-output ring kept for reattach: enough to repaint the screen and some
+# scrollback after a dropped connection, bounded so detached sessions can't
+# grow memory.
+_RING_CAP = 256 * 1024
 
 
 def _set_winsize(fd: int, cols: int, rows: int) -> None:
@@ -67,6 +72,8 @@ class PtySession:
         self._buffered = 0
         self._reader_paused = False
         self._eof = False
+        self._ring: collections.deque[bytes] = collections.deque()
+        self._ring_bytes = 0
         self.exited = asyncio.Event()
 
     @property
@@ -119,6 +126,14 @@ class PtySession:
         if not data:
             self._finish_output()
             return
+        # Every chunk lands in the reattach ring at read time — the live queue
+        # and the ring are parallel views, so replay-after-attach never
+        # duplicates what the resumed stream will deliver.
+        self._ring.append(data)
+        self._ring_bytes += len(data)
+        while self._ring_bytes > _RING_CAP and len(self._ring) > 1:
+            dropped = self._ring.popleft()
+            self._ring_bytes -= len(dropped)
         self._buffered += len(data)
         self._queue.put_nowait(data)
         if self._buffered >= _HIGH_WATER and not self._reader_paused:
@@ -152,6 +167,32 @@ class PtySession:
             self._reader_paused = False
             asyncio.get_running_loop().add_reader(self._master_fd, self._on_readable)
         return chunk
+
+    def drain_pending_nowait(self) -> None:
+        """Empty the live queue without blocking (chunks are already in the ring).
+
+        Used when finishing an attach: the drainer is stopped, any straggler
+        chunks are cleared here, then the ring snapshot is replayed — chunks
+        arriving after this point flow only through the queue.
+        """
+        while True:
+            try:
+                chunk = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if chunk is None:
+                self._queue.put_nowait(None)  # keep EOF sticky
+                return
+            self._buffered -= len(chunk)
+        # An empty queue with a paused reader would deadlock the next
+        # read_output — resume the reader now that pressure is gone.
+        if self._reader_paused and self._master_fd is not None and not self._eof:
+            self._reader_paused = False
+            asyncio.get_running_loop().add_reader(self._master_fd, self._on_readable)
+
+    def ring_snapshot(self) -> bytes:
+        """Recent output for screen restoration on reattach."""
+        return b"".join(self._ring)
 
     # -- input / control ------------------------------------------------------
 

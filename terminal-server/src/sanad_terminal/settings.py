@@ -27,6 +27,8 @@ class TerminalSettings:
     max_upload_bytes: int = 100 * 1024 * 1024
     # Concurrent terminals per user; opening one more evicts the oldest.
     max_sessions_per_user: int = 3
+    # How long a detached agent (socket dropped) keeps running before reap.
+    detach_grace_seconds: float = 900.0
     # SANAD_API_BASE_URL handed to the spawned agent; defaults to control_plane_url.
     child_api_base_url: str = ""
     # argv used to launch the agent; resolved from PATH unless overridden (tests).
@@ -70,6 +72,7 @@ class TerminalSettings:
             auth_frame_timeout_seconds=float(e.get("AUTH_FRAME_TIMEOUT_SECONDS", "10")),
             max_upload_bytes=int(e.get("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024))),
             max_sessions_per_user=int(e.get("MAX_SESSIONS_PER_USER", "3")),
+            detach_grace_seconds=float(e.get("DETACH_GRACE_SECONDS", "900")),
             child_api_base_url=e.get("SANAD_API_BASE_URL", control_plane).rstrip("/"),
             spawn_argv=argv,
         )

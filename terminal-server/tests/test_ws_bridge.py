@@ -87,7 +87,13 @@ def test_auth_then_ready_then_binary_echo(tmp_path: Path):
         with client.websocket_connect("/ws") as ws:
             ws.send_text(AUTH)
             ready = drain_until_ready(ws)
-            assert ready == {"type": "ready", "userId": "user_1", "cols": 100, "rows": 30}
+            assert ready == {
+                "type": "ready",
+                "userId": "user_1",
+                "cols": 100,
+                "rows": 30,
+                "resumed": False,
+            }
 
             # PTY output (echo READY) arrives as binary
             buf = b""
@@ -236,13 +242,137 @@ def test_concurrent_sessions_within_cap_coexist(tmp_path: Path):
 def test_healthz_counts_sessions(tmp_path: Path):
     app = create_app(make_settings(tmp_path), make_control_plane({"tt_good": IDENTITY}))
     with TestClient(app) as client:
-        assert client.get("/healthz").json() == {"status": "ok", "activeSessions": 0}
+        assert client.get("/healthz").json() == {
+            "status": "ok",
+            "activeSessions": 0,
+            "detachedSessions": 0,
+        }
         with client.websocket_connect("/ws") as ws:
             ws.send_text(AUTH)
             drain_until_ready(ws)
             assert client.get("/healthz").json()["activeSessions"] == 1
-        # after disconnect the registry drains (poll briefly — teardown is async)
-        for _ in range(50):
-            if client.get("/healthz").json()["activeSessions"] == 0:
-                break
-        assert client.get("/healthz").json()["activeSessions"] == 0
+        # Disconnect DETACHES: the agent survives, awaiting reattach.
+        wait_healthz(client, "detachedSessions", 1)
+        assert client.get("/healthz").json()["activeSessions"] == 1
+
+
+def wait_healthz(client: TestClient, key: str, value: int, tries: int = 150) -> None:
+    import time
+
+    for _ in range(tries):
+        if client.get("/healthz").json()[key] == value:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"healthz {key} never reached {value}")
+
+
+def test_disconnect_detaches_and_reconnect_reattaches(tmp_path: Path):
+    identities = {"tt_a": IDENTITY, "tt_b": IDENTITY}
+    app = create_app(make_settings(tmp_path), make_control_plane(identities))
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as first:
+            first.send_text(json.dumps({"type": "auth", "ticket": "tt_a"}))
+            drain_until_ready(first)
+            first.send_bytes(b"landmark\n")
+            buf = b""
+            while b"landmark" not in buf:
+                msg = first.receive()
+                if msg.get("bytes"):
+                    buf += msg["bytes"]
+        # Socket closed → the agent survives, detached.
+        wait_healthz(client, "detachedSessions", 1)
+        assert client.get("/healthz").json()["activeSessions"] == 1
+
+        with client.websocket_connect("/ws") as second:
+            second.send_text(json.dumps({"type": "auth", "ticket": "tt_b", "cols": 90, "rows": 28}))
+            ready = drain_until_ready(second)
+            assert ready["resumed"] is True
+
+            # The ring replay restores what happened before the drop…
+            buf = b""
+            while b"landmark" not in buf:
+                msg = second.receive()
+                if msg.get("bytes"):
+                    buf += msg["bytes"]
+
+            # …and it is the SAME live process: cat still echoes.
+            second.send_bytes(b"still-alive\n")
+            buf = b""
+            while b"still-alive" not in buf:
+                msg = second.receive()
+                if msg.get("bytes"):
+                    buf += msg["bytes"]
+
+        assert client.get("/healthz").json()["activeSessions"] == 1
+
+
+def test_detached_session_reaped_after_grace(tmp_path: Path):
+    app = create_app(
+        make_settings(tmp_path, detach_grace_seconds=0.0),
+        make_control_plane({"tt_a": IDENTITY}),
+    )
+    # Speed the sweeper up for the test.
+    import sanad_terminal.manager as manager_mod
+
+    original_sleep = manager_mod.asyncio.sleep
+
+    async def fast_sleep(delay: float) -> None:
+        await original_sleep(min(delay, 0.05))
+
+    manager_mod.asyncio.sleep = fast_sleep  # type: ignore[assignment]
+    try:
+        with TestClient(app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.send_text(json.dumps({"type": "auth", "ticket": "tt_a"}))
+                drain_until_ready(ws)
+            wait_healthz(client, "activeSessions", 0, tries=200)
+    finally:
+        manager_mod.asyncio.sleep = original_sleep  # type: ignore[assignment]
+
+
+def _fabricate_previous_session(tmp_path: Path, user: str = "user_1") -> None:
+    import hashlib
+
+    workspace = (tmp_path / "users" / user / "workspace").resolve()
+    digest = hashlib.md5(str(workspace).encode("utf-8")).hexdigest()
+    session_dir = tmp_path / "users" / user / "kimi-share" / "sessions" / digest / "sess-uuid"
+    session_dir.mkdir(parents=True)
+    (session_dir / "context.jsonl").write_text('{"role":"user"}\n')
+
+
+def test_first_terminal_resumes_previous_conversation(tmp_path: Path):
+    """With a prior session on disk, the FIRST spawn gets --continue; a second
+    concurrent terminal starts fresh (no --continue)."""
+    identities = {"tt_a": IDENTITY, "tt_b": IDENTITY}
+    # argv reveals its extra args: NARGS:<count> then keeps a cat alive.
+    argv = ("bash", "-c", 'echo "NARGS:$#"; exec cat', "cli")
+    (tmp_path / "users" / "user_1" / "workspace").mkdir(parents=True)
+    _fabricate_previous_session(tmp_path)
+
+    app = create_app(
+        make_settings(tmp_path, spawn_argv=argv, max_sessions_per_user=2),
+        make_control_plane(identities),
+    )
+    with (
+        TestClient(app) as client,
+        client.websocket_connect("/ws") as first,
+    ):
+        first.send_text(json.dumps({"type": "auth", "ticket": "tt_a"}))
+        ready = drain_until_ready(first)
+        assert ready["resumed"] is False
+        buf = b""
+        while b"NARGS:" not in buf:
+            msg = first.receive()
+            if msg.get("bytes"):
+                buf += msg["bytes"]
+        assert b"NARGS:1" in buf  # --continue appended
+
+        with client.websocket_connect("/ws") as second:
+            second.send_text(json.dumps({"type": "auth", "ticket": "tt_b"}))
+            drain_until_ready(second)
+            buf = b""
+            while b"NARGS:" not in buf:
+                msg = second.receive()
+                if msg.get("bytes"):
+                    buf += msg["bytes"]
+            assert b"NARGS:0" in buf  # concurrent terminal starts fresh

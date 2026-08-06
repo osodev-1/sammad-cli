@@ -11,6 +11,7 @@ session token the CLI writes into config.toml is unreachable from the browser.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -39,6 +40,28 @@ def prepare_user_dirs(users_root: Path, user_id: str) -> Path:
 
 def workspace_dir(users_root: Path, user_id: str) -> Path:
     return user_root(users_root, user_id) / "workspace"
+
+
+def has_previous_session(kimi_share: Path, workspace: Path) -> bool:
+    """True when the CLI has a resumable session for this workspace.
+
+    Mirrors the CLI's session layout: `<share>/sessions/<md5(workdir)>/<uuid>/`
+    (the same convention tests/e2e/shell_pty_helpers.py::find_session_dir
+    reproduces). A session is resumable when its context.jsonl has content —
+    the CLI deletes empty sessions on exit, but be defensive anyway.
+    """
+    digest = hashlib.md5(str(workspace.resolve()).encode("utf-8")).hexdigest()
+    sessions_root = kimi_share / "sessions" / digest
+    if not sessions_root.is_dir():
+        return False
+    for child in sessions_root.iterdir():
+        context = child / "context.jsonl"
+        try:
+            if context.is_file() and context.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def build_child_env(

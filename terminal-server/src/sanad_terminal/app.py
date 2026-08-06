@@ -39,6 +39,7 @@ from sanad_terminal.pty_session import PtySession
 from sanad_terminal.settings import TerminalSettings
 from sanad_terminal.workspace import (
     build_child_env,
+    has_previous_session,
     prepare_user_dirs,
 )
 
@@ -51,10 +52,15 @@ def create_app(
 ) -> FastAPI:
     resolved = settings or TerminalSettings.load()
     cp = control_plane or ControlPlaneClient(resolved.control_plane_url, resolved.shared_secret)
-    manager = SessionManager(max_per_user=resolved.max_sessions_per_user)
+    manager = SessionManager(
+        max_per_user=resolved.max_sessions_per_user,
+        detach_grace_seconds=resolved.detach_grace_seconds,
+        max_session_seconds=resolved.max_session_seconds,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        manager.start()
         yield
         await manager.shutdown()
         await cp.aclose()
@@ -71,7 +77,11 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
-        return {"status": "ok", "activeSessions": manager.count}
+        return {
+            "status": "ok",
+            "activeSessions": manager.count,
+            "detachedSessions": manager.detached_count,
+        }
 
     @app.websocket("/ws")
     async def terminal_ws(ws: WebSocket) -> None:
@@ -126,37 +136,61 @@ def create_app(
         user_id = identity.user_id
         cols, rows = clamp_size(frame.cols, frame.rows)
 
-        # -- capped concurrent sessions per user (evict oldest at the cap) -----
-        await manager.claim(user_id)
+        # -- reattach the most recent detached session, else spawn fresh -------
+        adopted = await manager.pop_detached(user_id)
+        if adopted is not None:
+            session = adopted
+            pty = session.pty
+            session.websocket = ws
+            session.last_input_at = time.monotonic()
+            session.warned_idle = False
+            replay = await manager.finish_attach(session)
+            pty.resize(cols, rows)  # new grid + SIGWINCH repaints the TUI
+            await _safe_send(ws, ready_frame(user_id, cols, rows, resumed=True))
+            if replay:
+                with contextlib.suppress(Exception):
+                    await ws.send_bytes(replay)
+            logger.info("session reattached user={} pid={}", user_id, pty.pid)
+        else:
+            # Capped concurrent sessions per user (evict oldest at the cap).
+            await manager.claim(user_id)
+            try:
+                user_dir = prepare_user_dirs(resolved.users_dir, user_id)
+                env = build_child_env(
+                    user_dir=user_dir,
+                    session_token=identity.session_token,
+                    api_base_url=resolved.child_api_base_url,
+                    cols=cols,
+                    rows=rows,
+                )
+                # First terminal after a cold start continues the last
+                # conversation in this workspace; extra terminals start fresh
+                # (two agents must not fight over one session).
+                argv = list(resolved.spawn_argv)
+                if manager.count_for(user_id) == 0 and has_previous_session(
+                    user_dir / "kimi-share", user_dir / "workspace"
+                ):
+                    argv.append("--continue")
+                pty = PtySession(
+                    argv=argv,
+                    cwd=user_dir / "workspace",
+                    env=env,
+                    cols=cols,
+                    rows=rows,
+                )
+                await pty.start()
+            except Exception as exc:
+                logger.error("spawn failed for {}: {}", user_id, exc)
+                await _safe_send(ws, error_frame("spawn_failed"))
+                await _safe_close(ws, CLOSE_INTERNAL)
+                return
 
-        # -- workspace + spawn -------------------------------------------------
-        try:
-            user_dir = prepare_user_dirs(resolved.users_dir, user_id)
-            env = build_child_env(
-                user_dir=user_dir,
-                session_token=identity.session_token,
-                api_base_url=resolved.child_api_base_url,
-                cols=cols,
-                rows=rows,
+            session = ActiveSession(
+                conn_id=str(uuid.uuid4()), user_id=user_id, pty=pty, websocket=ws
             )
-            pty = PtySession(
-                argv=resolved.spawn_argv,
-                cwd=user_dir / "workspace",
-                env=env,
-                cols=cols,
-                rows=rows,
-            )
-            await pty.start()
-        except Exception as exc:
-            logger.error("spawn failed for {}: {}", user_id, exc)
-            await _safe_send(ws, error_frame("spawn_failed"))
-            await _safe_close(ws, CLOSE_INTERNAL)
-            return
-
-        session = ActiveSession(conn_id=str(uuid.uuid4()), user_id=user_id, pty=pty, websocket=ws)
-        manager.register(session)
-        await _safe_send(ws, ready_frame(user_id, cols, rows))
-        logger.info("session started user={} pid={}", user_id, pty.pid)
+            manager.register(session)
+            await _safe_send(ws, ready_frame(user_id, cols, rows))
+            logger.info("session started user={} pid={} argv={}", user_id, pty.pid, argv)
 
         # -- pumps -------------------------------------------------------------
         async def client_pump() -> str:
@@ -228,8 +262,13 @@ def create_app(
             if exc:
                 logger.warning("session pump error for {}: {}", user_id, exc)
         finally:
-            manager.unregister(session)
-            await pty.terminate()
+            if outcome == "disconnect" and not pty.exited.is_set():
+                # The socket died, not the agent — keep it running detached so
+                # a reconnect (or page reload) lands back in the same session.
+                manager.detach(session)
+            else:
+                manager.unregister(session)
+                await pty.terminate()
 
         # -- close according to outcome ---------------------------------------
         if outcome == "eof":

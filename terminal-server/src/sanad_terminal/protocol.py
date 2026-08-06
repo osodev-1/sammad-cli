@@ -66,8 +66,10 @@ def clamp_size(cols: int, rows: int) -> tuple[int, int]:
 # -- server → client builders -------------------------------------------------
 
 
-def ready_frame(user_id: str, cols: int, rows: int) -> str:
-    return json.dumps({"type": "ready", "userId": user_id, "cols": cols, "rows": rows})
+def ready_frame(user_id: str, cols: int, rows: int, *, resumed: bool = False) -> str:
+    return json.dumps(
+        {"type": "ready", "userId": user_id, "cols": cols, "rows": rows, "resumed": resumed}
+    )
 
 
 def pong_frame() -> str:

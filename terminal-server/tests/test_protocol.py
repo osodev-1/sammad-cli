@@ -56,7 +56,9 @@ def test_server_frame_shapes():
         "userId": "user_1",
         "cols": 120,
         "rows": 40,
+        "resumed": False,
     }
+    assert json.loads(ready_frame("user_1", 120, 40, resumed=True))["resumed"] is True
     assert json.loads(exit_frame(0)) == {"type": "exit", "code": 0}
     assert json.loads(exit_frame(None)) == {"type": "exit", "code": None}
     assert json.loads(warning_frame("idle", 299.9)) == {
