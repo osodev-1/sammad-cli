@@ -14,7 +14,13 @@ import { button, size, surface, type } from "./ui/theme";
 export default function HomePage() {
   return (
     <div style={styles.root}>
-      <Nav links={[{ href: "/pricing", label: "Pricing" }, { href: "/dashboard", label: "Dashboard" }]} />
+      <Nav
+        links={[
+          { href: "/terminal", label: "Workspace", badge: "beta" },
+          { href: "/pricing", label: "Pricing" },
+          { href: "/dashboard", label: "Dashboard" },
+        ]}
+      />
 
       <main className="pad-x hero-tight" style={styles.hero}>
         <p style={styles.eyebrow}>CLI + gateway · governed AI</p>

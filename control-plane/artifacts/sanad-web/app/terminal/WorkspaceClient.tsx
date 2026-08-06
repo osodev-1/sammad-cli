@@ -8,7 +8,12 @@ import ArtifactsStrip from "./ArtifactsStrip";
 import FileTree from "./FileTree";
 import StatusBar from "./StatusBar";
 import TerminalPanel, { type TerminalPhase } from "./TerminalPanel";
-import { FilePreview, TabsBar, type WorkspaceTab } from "./tabs";
+import {
+  FilePreview,
+  TabsBar,
+  type TerminalTabInfo,
+  type WorkspaceTab,
+} from "./tabs";
 import {
   buildTree,
   detectArtifacts,
@@ -16,20 +21,26 @@ import {
 } from "@/lib/terminal/workspace-model";
 
 const POLL_MS = 4000;
+const MAX_TERMINALS = 3;
 
 /**
- * The Sanad workspace shell: Files sidebar, tabbed main area (terminal +
+ * The Sanad workspace shell: Files sidebar, tabbed main area (terminals +
  * previews), artifacts strip, status bar. The terminal is one panel — the
- * surrounding app owns the experience.
+ * surrounding app owns the experience. Up to MAX_TERMINALS live terminals;
+ * each is its own agent session.
  */
 export default function WorkspaceClient({ plan }: { plan: string }) {
   const [entries, setEntries] = useState<WsEntry[]>([]);
   const [polling, setPolling] = useState(false);
-  const [tabs, setTabs] = useState<WorkspaceTab[]>([]);
-  const [active, setActive] = useState<string>(""); // "" = terminal
-  const [phase, setPhase] = useState<TerminalPhase>({ tag: "connecting" });
+  const [terminals, setTerminals] = useState<TerminalTabInfo[]>([
+    { id: "term-1", label: "Terminal" },
+  ]);
+  const [fileTabs, setFileTabs] = useState<WorkspaceTab[]>([]);
+  const [active, setActive] = useState<string>("term-1");
+  const [phases, setPhases] = useState<Record<string, TerminalPhase>>({});
   const [notice, setNotice] = useState<string | null>(null);
   const sessionStart = useRef<number>(Date.now() / 1000);
+  const termCounter = useRef(1);
 
   const refresh = useCallback(async () => {
     setPolling(true);
@@ -50,17 +61,16 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
   /* Poll while the page is visible; the Page Visibility API pauses it. */
   useEffect(() => {
     void refresh();
-    let timer: number | null = null;
     const tick = () => {
       if (document.visibilityState === "visible") void refresh();
     };
-    timer = window.setInterval(tick, POLL_MS);
+    const timer = window.setInterval(tick, POLL_MS);
     const onVisible = () => {
       if (document.visibilityState === "visible") void refresh();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
-      if (timer !== null) window.clearInterval(timer);
+      window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [refresh]);
@@ -77,32 +87,65 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
     [entries]
   );
 
+  const isTerminalActive = terminals.some((t) => t.id === active);
+
   const openFile = useCallback((path: string) => {
     const name = path.split("/").pop() ?? path;
-    setTabs((prev) =>
+    setFileTabs((prev) =>
       prev.some((t) => t.path === path) ? prev : [...prev, { path, name }]
     );
     setActive(path);
   }, []);
 
-  const closeTab = useCallback(
+  const closeFile = useCallback(
     (path: string) => {
-      setTabs((prev) => prev.filter((t) => t.path !== path));
-      setActive((current) => (current === path ? "" : current));
+      setFileTabs((prev) => prev.filter((t) => t.path !== path));
+      setActive((current) => (current === path ? terminals[0].id : current));
     },
-    []
+    [terminals]
   );
+
+  const addTerminal = useCallback(() => {
+    setTerminals((prev) => {
+      if (prev.length >= MAX_TERMINALS) return prev;
+      termCounter.current += 1;
+      const id = `term-${termCounter.current}`;
+      setActive(id);
+      return [...prev, { id, label: `Terminal ${termCounter.current}` }];
+    });
+  }, []);
+
+  const closeTerminal = useCallback((id: string) => {
+    setTerminals((prev) => {
+      if (prev.length <= 1) return prev;
+      const next = prev.filter((t) => t.id !== id);
+      setActive((current) => (current === id ? next[next.length - 1].id : current));
+      setPhases((p) => {
+        const { [id]: _dropped, ...rest } = p;
+        return rest;
+      });
+      return next;
+    });
+  }, []);
 
   /* Files opened as tabs may be deleted/renamed by the agent — drop them. */
   useEffect(() => {
     if (!entries.length) return;
     const known = new Set(entries.map((e) => e.path));
-    setTabs((prev) => {
+    setFileTabs((prev) => {
       const next = prev.filter((t) => known.has(t.path));
       return next.length === prev.length ? prev : next;
     });
-    setActive((current) => (current && !known.has(current) ? "" : current));
-  }, [entries]);
+    setActive((current) =>
+      terminals.some((t) => t.id === current) || known.has(current)
+        ? current
+        : terminals[0].id
+    );
+  }, [entries, terminals]);
+
+  /* Status bar shows the active terminal's state (or the first one's). */
+  const statusPhase: TerminalPhase =
+    phases[isTerminalActive ? active : terminals[0].id] ?? { tag: "connecting" };
 
   return (
     <div style={s.root}>
@@ -124,24 +167,47 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
           />
         </aside>
         <main style={s.main}>
-          <TabsBar tabs={tabs} active={active} onSelect={setActive} onClose={closeTab} />
+          <TabsBar
+            terminals={terminals}
+            fileTabs={fileTabs}
+            active={active}
+            canAddTerminal={terminals.length < MAX_TERMINALS}
+            onSelect={setActive}
+            onCloseFile={closeFile}
+            onCloseTerminal={closeTerminal}
+            onNewTerminal={addTerminal}
+          />
           <div style={s.panelArea}>
-            {/* The terminal is ALWAYS mounted — hidden, never unmounted. */}
-            <TerminalFrame
-              title="sanad — workspace"
-              style={{
-                ...s.terminalFrame,
-                ...(active === "" ? null : s.frameHidden),
-              }}
-            >
-              <TerminalPanel visible={active === ""} onPhaseChange={setPhase} />
-            </TerminalFrame>
-            {active !== "" && <FilePreview key={active} path={active} />}
+            {/* Terminals stay MOUNTED across tab switches — hidden, never unmounted. */}
+            {terminals.map((t) => (
+              <TerminalFrame
+                key={t.id}
+                title={
+                  t.label === "Terminal"
+                    ? "sanad — workspace"
+                    : `sanad — ${t.label.toLowerCase()}`
+                }
+                style={{
+                  ...s.terminalFrame,
+                  ...(active === t.id ? null : s.frameHidden),
+                }}
+              >
+                <TerminalPanel
+                  visible={active === t.id}
+                  onPhaseChange={(p) =>
+                    setPhases((prev) => ({ ...prev, [t.id]: p }))
+                  }
+                />
+              </TerminalFrame>
+            ))}
+            {!isTerminalActive && active && (
+              <FilePreview key={active} path={active} />
+            )}
           </div>
           <ArtifactsStrip artifacts={artifacts} onOpen={openFile} />
         </main>
       </div>
-      <StatusBar phase={phase} />
+      <StatusBar phase={statusPhase} />
       {notice && <div style={s.notice}>{notice}</div>}
     </div>
   );

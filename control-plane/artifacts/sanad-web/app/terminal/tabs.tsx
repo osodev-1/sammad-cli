@@ -13,35 +13,62 @@ import {
 /* ------------------------------------------------------------- tabs bar --- */
 
 export interface WorkspaceTab {
-  path: string; // "" = terminal
+  path: string;
   name: string;
 }
 
+export interface TerminalTabInfo {
+  id: string;
+  label: string;
+}
+
 export function TabsBar({
-  tabs,
+  terminals,
+  fileTabs,
   active,
+  canAddTerminal,
   onSelect,
-  onClose,
+  onCloseFile,
+  onCloseTerminal,
+  onNewTerminal,
 }: {
-  tabs: WorkspaceTab[];
+  terminals: TerminalTabInfo[];
+  fileTabs: WorkspaceTab[];
   active: string;
-  onSelect: (path: string) => void;
-  onClose: (path: string) => void;
+  canAddTerminal: boolean;
+  onSelect: (id: string) => void;
+  onCloseFile: (path: string) => void;
+  onCloseTerminal: (id: string) => void;
+  onNewTerminal: () => void;
 }) {
   return (
     <div style={s.tabsBar}>
-      <Tab
-        label="Terminal"
-        active={active === ""}
-        onSelect={() => onSelect("")}
-      />
-      {tabs.map((t) => (
+      {terminals.map((t) => (
+        <Tab
+          key={t.id}
+          label={t.label}
+          active={active === t.id}
+          onSelect={() => onSelect(t.id)}
+          onClose={terminals.length > 1 ? () => onCloseTerminal(t.id) : undefined}
+        />
+      ))}
+      {canAddTerminal && (
+        <button
+          style={s.addTerminal}
+          title="New terminal"
+          aria-label="New terminal"
+          onClick={onNewTerminal}
+        >
+          +
+        </button>
+      )}
+      {fileTabs.map((t) => (
         <Tab
           key={t.path}
           label={t.name}
           active={active === t.path}
           onSelect={() => onSelect(t.path)}
-          onClose={() => onClose(t.path)}
+          onClose={() => onCloseFile(t.path)}
         />
       ))}
     </div>
@@ -355,6 +382,22 @@ const s: Record<string, CSSProperties> = {
     background: "none",
     padding: "2px",
     color: "var(--ink-muted)",
+    cursor: "pointer",
+  },
+  addTerminal: {
+    alignSelf: "center",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "22px",
+    height: "22px",
+    marginRight: "0.35rem",
+    border: "1px solid var(--rule-strong)",
+    borderRadius: "var(--radius-sm)",
+    background: "none",
+    color: "var(--ink-muted)",
+    fontSize: "0.9rem",
+    lineHeight: 1,
     cursor: "pointer",
   },
   previewWrap: {

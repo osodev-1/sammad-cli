@@ -128,7 +128,10 @@ export default function TeamClient({
   return (
     <div style={s.root}>
       <Nav
-        links={[{ href: "/dashboard", label: "Dashboard", compactHidden: true }]}
+        links={[
+          { href: "/terminal", label: "Workspace", badge: "beta" },
+          { href: "/dashboard", label: "Dashboard", compactHidden: true },
+        ]}
         planBadge={plan}
       />
 

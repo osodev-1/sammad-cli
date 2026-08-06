@@ -23,6 +23,7 @@ interface Props {
 }
 
 const DEFAULT_LINKS: NavLink[] = [
+  { href: "/terminal", label: "Workspace", badge: "beta" },
   { href: "/pricing", label: "Pricing" },
   { href: "/dashboard", label: "Dashboard" },
 ];

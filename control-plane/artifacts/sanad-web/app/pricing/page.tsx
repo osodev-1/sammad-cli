@@ -85,7 +85,12 @@ export default async function PricingPage() {
 
   return (
     <div style={styles.root}>
-      <Nav links={[{ href: "/dashboard", label: "Dashboard" }]} />
+      <Nav
+        links={[
+          { href: "/terminal", label: "Workspace", badge: "beta" },
+          { href: "/dashboard", label: "Dashboard" },
+        ]}
+      />
 
       <main className="pad-x" style={styles.main}>
         <p style={styles.eyebrow}>Pricing</p>
