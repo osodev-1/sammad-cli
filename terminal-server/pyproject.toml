@@ -1,0 +1,34 @@
+[project]
+name = "sanad-terminal"
+version = "0.1.0"
+description = "WebSocket PTY bridge + workspace API that runs the governed sanad agent for the browser workspace."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # kimi-cli is a dependency solely so the `sanad` console script is
+    # co-installed in this environment; sanad_terminal never imports kimi_cli.
+    "kimi-cli",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "httpx>=0.27",
+    "pydantic>=2.12.5",
+    "loguru>=0.6.0,<0.8",
+    "python-multipart>=0.0.18",
+]
+
+[project.scripts]
+sanad-terminal = "sanad_terminal.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "websockets>=14.0",
+]
+
+[tool.uv.sources]
+kimi-cli = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.8.5,<0.10.0"]
+build-backend = "uv_build"

@@ -63,6 +63,7 @@ members = [
     "packages/kaos",
     "packages/kimi-code",
     "sdks/kimi-sdk",
+    "terminal-server",
 ]
 
 [tool.uv.sources]
@@ -91,6 +92,7 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["E501"]
 "tests_e2e/**/*.py" = ["E501"]
+"terminal-server/tests/**/*.py" = ["E501"]
 "src/kimi_cli/web/api/**/*.py" = ["B008"]  # FastAPI Depends() is standard usage
 
 [tool.pyright]
@@ -101,6 +103,7 @@ include = [
     "tests/**/*.py",
     "tests_ai/scripts/**/*.py",
     "tests_e2e/**/*.py",
+    "terminal-server/**/*.py",
 ]
 strict = ["src/kimi_cli/**/*.py"]
 
