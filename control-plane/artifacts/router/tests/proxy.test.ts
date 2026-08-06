@@ -1,4 +1,8 @@
-/** End-to-end through a real socket: HTTP, header injection, and WS upgrade. */
+/** End-to-end through a real socket: HTTP, header injection, and WS upgrade.
+ *
+ * NOTE: requests use raw node:http, NOT fetch — undici silently drops a
+ * user-supplied Host header, which is the whole thing being tested here.
+ */
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -12,6 +16,29 @@ const HASH = "abc123def456";
 let target: http.Server;
 let router: http.Server;
 let routerPort: number;
+let targetPort: number;
+
+interface Res {
+  status: number;
+  body: string;
+  headers: http.IncomingHttpHeaders;
+}
+
+const get = (path: string, host: string): Promise<Res> =>
+  new Promise((resolve, reject) => {
+    http
+      .get(
+        { host: "127.0.0.1", port: routerPort, path, headers: { host } },
+        (res) => {
+          let body = "";
+          res.on("data", (c) => (body += c));
+          res.on("end", () =>
+            resolve({ status: res.statusCode ?? 0, body, headers: res.headers })
+          );
+        }
+      )
+      .on("error", reject);
+  });
 
 beforeAll(async () => {
   // Target = a fake agentd/dev-server: echoes path over HTTP, echoes frames over WS.
@@ -25,7 +52,7 @@ beforeAll(async () => {
   const wss = new WebSocketServer({ server: target, path: "/ws" });
   wss.on("connection", (ws) => ws.on("message", (m) => ws.send(`pong:${m}`)));
   await new Promise<void>((r) => target.listen(0, "127.0.0.1", r));
-  const targetPort = (target.address() as AddressInfo).port;
+  targetPort = (target.address() as AddressInfo).port;
 
   const config = loadConfig({
     ROUTER_SHARED_SECRET: "rsec",
@@ -51,45 +78,32 @@ afterAll(async () => {
 
 describe("router proxying", () => {
   it("proxies compute paths and strips the /u/<hash> prefix", async () => {
-    const res = await fetch(`http://127.0.0.1:${routerPort}/u/${HASH}/internal/workspace/tree`, {
-      headers: { host: "compute.sanadcode.com" },
-    });
+    const res = await get(`/u/${HASH}/internal/workspace/tree`, "compute.sanadcode.com");
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe("echo:/internal/workspace/tree");
+    expect(res.body).toBe("echo:/internal/workspace/tree");
     // Not a preview → no frame-ancestors injection
-    expect(res.headers.get("content-security-policy")).toBeNull();
+    expect(res.headers["content-security-policy"]).toBeUndefined();
   });
 
   it("proxies preview hosts and injects frame-ancestors", async () => {
-    const targetPort = (target.address() as AddressInfo).port;
-    const res = await fetch(`http://127.0.0.1:${routerPort}/index.html`, {
-      headers: { host: `${HASH}-${targetPort}.preview.sanadcode.com` },
-    });
+    const res = await get("/index.html", `${HASH}-${targetPort}.preview.sanadcode.com`);
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe("echo:/index.html");
-    expect(res.headers.get("content-security-policy")).toBe(
+    expect(res.body).toBe("echo:/index.html");
+    expect(res.headers["content-security-policy"]).toBe(
       "frame-ancestors https://www.sanadcode.com"
     );
-    expect(res.headers.get("x-frame-options")).toBeNull();
+    expect(res.headers["x-frame-options"]).toBeUndefined();
   });
 
   it("404s unknown hosts and non-matching paths", async () => {
-    const bad = await fetch(`http://127.0.0.1:${routerPort}/u/${HASH}/ws`, {
-      headers: { host: "evil.example.com" },
-    });
-    expect(bad.status).toBe(404);
-    const noPath = await fetch(`http://127.0.0.1:${routerPort}/nope`, {
-      headers: { host: "compute.sanadcode.com" },
-    });
-    expect(noPath.status).toBe(404);
+    expect((await get(`/u/${HASH}/ws`, "evil.example.com")).status).toBe(404);
+    expect((await get("/nope", "compute.sanadcode.com")).status).toBe(404);
   });
 
   it("serves its own healthz", async () => {
-    const res = await fetch(`http://127.0.0.1:${routerPort}/healthz`, {
-      headers: { host: "compute.sanadcode.com" },
-    });
+    const res = await get("/healthz", "compute.sanadcode.com");
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ status: "ok" });
+    expect(JSON.parse(res.body)).toEqual({ status: "ok" });
   });
 
   it("proxies WebSocket upgrades end-to-end", async () => {
