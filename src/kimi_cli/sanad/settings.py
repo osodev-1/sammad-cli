@@ -9,6 +9,9 @@ from dataclasses import dataclass
 # forwards it), so only the www host actually resolves and serves the API.
 DEFAULT_API_BASE_URL = "https://www.sanadcode.com"
 KEYCHAIN_SERVICE = "sanad-cli"
+# Headless/container deployments (the web terminal) inject the CLI session token
+# via env instead of an OS keychain. Read only by KeychainStore.get().
+ENV_SESSION_TOKEN = "SANAD_SESSION_TOKEN"
 
 
 @dataclass(frozen=True, slots=True)
