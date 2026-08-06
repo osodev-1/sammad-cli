@@ -39,9 +39,15 @@ class ActiveSession:
     websocket: _WebSocketLike | None
     started_at: float = field(default_factory=time.monotonic)
     last_input_at: float = field(default_factory=time.monotonic)
+    # A working agent is NOT idle: output counts as activity, so long tasks
+    # survive both the idle timeout and the detach grace window.
+    last_output_at: float = field(default_factory=time.monotonic)
     warned_idle: bool = False
     detached_at: float | None = None
     drainer: asyncio.Task[None] | None = None
+
+    def last_activity_at(self) -> float:
+        return max(self.last_input_at, self.last_output_at)
 
 
 class SessionManager:
@@ -51,10 +57,12 @@ class SessionManager:
         max_per_user: int = 3,
         detach_grace_seconds: float = 900.0,
         max_session_seconds: float = 14400.0,
+        sweep_interval_seconds: float = 15.0,
     ) -> None:
         self._max_per_user = max(1, max_per_user)
         self._detach_grace = detach_grace_seconds
         self._max_session = max_session_seconds
+        self._sweep_interval = sweep_interval_seconds
         self._sessions: dict[str, ActiveSession] = {}  # conn_id → session
         self._lock = asyncio.Lock()
         self._sweeper: asyncio.Task[None] | None = None
@@ -129,8 +137,10 @@ class SessionManager:
         async def _drain() -> None:
             # Chunks are already ring-buffered at read time; this just keeps
             # the live queue empty so the agent never blocks on backpressure.
+            # Output also counts as activity — a detached agent mid-task is
+            # not reaped out from under its own work.
             while await session.pty.read_output() is not None:
-                pass
+                session.last_output_at = time.monotonic()
 
         session.drainer = asyncio.get_running_loop().create_task(_drain())
         logger.info(
@@ -181,14 +191,20 @@ class SessionManager:
 
     async def _sweep_loop(self) -> None:
         while True:
-            await asyncio.sleep(15.0)
+            await asyncio.sleep(self._sweep_interval)
             now = time.monotonic()
             doomed: list[ActiveSession] = []
             async with self._lock:
                 for session in list(self._sessions.values()):
+                    # Grace counts from the LAST SIGN OF LIFE (detach moment or
+                    # latest output), so a detached agent still working is kept.
+                    quiet_since = (
+                        max(session.detached_at, session.last_output_at)
+                        if session.detached_at is not None
+                        else None
+                    )
                     expired_detach = (
-                        session.detached_at is not None
-                        and now - session.detached_at > self._detach_grace
+                        quiet_since is not None and now - quiet_since > self._detach_grace
                     )
                     dead = session.detached_at is not None and session.pty.exited.is_set()
                     over_lifetime = now - session.started_at > self._max_session

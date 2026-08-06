@@ -58,3 +58,35 @@ def test_child_env_exact_and_leak_free(tmp_path: Path, monkeypatch):
         "SANAD_API_BASE_URL": "https://cp.test",
         "SANAD_SESSION_TOKEN": "sess_abc",
     }
+
+
+def test_find_resumable_session(tmp_path: Path):
+    import hashlib
+    import os
+    import time
+
+    from sanad_terminal.workspace import find_resumable_session
+
+    user_dir = prepare_user_dirs(tmp_path, "user_x")
+    share = user_dir / "kimi-share"
+    workspace = user_dir / "workspace"
+
+    # Nothing yet
+    assert find_resumable_session(share, workspace) is None
+
+    digest = hashlib.md5(str(workspace.resolve()).encode("utf-8")).hexdigest()
+    root = share / "sessions" / digest
+
+    # Empty context → not resumable
+    (root / "empty-sess").mkdir(parents=True)
+    (root / "empty-sess" / "context.jsonl").write_text("")
+    assert find_resumable_session(share, workspace) is None
+
+    # Two real sessions → newest mtime wins
+    (root / "older").mkdir()
+    (root / "older" / "context.jsonl").write_text('{"role":"user"}\n')
+    (root / "newer").mkdir()
+    (root / "newer" / "context.jsonl").write_text('{"role":"user"}\n')
+    past = time.time() - 100
+    os.utime(root / "older" / "context.jsonl", (past, past))
+    assert find_resumable_session(share, workspace) == "newer"

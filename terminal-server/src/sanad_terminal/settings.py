@@ -27,8 +27,10 @@ class TerminalSettings:
     max_upload_bytes: int = 100 * 1024 * 1024
     # Concurrent terminals per user; opening one more evicts the oldest.
     max_sessions_per_user: int = 3
-    # How long a detached agent (socket dropped) keeps running before reap.
+    # How long a QUIET detached agent (socket dropped, no output) runs before reap.
     detach_grace_seconds: float = 900.0
+    # Watchdog/sweeper cadence; only tests shrink this.
+    watchdog_tick_seconds: float = 15.0
     # SANAD_API_BASE_URL handed to the spawned agent; defaults to control_plane_url.
     child_api_base_url: str = ""
     # argv used to launch the agent; resolved from PATH unless overridden (tests).

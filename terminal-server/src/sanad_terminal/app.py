@@ -39,11 +39,9 @@ from sanad_terminal.pty_session import PtySession
 from sanad_terminal.settings import TerminalSettings
 from sanad_terminal.workspace import (
     build_child_env,
-    has_previous_session,
+    find_resumable_session,
     prepare_user_dirs,
 )
-
-_WATCHDOG_TICK_SECONDS = 15.0
 
 
 def create_app(
@@ -56,6 +54,7 @@ def create_app(
         max_per_user=resolved.max_sessions_per_user,
         detach_grace_seconds=resolved.detach_grace_seconds,
         max_session_seconds=resolved.max_session_seconds,
+        sweep_interval_seconds=resolved.watchdog_tick_seconds,
     )
 
     @asynccontextmanager
@@ -163,14 +162,17 @@ def create_app(
                     cols=cols,
                     rows=rows,
                 )
-                # First terminal after a cold start continues the last
+                # First terminal after a cold start resumes the last
                 # conversation in this workspace; extra terminals start fresh
-                # (two agents must not fight over one session).
+                # (two agents must not fight over one session). --resume <id>
+                # never hard-fails: the CLI falls back to a new session.
                 argv = list(resolved.spawn_argv)
-                if manager.count_for(user_id) == 0 and has_previous_session(
-                    user_dir / "kimi-share", user_dir / "workspace"
-                ):
-                    argv.append("--continue")
+                if manager.count_for(user_id) == 0:
+                    resume_id = find_resumable_session(
+                        user_dir / "kimi-share", user_dir / "workspace"
+                    )
+                    if resume_id:
+                        argv += ["--resume", resume_id]
                 pty = PtySession(
                     argv=argv,
                     cwd=user_dir / "workspace",
@@ -227,15 +229,18 @@ def create_app(
                 chunk = await pty.read_output()
                 if chunk is None:
                     return "eof"
+                session.last_output_at = time.monotonic()
                 await ws.send_bytes(chunk)
 
         async def watchdog() -> str:
             while True:
-                await asyncio.sleep(_WATCHDOG_TICK_SECONDS)
+                await asyncio.sleep(resolved.watchdog_tick_seconds)
                 now = time.monotonic()
                 if now - session.started_at >= resolved.max_session_seconds:
                     return "max_lifetime"
-                idle = now - session.last_input_at
+                # A working agent is not idle: input OR output counts. Long
+                # tasks with no typing must never be reaped mid-run.
+                idle = now - session.last_activity_at()
                 remaining = resolved.idle_timeout_seconds - idle
                 if remaining <= 0:
                     return "idle_timeout"

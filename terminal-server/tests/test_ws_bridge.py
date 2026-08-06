@@ -308,26 +308,14 @@ def test_disconnect_detaches_and_reconnect_reattaches(tmp_path: Path):
 
 def test_detached_session_reaped_after_grace(tmp_path: Path):
     app = create_app(
-        make_settings(tmp_path, detach_grace_seconds=0.0),
+        make_settings(tmp_path, detach_grace_seconds=0.0, watchdog_tick_seconds=0.05),
         make_control_plane({"tt_a": IDENTITY}),
     )
-    # Speed the sweeper up for the test.
-    import sanad_terminal.manager as manager_mod
-
-    original_sleep = manager_mod.asyncio.sleep
-
-    async def fast_sleep(delay: float) -> None:
-        await original_sleep(min(delay, 0.05))
-
-    manager_mod.asyncio.sleep = fast_sleep  # type: ignore[assignment]
-    try:
-        with TestClient(app) as client:
-            with client.websocket_connect("/ws") as ws:
-                ws.send_text(json.dumps({"type": "auth", "ticket": "tt_a"}))
-                drain_until_ready(ws)
-            wait_healthz(client, "activeSessions", 0, tries=200)
-    finally:
-        manager_mod.asyncio.sleep = original_sleep  # type: ignore[assignment]
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            ws.send_text(json.dumps({"type": "auth", "ticket": "tt_a"}))
+            drain_until_ready(ws)
+        wait_healthz(client, "activeSessions", 0, tries=200)
 
 
 def _fabricate_previous_session(tmp_path: Path, user: str = "user_1") -> None:
@@ -341,11 +329,11 @@ def _fabricate_previous_session(tmp_path: Path, user: str = "user_1") -> None:
 
 
 def test_first_terminal_resumes_previous_conversation(tmp_path: Path):
-    """With a prior session on disk, the FIRST spawn gets --continue; a second
-    concurrent terminal starts fresh (no --continue)."""
+    """With a prior session on disk, the FIRST spawn gets --resume <id>; a
+    second concurrent terminal starts fresh (no resume args)."""
     identities = {"tt_a": IDENTITY, "tt_b": IDENTITY}
-    # argv reveals its extra args: NARGS:<count> then keeps a cat alive.
-    argv = ("bash", "-c", 'echo "NARGS:$#"; exec cat', "cli")
+    # argv reveals its extra args, then keeps a cat alive.
+    argv = ("bash", "-c", 'echo "ARGS:$*."; exec cat', "cli")
     (tmp_path / "users" / "user_1" / "workspace").mkdir(parents=True)
     _fabricate_previous_session(tmp_path)
 
@@ -361,18 +349,90 @@ def test_first_terminal_resumes_previous_conversation(tmp_path: Path):
         ready = drain_until_ready(first)
         assert ready["resumed"] is False
         buf = b""
-        while b"NARGS:" not in buf:
+        while b"ARGS:" not in buf or b"." not in buf:
             msg = first.receive()
             if msg.get("bytes"):
                 buf += msg["bytes"]
-        assert b"NARGS:1" in buf  # --continue appended
+        assert b"ARGS:--resume sess-uuid." in buf  # resumes the scanned session
 
         with client.websocket_connect("/ws") as second:
             second.send_text(json.dumps({"type": "auth", "ticket": "tt_b"}))
             drain_until_ready(second)
             buf = b""
-            while b"NARGS:" not in buf:
+            while b"ARGS:" not in buf or b"." not in buf:
                 msg = second.receive()
                 if msg.get("bytes"):
                     buf += msg["bytes"]
-            assert b"NARGS:0" in buf  # concurrent terminal starts fresh
+            assert b"ARGS:." in buf  # concurrent terminal starts fresh
+
+
+PRODUCER_ARGV = ("bash", "-c", "while true; do echo tick; sleep 0.1; done")
+
+
+def test_working_agent_survives_idle_timeout(tmp_path: Path):
+    """Agent OUTPUT counts as activity: a long task with no typing is never
+    reaped as idle, while a truly silent session still is."""
+    import time
+
+    identities = {"tt_a": IDENTITY, "tt_b": IDENTITY}
+    app = create_app(
+        make_settings(
+            tmp_path,
+            spawn_argv=PRODUCER_ARGV,
+            idle_timeout_seconds=0.5,
+            idle_warning_seconds=0.1,
+            watchdog_tick_seconds=0.05,
+            max_sessions_per_user=2,
+        ),
+        make_control_plane(identities),
+    )
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        ws.send_text(json.dumps({"type": "auth", "ticket": "tt_a"}))
+        drain_until_ready(ws)
+        deadline = time.monotonic() + 1.5  # 3x the idle timeout
+        while time.monotonic() < deadline:
+            msg = ws.receive()
+            assert msg["type"] != "websocket.close", "working agent was reaped as idle"
+        ws.close()
+
+    # Control: a silent agent (cat, no output, no input) IS idle-reaped.
+    app2 = create_app(
+        make_settings(
+            tmp_path,
+            idle_timeout_seconds=0.4,
+            idle_warning_seconds=0.1,
+            watchdog_tick_seconds=0.05,
+        ),
+        make_control_plane({"tt_b": IDENTITY}),
+    )
+    with TestClient(app2) as client, client.websocket_connect("/ws") as ws:
+        ws.send_text(json.dumps({"type": "auth", "ticket": "tt_b"}))
+        drain_until_ready(ws)
+        while True:
+            msg = ws.receive()
+            if msg["type"] == "websocket.close":
+                assert msg["code"] == 4000
+                break
+
+
+def test_detached_working_agent_survives_grace(tmp_path: Path):
+    """A detached agent still producing output is NOT reaped at the grace
+    deadline — grace counts from its last sign of life."""
+    import time
+
+    app = create_app(
+        make_settings(
+            tmp_path,
+            spawn_argv=PRODUCER_ARGV,
+            detach_grace_seconds=0.2,
+            watchdog_tick_seconds=0.05,
+        ),
+        make_control_plane({"tt_a": IDENTITY}),
+    )
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            ws.send_text(json.dumps({"type": "auth", "ticket": "tt_a"}))
+            drain_until_ready(ws)
+        wait_healthz(client, "detachedSessions", 1)
+        time.sleep(0.7)  # 3.5x the grace window
+        assert client.get("/healthz").json()["activeSessions"] == 1

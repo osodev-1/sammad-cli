@@ -42,26 +42,34 @@ def workspace_dir(users_root: Path, user_id: str) -> Path:
     return user_root(users_root, user_id) / "workspace"
 
 
-def has_previous_session(kimi_share: Path, workspace: Path) -> bool:
-    """True when the CLI has a resumable session for this workspace.
+def find_resumable_session(kimi_share: Path, workspace: Path) -> str | None:
+    """Newest resumable session id for this workspace, or None.
 
-    Mirrors the CLI's session layout: `<share>/sessions/<md5(workdir)>/<uuid>/`
+    Mirrors the CLI's session layout: `<share>/sessions/<md5(workdir)>/<id>/`
     (the same convention tests/e2e/shell_pty_helpers.py::find_session_dir
-    reproduces). A session is resumable when its context.jsonl has content —
-    the CLI deletes empty sessions on exit, but be defensive anyway.
+    reproduces). Scanned from DISK, deliberately not from kimi.json's
+    last_session_id — that pointer is only written on graceful exit, so an
+    agent killed by a deploy or reap would leave it stale. The id is handed to
+    `sanad run --resume <id>`, whose Session.find loads straight from disk and
+    falls back to a fresh session instead of erroring (unlike --continue,
+    which exits 2 when its metadata pointer is missing).
     """
     digest = hashlib.md5(str(workspace.resolve()).encode("utf-8")).hexdigest()
     sessions_root = kimi_share / "sessions" / digest
     if not sessions_root.is_dir():
-        return False
+        return None
+    best: tuple[float, str] | None = None
     for child in sessions_root.iterdir():
         context = child / "context.jsonl"
         try:
-            if context.is_file() and context.stat().st_size > 0:
-                return True
+            stat = context.stat()
         except OSError:
             continue
-    return False
+        if stat.st_size <= 0:
+            continue
+        if best is None or stat.st_mtime > best[0]:
+            best = (stat.st_mtime, child.name)
+    return best[1] if best else None
 
 
 def build_child_env(
