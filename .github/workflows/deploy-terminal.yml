@@ -62,6 +62,9 @@ jobs:
         with:
           context: .
           file: terminal-server/Dockerfile
+          # Multi-stage: the Railway service ships the `runner` target; the
+          # per-user compute image is built by deploy-workspace-image.yml.
+          target: runner
           platforms: linux/amd64
           push: true
           tags: |
