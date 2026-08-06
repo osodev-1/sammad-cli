@@ -1,0 +1,24 @@
+{
+  "name": "@workspace/router",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "export NODE_ENV=development && pnpm run build && pnpm run start",
+    "build": "node ./build.mjs",
+    "start": "node --enable-source-maps ./dist/index.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "http-proxy": "^1.18.1"
+  },
+  "devDependencies": {
+    "@types/http-proxy": "^1.17.16",
+    "@types/node": "catalog:",
+    "@types/ws": "^8.18.1",
+    "esbuild": "0.27.3",
+    "vitest": "^3.2.0",
+    "ws": "^8.18.0"
+  }
+}
