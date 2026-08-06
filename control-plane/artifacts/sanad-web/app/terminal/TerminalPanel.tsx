@@ -59,20 +59,21 @@ export default function TerminalPanel({ visible, onPhaseChange }: Props) {
 
   const [ready, setReady] = useState(false);
   const [generation, setGeneration] = useState(0);
-  const [phase, setPhaseRaw] = useState<TerminalPhase>({ tag: "connecting" });
+  const [phase, setPhase] = useState<TerminalPhase>({ tag: "connecting" });
 
-  const phaseRef = useRef(phase);
-  const setPhase = useCallback(
-    (p: TerminalPhase | ((prev: TerminalPhase) => TerminalPhase)) => {
-      setPhaseRaw((prev) => {
-        const next = typeof p === "function" ? p(prev) : p;
-        phaseRef.current = next;
-        onPhaseChange?.(next);
-        return next;
-      });
-    },
-    [onPhaseChange]
-  );
+  /*
+   * The parent's callback is read through a ref so its identity NEVER enters
+   * any effect's dependencies. An inline `onPhaseChange` prop otherwise
+   * re-arms the socket effect on every parent render — a teardown/reconnect
+   * loop (React #185 + a request stampede).
+   */
+  const onPhaseChangeRef = useRef(onPhaseChange);
+  useEffect(() => {
+    onPhaseChangeRef.current = onPhaseChange;
+  });
+  useEffect(() => {
+    onPhaseChangeRef.current?.(phase);
+  }, [phase]);
 
   /* Debounced fit: refit locally; only tell the PTY when the grid changed. */
   const scheduleFit = useCallback(() => {
@@ -289,7 +290,7 @@ export default function TerminalPanel({ visible, onPhaseChange }: Props) {
       wsRef.current = null;
       ws?.close(1000, "client teardown");
     };
-  }, [ready, generation, setPhase]);
+  }, [ready, generation]); // setPhase from useState is stable by contract
 
   const reconnect = useCallback(() => {
     termRef.current?.writeln("\r\n\x1b[2m— reconnecting —\x1b[0m");

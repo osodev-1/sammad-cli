@@ -105,26 +105,43 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
     [terminals]
   );
 
+  /* State updaters stay PURE — companion state changes happen alongside,
+     never inside another setState's updater. */
   const addTerminal = useCallback(() => {
-    setTerminals((prev) => {
-      if (prev.length >= MAX_TERMINALS) return prev;
-      termCounter.current += 1;
-      const id = `term-${termCounter.current}`;
-      setActive(id);
-      return [...prev, { id, label: `Terminal ${termCounter.current}` }];
-    });
-  }, []);
+    if (terminals.length >= MAX_TERMINALS) return;
+    termCounter.current += 1;
+    const id = `term-${termCounter.current}`;
+    setTerminals((prev) =>
+      prev.length >= MAX_TERMINALS
+        ? prev
+        : [...prev, { id, label: `Terminal ${termCounter.current}` }]
+    );
+    setActive(id);
+  }, [terminals.length]);
 
-  const closeTerminal = useCallback((id: string) => {
-    setTerminals((prev) => {
-      if (prev.length <= 1) return prev;
-      const next = prev.filter((t) => t.id !== id);
-      setActive((current) => (current === id ? next[next.length - 1].id : current));
+  const closeTerminal = useCallback(
+    (id: string) => {
+      if (terminals.length <= 1) return;
+      const next = terminals.filter((t) => t.id !== id);
+      setTerminals(next);
       setPhases((p) => {
         const { [id]: _dropped, ...rest } = p;
         return rest;
       });
-      return next;
+      setActive((current) => (current === id ? next[next.length - 1].id : current));
+    },
+    [terminals]
+  );
+
+  /* Identity-stable phase sink; skips no-op updates so a panel re-reporting
+     the same phase never re-renders the shell. */
+  const reportPhase = useCallback((id: string, p: TerminalPhase) => {
+    setPhases((prev) => {
+      const existing = prev[id];
+      if (existing && existing.tag === p.tag && JSON.stringify(existing) === JSON.stringify(p)) {
+        return prev;
+      }
+      return { ...prev, [id]: p };
     });
   }, []);
 
@@ -194,9 +211,7 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
               >
                 <TerminalPanel
                   visible={active === t.id}
-                  onPhaseChange={(p) =>
-                    setPhases((prev) => ({ ...prev, [t.id]: p }))
-                  }
+                  onPhaseChange={(p) => reportPhase(t.id, p)}
                 />
               </TerminalFrame>
             ))}
