@@ -41,10 +41,19 @@ def _set_winsize(fd: int, cols: int, rows: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, packed)
 
 
-def _preexec_for_tty(slave_fd: int) -> Callable[[], None]:
+def _preexec_for_tty(
+    slave_fd: int, uid: int | None = None, gid: int | None = None
+) -> Callable[[], None]:
     def _run() -> None:
         os.setsid()
         fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+        # uid split (task mode): agentd runs as root, the agent runs as an
+        # unprivileged user, so agentd's env (machine credentials) is
+        # unreachable from the user's shell via /proc.
+        if gid is not None:
+            os.setgid(gid)
+        if uid is not None:
+            os.setuid(uid)
 
     return _run
 
@@ -60,12 +69,16 @@ class PtySession:
         env: dict[str, str],
         cols: int,
         rows: int,
+        uid: int | None = None,
+        gid: int | None = None,
     ) -> None:
         self._argv = list(argv)
         self._cwd = cwd
         self._env = env
         self._cols = cols
         self._rows = rows
+        self._uid = uid
+        self._gid = gid
         self._master_fd: int | None = None
         self._process: subprocess.Popen[bytes] | None = None
         self._queue: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -95,7 +108,7 @@ class PtySession:
                 stdout=slave_fd,
                 stderr=slave_fd,
                 env=self._env,
-                preexec_fn=_preexec_for_tty(slave_fd),
+                preexec_fn=_preexec_for_tty(slave_fd, uid=self._uid, gid=self._gid),
                 close_fds=True,
             )
 

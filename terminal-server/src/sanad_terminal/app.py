@@ -13,6 +13,7 @@ from fastapi import FastAPI, WebSocket
 from loguru import logger
 
 from sanad_terminal.control_plane import ControlPlaneClient, ControlPlaneError
+from sanad_terminal.idle import IdleStopper
 from sanad_terminal.manager import ActiveSession, SessionManager
 from sanad_terminal.protocol import (
     CLOSE_AUTH,
@@ -40,6 +41,7 @@ from sanad_terminal.settings import TerminalSettings
 from sanad_terminal.workspace import (
     build_child_env,
     find_resumable_session,
+    prepare_single_user_dirs,
     prepare_user_dirs,
 )
 
@@ -49,18 +51,36 @@ def create_app(
     control_plane: ControlPlaneClient | None = None,
 ) -> FastAPI:
     resolved = settings or TerminalSettings.load()
-    cp = control_plane or ControlPlaneClient(resolved.control_plane_url, resolved.shared_secret)
+    cp = control_plane or ControlPlaneClient(
+        resolved.control_plane_url,
+        resolved.shared_secret,
+        machine_token=resolved.agentd_token if resolved.mode == "task" else "",
+        machine_nonce=resolved.machine_nonce,
+    )
     manager = SessionManager(
         max_per_user=resolved.max_sessions_per_user,
         detach_grace_seconds=resolved.detach_grace_seconds,
         max_session_seconds=resolved.max_session_seconds,
         sweep_interval_seconds=resolved.watchdog_tick_seconds,
     )
+    idle_stopper = (
+        IdleStopper(
+            manager,
+            idle_stop_seconds=resolved.idle_stop_seconds,
+            tick_seconds=resolved.watchdog_tick_seconds,
+        )
+        if resolved.mode == "task"
+        else None
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         manager.start()
+        if idle_stopper:
+            idle_stopper.start()
         yield
+        if idle_stopper:
+            await idle_stopper.stop()
         await manager.shutdown()
         await cp.aclose()
 
@@ -68,11 +88,21 @@ def create_app(
     app.state.settings = resolved
     app.state.control_plane = cp
     app.state.manager = manager
+    app.state.idle_stopper = idle_stopper
 
     from sanad_terminal.routes_workspace import register_error_handlers, router
 
     app.include_router(router)
     register_error_handlers(app)
+
+    if idle_stopper is not None:
+
+        @app.middleware("http")
+        async def _activity(request, call_next):  # noqa: ANN001, ANN202
+            # Health probes must never count as activity (the LB pings forever).
+            if request.url.path != "/healthz":
+                idle_stopper.touch()
+            return await call_next(request)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
@@ -133,6 +163,16 @@ def create_app(
             return
 
         user_id = identity.user_id
+        # Task mode: this machine serves exactly one user. Defense in depth —
+        # the control plane already refuses cross-user redeems, but a regression
+        # there must not turn into cross-user access here.
+        if resolved.fixed_user and user_id != resolved.fixed_user:
+            logger.warning("redeemed uid {} does not match this machine", user_id)
+            await _safe_send(ws, error_frame("invalid_ticket"))
+            await _safe_close(ws, CLOSE_AUTH)
+            return
+        if idle_stopper:
+            idle_stopper.touch()
         cols, rows = clamp_size(frame.cols, frame.rows)
 
         # -- reattach the most recent detached session, else spawn fresh -------
@@ -154,7 +194,10 @@ def create_app(
             # Capped concurrent sessions per user (evict oldest at the cap).
             await manager.claim(user_id)
             try:
-                user_dir = prepare_user_dirs(resolved.users_dir, user_id)
+                if resolved.mode == "task":
+                    user_dir = prepare_single_user_dirs(resolved.data_dir)
+                else:
+                    user_dir = prepare_user_dirs(resolved.users_dir, user_id)
                 env = build_child_env(
                     user_dir=user_dir,
                     session_token=identity.session_token,
@@ -162,6 +205,13 @@ def create_app(
                     cols=cols,
                     rows=rows,
                 )
+                spawn_uid: int | None = None
+                spawn_gid: int | None = None
+                if resolved.agent_user:
+                    import pwd
+
+                    pw = pwd.getpwnam(resolved.agent_user)
+                    spawn_uid, spawn_gid = pw.pw_uid, pw.pw_gid
                 # First terminal after a cold start resumes the last
                 # conversation in this workspace; extra terminals start fresh
                 # (two agents must not fight over one session). --resume <id>
@@ -179,6 +229,8 @@ def create_app(
                     env=env,
                     cols=cols,
                     rows=rows,
+                    uid=spawn_uid,
+                    gid=spawn_gid,
                 )
                 await pty.start()
             except Exception as exc:

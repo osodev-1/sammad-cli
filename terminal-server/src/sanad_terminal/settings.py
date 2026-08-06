@@ -15,10 +15,21 @@ class SettingsError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class TerminalSettings:
+    # "railway" = the shared multi-user container (legacy); "task" = one
+    # per-user compute task (AWS Fargate): single fixed user, flattened /data,
+    # bearer-token internal auth, self-exit on idle.
+    mode: str = "railway"
     port: int = 8080
     control_plane_url: str = "https://www.sanadcode.com"
     shared_secret: str = ""
     users_dir: Path = Path("/data/users")
+    # -- task mode ------------------------------------------------------------
+    fixed_user: str = ""  # SANAD_WORKSPACE_USER — the ONE Clerk uid this task serves
+    agentd_token: str = ""  # AGENTD_TOKEN — derived bearer for /internal/* + redeem
+    machine_nonce: str = ""  # MACHINE_NONCE — the run nonce the token derives from
+    data_dir: Path = Path("/data")  # flattened {workspace,home,kimi-share} root
+    agent_user: str = ""  # AGENT_USER — spawn the agent PTY as this OS user (uid split)
+    idle_stop_seconds: float = 300.0  # zero sessions + no internal traffic → exit 0
     allowed_origins: tuple[str, ...] = ("https://www.sanadcode.com",)
     idle_timeout_seconds: float = 1800.0
     idle_warning_seconds: float = 300.0
@@ -40,9 +51,20 @@ class TerminalSettings:
     def load(cls, env: Mapping[str, str] | None = None) -> TerminalSettings:
         e = os.environ if env is None else env
 
+        mode = e.get("WORKSPACE_MODE", "railway")
+        if mode not in ("railway", "task"):
+            raise SettingsError(f"WORKSPACE_MODE must be railway|task, got {mode!r}")
+
         secret = e.get("TERMINAL_SHARED_SECRET", "")
-        if not secret:
-            raise SettingsError("TERMINAL_SHARED_SECRET is required")
+        fixed_user = e.get("SANAD_WORKSPACE_USER", "")
+        agentd_token = e.get("AGENTD_TOKEN", "")
+        if mode == "railway" and not secret:
+            raise SettingsError("TERMINAL_SHARED_SECRET is required in railway mode")
+        if mode == "task":
+            if not fixed_user:
+                raise SettingsError("SANAD_WORKSPACE_USER is required in task mode")
+            if not agentd_token:
+                raise SettingsError("AGENTD_TOKEN is required in task mode")
 
         spawn = e.get("TERMINAL_SPAWN_ARGV", "")
         if spawn:
@@ -63,10 +85,17 @@ class TerminalSettings:
 
         control_plane = e.get("CONTROL_PLANE_URL", "https://www.sanadcode.com").rstrip("/")
         return cls(
-            port=int(e.get("PORT", "8080")),
+            mode=mode,
+            port=int(e.get("PORT", "7070" if mode == "task" else "8080")),
             control_plane_url=control_plane,
             shared_secret=secret,
             users_dir=Path(e.get("USERS_DIR", "/data/users")),
+            fixed_user=fixed_user,
+            agentd_token=agentd_token,
+            machine_nonce=e.get("MACHINE_NONCE", ""),
+            data_dir=Path(e.get("DATA_DIR", "/data")),
+            agent_user=e.get("AGENT_USER", ""),
+            idle_stop_seconds=float(e.get("IDLE_STOP_SECONDS", "300")),
             allowed_origins=origins,
             idle_timeout_seconds=float(e.get("IDLE_TIMEOUT_SECONDS", "1800")),
             idle_warning_seconds=float(e.get("IDLE_WARNING_SECONDS", "300")),

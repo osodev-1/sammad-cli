@@ -42,6 +42,18 @@ def workspace_dir(users_root: Path, user_id: str) -> Path:
     return user_root(users_root, user_id) / "workspace"
 
 
+def prepare_single_user_dirs(data_dir: Path) -> Path:
+    """Task mode: ONE user per machine — the triple lives directly under /data.
+
+    Same shape as the per-user dirs (workspace/home/kimi-share), no per-user
+    nesting: the EFS access point already scopes the mount to this user.
+    Returns data_dir (the "user dir" the rest of the code treats as root).
+    """
+    for name in ("workspace", "home", "kimi-share"):
+        (data_dir / name).mkdir(parents=True, exist_ok=True)
+    return data_dir
+
+
 def find_resumable_session(kimi_share: Path, workspace: Path) -> str | None:
     """Newest resumable session id for this workspace, or None.
 

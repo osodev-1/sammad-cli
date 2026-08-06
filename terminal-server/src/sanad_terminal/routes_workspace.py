@@ -43,11 +43,28 @@ def _settings(request: Request) -> TerminalSettings:
 
 def workspace_root(
     request: Request,
+    authorization: Annotated[str | None, Header()] = None,
     x_terminal_secret: Annotated[str | None, Header()] = None,
     x_workspace_user: Annotated[str | None, Header()] = None,
 ) -> Path:
-    """Authenticate the proxy call and return the user's workspace root."""
+    """Authenticate the proxy call and return the user's workspace root.
+
+    railway mode: shared-secret header + explicit user (multi-user container).
+    task mode: derived per-machine bearer; the user is FIXED — client-supplied
+    identity headers are ignored by construction.
+    """
     settings = _settings(request)
+
+    if settings.mode == "task":
+        token = ""
+        if authorization and authorization.startswith("Bearer "):
+            token = authorization[7:].strip()
+        if not token or not hmac.compare_digest(token, settings.agentd_token):
+            raise WorkspaceApiError(401, "unauthorized", "invalid machine credential")
+        from sanad_terminal.workspace import prepare_single_user_dirs
+
+        return prepare_single_user_dirs(settings.data_dir) / "workspace"
+
     if not x_terminal_secret or not hmac.compare_digest(x_terminal_secret, settings.shared_secret):
         raise WorkspaceApiError(401, "unauthorized", "invalid service credential")
     if not x_workspace_user:
@@ -175,6 +192,17 @@ async def move(root: Root, body: MoveBody) -> JSONResponse:
 @router.get("/search")
 async def search(root: Root, q: str = "") -> JSONResponse:
     return JSONResponse({"entries": _entries_payload(wfs.search(root, q))})
+
+
+@router.post("/keepalive")
+async def keepalive(root: Root, request: Request) -> JSONResponse:
+    """Explicit liveness signal (e.g. an open preview) — resets the idle-stop
+    clock via the activity middleware; the auth dependency is the point."""
+    _ = root
+    stopper = getattr(request.app.state, "idle_stopper", None)
+    if stopper is not None:
+        stopper.touch()
+    return JSONResponse({"ok": True})
 
 
 def register_error_handlers(app) -> None:  # noqa: ANN001 - FastAPI at runtime

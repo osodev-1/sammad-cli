@@ -30,18 +30,35 @@ class RedeemedTicket(BaseModel):
 
 
 class ControlPlaneClient:
-    """Thin wrapper over httpx; transport injectable for tests."""
+    """Thin wrapper over httpx; transport injectable for tests.
+
+    railway mode authenticates redeems with the shared service secret; task
+    mode with the derived per-machine credential (token + the run nonce the
+    control plane derives it from).
+    """
 
     def __init__(
         self,
         base_url: str,
         shared_secret: str,
         *,
+        machine_token: str = "",
+        machine_nonce: str = "",
         timeout: float = 10.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._http = httpx.AsyncClient(base_url=base_url, timeout=timeout, transport=transport)
         self._secret = shared_secret
+        self._machine_token = machine_token
+        self._machine_nonce = machine_nonce
+
+    def _redeem_headers(self) -> dict[str, str]:
+        if self._machine_token:
+            return {
+                "x-machine-token": self._machine_token,
+                "x-machine-nonce": self._machine_nonce,
+            }
+        return {"x-terminal-secret": self._secret}
 
     async def redeem_ticket(self, ticket: str) -> RedeemedTicket:
         """Exchange a one-time ticket for the CLI session token + identity.
@@ -54,7 +71,7 @@ class ControlPlaneClient:
             resp = await self._http.post(
                 "/api/v1/terminal/redeem",
                 json={"ticket": ticket},
-                headers={"x-terminal-secret": self._secret},
+                headers=self._redeem_headers(),
             )
         except httpx.HTTPError as exc:
             raise ControlPlaneError("redeem_failed", str(exc), 0) from exc
