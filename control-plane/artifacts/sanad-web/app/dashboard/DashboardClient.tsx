@@ -169,7 +169,10 @@ export default function DashboardClient({
   return (
     <div style={s.root}>
       <Nav
-        links={[{ href: "/pricing", label: "Pricing", compactHidden: true }]}
+        links={[
+          { href: "/terminal", label: "Workspace", badge: "beta" },
+          { href: "/pricing", label: "Pricing", compactHidden: true },
+        ]}
         planBadge={plan}
       />
 

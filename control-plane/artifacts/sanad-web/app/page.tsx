@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { CSSProperties } from "react";
 import Nav from "./ui/Nav";
+import TerminalFrame from "./ui/TerminalFrame";
 import {
   ArrowUpRightIcon,
   BoltIcon,
@@ -41,20 +42,14 @@ export default function HomePage() {
           </a>
         </div>
 
-        <div style={styles.terminalBlock}>
-          <div style={styles.terminalBar}>
-            <span style={styles.terminalDot} />
-            <span style={styles.terminalDot} />
-            <span style={styles.terminalDot} />
-            <span style={styles.terminalTitle}>sanad — zsh</span>
-          </div>
+        <TerminalFrame title="sanad — zsh" style={{ maxWidth: "620px" }}>
           <pre style={styles.terminal}>{`$ npm install -g sanad
 $ sanad login
   → Opening https://sanadcode.com/device?code=AXKR-7P2M …
 
 ✓ Signed in as ali@example.com (free plan)
 $ sanad run "refactor this auth module"`}</pre>
-        </div>
+        </TerminalFrame>
       </main>
 
       <section className="pad-x" style={styles.featuresWrap}>
@@ -136,32 +131,6 @@ const styles: Record<string, CSSProperties> = {
     flexWrap: "wrap",
     justifyContent: "center",
     marginBottom: "4.5rem",
-  },
-  terminalBlock: {
-    ...surface.invert,
-    width: "100%",
-    maxWidth: "620px",
-    textAlign: "left",
-  },
-  terminalBar: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.4rem",
-    padding: "0.7rem 1.1rem",
-    borderBottom: "1px solid rgba(255,255,255,0.14)",
-  },
-  terminalDot: {
-    width: "9px",
-    height: "9px",
-    borderRadius: "999px",
-    border: "1px solid rgba(255,255,255,0.35)",
-  },
-  terminalTitle: {
-    marginLeft: "0.6rem",
-    fontFamily: "var(--font-mono)",
-    fontSize: "0.7rem",
-    letterSpacing: "0.08em",
-    color: "var(--invert-muted)",
   },
   terminal: {
     margin: 0,

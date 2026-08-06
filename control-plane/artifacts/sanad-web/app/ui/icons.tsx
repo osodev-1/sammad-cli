@@ -168,3 +168,128 @@ export function ArrowLeftIcon(props: IconProps) {
     </Svg>
   );
 }
+
+/* --- Workspace file kinds (Files sidebar, tabs, artifact cards) --- */
+
+export function FolderIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+    </Svg>
+  );
+}
+
+export function FolderOpenIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v1H6.5a2 2 0 0 0-1.9 1.37L3 16.5Z" />
+      <path d="M3 16.5 4.6 11.4A2 2 0 0 1 6.5 10H21l-1.8 6.1a2 2 0 0 1-1.9 1.4H5a2 2 0 0 1-2-2Z" />
+    </Svg>
+  );
+}
+
+export function FileIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6 3h8l4 4v14H6Z" />
+      <path d="M14 3v4h4" />
+    </Svg>
+  );
+}
+
+export function FileCodeIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6 3h8l4 4v14H6Z" />
+      <path d="M14 3v4h4" />
+      <path d="m10 12-2 2 2 2" />
+      <path d="m14 12 2 2-2 2" />
+    </Svg>
+  );
+}
+
+export function FileImageIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6 3h8l4 4v14H6Z" />
+      <path d="M14 3v4h4" />
+      <circle cx="10" cy="12" r="1.3" />
+      <path d="m8 18 3-3 2 2 3-3" />
+    </Svg>
+  );
+}
+
+export function FileDocIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6 3h8l4 4v14H6Z" />
+      <path d="M14 3v4h4" />
+      <path d="M9 12h6M9 15h6" />
+    </Svg>
+  );
+}
+
+export function FileZipIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6 3h8l4 4v14H6Z" />
+      <path d="M14 3v4h4" />
+      <path d="M10 7h2M10 10h2M10 13h2" />
+    </Svg>
+  );
+}
+
+export function FileDataIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6 3h8l4 4v14H6Z" />
+      <path d="M14 3v4h4" />
+      <path d="M9 16v-3M12 16v-5M15 16v-2" />
+    </Svg>
+  );
+}
+
+export function DownloadIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12 4v10" />
+      <path d="m8 11 4 4 4-4" />
+      <path d="M5 20h14" />
+    </Svg>
+  );
+}
+
+export function UploadIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12 15V5" />
+      <path d="m8 8 4-4 4 4" />
+      <path d="M5 20h14" />
+    </Svg>
+  );
+}
+
+export function RefreshIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+      <path d="M20 4v4h-4" />
+    </Svg>
+  );
+}
+
+export function PlusIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12 5v14M5 12h14" />
+    </Svg>
+  );
+}
+
+export function ChevronRightIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="m9 6 6 6-6 6" />
+    </Svg>
+  );
+}

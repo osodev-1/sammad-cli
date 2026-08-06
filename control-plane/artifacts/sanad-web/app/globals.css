@@ -166,6 +166,10 @@ pre {
   .nav-hide-sm {
     display: none !important;
   }
+  /* Generic small-screen hide — workspace hints, secondary chrome. */
+  .hide-sm {
+    display: none !important;
+  }
   .sanad-logo {
     height: 49px;
   }

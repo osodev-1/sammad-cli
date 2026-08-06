@@ -11,6 +11,8 @@ export interface NavLink {
   label: string;
   /** Hidden below 640px to keep the bar to one line on phones. */
   compactHidden?: boolean;
+  /** Tiny mono chip after the label — e.g. "beta" on the workspace link. */
+  badge?: string;
 }
 
 interface Props {
@@ -45,6 +47,7 @@ export default function Nav({ links = DEFAULT_LINKS, planBadge }: Props) {
             style={s.link}
           >
             {l.label}
+            {l.badge && <span style={s.badge}>{l.badge}</span>}
           </Link>
         ))}
 
@@ -97,5 +100,14 @@ const s: Record<string, CSSProperties> = {
     fontSize: "0.875rem",
     color: "var(--ink-soft)",
     textDecoration: "none",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "0.4rem",
+  },
+  badge: {
+    ...chip,
+    fontSize: "0.58rem",
+    padding: "0.1rem 0.45rem",
+    color: "var(--ink-muted)",
   },
 };
