@@ -135,3 +135,22 @@ export const usageEvents = pgTable("usage_events", {
     .defaultNow()
     .notNull(),
 });
+
+export const terminalTickets = pgTable("terminal_tickets", {
+  id: text("id").primaryKey(),
+  ticketHash: text("ticket_hash").notNull().unique(), // sha256 of the opaque "tt_..." token
+  // Plaintext CLI session token, held only until the one-time redeem (mirrors
+  // device_auth_requests.pending_session_token).
+  sessionToken: text("session_token"),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id),
+  orgId: text("org_id")
+    .notNull()
+    .references(() => organizations.id),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  redeemedAt: timestamp("redeemed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
