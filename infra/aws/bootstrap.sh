@@ -130,10 +130,12 @@ TDEOF
 fi
 
 if [ "$PHASE" = "finish" ]; then
-  say "FINISH: waiting for certificates, then creating the HTTPS listener"
+  # Workspaces need only the compute + preview certs; *.apps (Phase E / ships)
+  # attaches later via `bash bootstrap.sh apps-cert` — never block on it here.
+  say "FINISH: waiting for compute + preview certificates, then the HTTPS listener"
   ALB_ARN=$(aws elbv2 describe-load-balancers --names sanad-compute --query 'LoadBalancers[0].LoadBalancerArn' --output text)
   CERT_ARNS=()
-  for d in "${DOMAINS[@]}"; do
+  for d in "compute.sanadcode.com" "*.preview.sanadcode.com"; do
     arn=$(cert_arn_for "$d")
     [ "$arn" = "None" ] && { echo "ERROR: no certificate found for $d — run the main phase first"; exit 1; }
     note "waiting for $d …"
@@ -152,10 +154,22 @@ if [ "$PHASE" = "finish" ]; then
     note "HTTPS listener exists: $LISTENER"
   fi
   aws elbv2 add-listener-certificates --listener-arn "$LISTENER" \
-    --certificates CertificateArn="${CERT_ARNS[1]}" CertificateArn="${CERT_ARNS[2]}" >/dev/null 2>&1 || true
-  note "SNI certificates attached"
-  say "DONE — the compute ingress is fully live. Paste this output back to Claude."
+    --certificates CertificateArn="${CERT_ARNS[1]}" >/dev/null 2>&1 || true
+  note "preview SNI certificate attached"
+  say "DONE — compute ingress live. (*.apps attaches later: bash bootstrap.sh apps-cert)"
   echo "LISTENER_ARN=$LISTENER"
+  exit 0
+fi
+
+if [ "$PHASE" = "apps-cert" ]; then
+  say "APPS-CERT: waiting for *.apps.sanadcode.com, then attaching to the listener"
+  ALB_ARN=$(aws elbv2 describe-load-balancers --names sanad-compute --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+  LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" --query "Listeners[?Port==\`443\`].ListenerArn | [0]" --output text)
+  arn=$(cert_arn_for "*.apps.sanadcode.com")
+  [ "$arn" = "None" ] && { echo "ERROR: no certificate request for *.apps"; exit 1; }
+  aws acm wait certificate-validated --certificate-arn "$arn"
+  aws elbv2 add-listener-certificates --listener-arn "$LISTENER" --certificates CertificateArn="$arn" >/dev/null
+  say "DONE — *.apps certificate attached"
   exit 0
 fi
 
