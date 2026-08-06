@@ -15,8 +15,11 @@ PHASE="${1:-all}"
 
 DOMAINS=("compute.sanadcode.com" "*.preview.sanadcode.com" "*.apps.sanadcode.com")
 
-say()  { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
-note() { printf '   %s\n' "$*"; }
+# Logs go to STDERR: several helpers are called inside $(...) command
+# substitutions, and anything they printed to stdout would corrupt the
+# captured resource ids (the bug that emptied ALB_DNS on the first run).
+say()  { printf '\n\033[1m== %s ==\033[0m\n' "$*" >&2; }
+note() { printf '   %s\n' "$*" >&2; }
 
 ACCT=$(aws sts get-caller-identity --query Account --output text)
 note "Account: $ACCT   Region: $REGION"
