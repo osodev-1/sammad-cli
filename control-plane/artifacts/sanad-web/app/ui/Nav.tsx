@@ -20,6 +20,8 @@ interface Props {
   links?: NavLink[];
   /** Current plan, rendered as a mono chip beside the avatar. */
   planBadge?: string;
+  /** Slot right after the wordmark — the workspace puts its theme switch here. */
+  brandExtra?: React.ReactNode;
 }
 
 const DEFAULT_LINKS: NavLink[] = [
@@ -32,12 +34,13 @@ const DEFAULT_LINKS: NavLink[] = [
  * The single navigation bar for every page. Signed-out visitors get a solid
  * ink "Sign in" pill; signed-in users get their plan chip and avatar.
  */
-export default function Nav({ links = DEFAULT_LINKS, planBadge }: Props) {
+export default function Nav({ links = DEFAULT_LINKS, planBadge, brandExtra }: Props) {
   return (
     <nav className="pad-x" style={s.nav}>
       <Link href="/" style={s.brand} aria-label="sanad — home">
         <SanadLogo decorative />
       </Link>
+      {brandExtra}
 
       <div className="nav-links" style={s.right}>
         {links.map((l) => (

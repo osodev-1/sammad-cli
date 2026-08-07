@@ -96,5 +96,5 @@ jobs:
         continue-on-error: true
         run: |
           aws ecs update-service --cluster sanad-workspaces --service sanad-router \
-            --force-new-deployment --region eu-central-1 \
+            --desired-count 2 --force-new-deployment --region eu-central-1 \
             --query "service.deployments[0].id" --output text

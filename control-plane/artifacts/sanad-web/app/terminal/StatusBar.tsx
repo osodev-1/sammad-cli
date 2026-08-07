@@ -2,37 +2,19 @@
 
 import type { CSSProperties } from "react";
 import type { TerminalPhase } from "./TerminalPanel";
-import type { ThemeMode } from "@/lib/terminal/xtermTheme";
 
-/** Quiet bottom strip: connection state + the light/dark switch. */
-export default function StatusBar({
-  phase,
-  themeMode,
-  onToggleTheme,
-}: {
-  phase: TerminalPhase;
-  themeMode: ThemeMode;
-  onToggleTheme: () => void;
-}) {
+/** Quiet bottom strip: connection state only — never infrastructure words. */
+export default function StatusBar({ phase }: { phase: TerminalPhase }) {
   const label =
     phase.tag === "live"
       ? "live"
-      : phase.tag === "connecting"
+      : phase.tag === "connecting" || phase.tag === "reconnecting"
         ? "connecting"
         : "offline";
   return (
     <div style={s.wrap}>
       <span style={s.left}>Your workspace</span>
       <span style={s.right}>
-        <button
-          type="button"
-          style={s.themeButton}
-          onClick={onToggleTheme}
-          title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-          aria-label={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-        >
-          {themeMode === "dark" ? "light" : "dark"}
-        </button>
         <span
           style={{ ...s.dot, ...(phase.tag === "live" ? s.dotLive : null) }}
         />
@@ -57,17 +39,6 @@ const s: Record<string, CSSProperties> = {
   },
   left: {},
   right: { display: "inline-flex", alignItems: "center", gap: "0.45rem" },
-  themeButton: {
-    font: "inherit",
-    letterSpacing: "inherit",
-    color: "var(--ink-muted)",
-    background: "none",
-    border: "1px solid var(--rule-strong)",
-    borderRadius: "var(--radius-pill)",
-    padding: "0.1rem 0.55rem",
-    cursor: "pointer",
-    marginRight: "0.55rem",
-  },
   dot: {
     width: "7px",
     height: "7px",

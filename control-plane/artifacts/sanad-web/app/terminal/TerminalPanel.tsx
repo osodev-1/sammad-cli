@@ -28,9 +28,14 @@ export type TerminalPhase =
   | { tag: "live" }
   | { tag: "exited"; code: number | null }
   | { tag: "conflict"; kind: "taken_over" | "refused" }
+  | { tag: "reconnecting"; attempt: number }
   | { tag: "disconnected" }
   | { tag: "blocked"; code: BlockedCode }
   | { tag: "error"; message: string };
+
+/* Auto-reconnect ladder — sized to ride out a compute-ingress replacement
+   (~90s) without a single manual click. After the ladder: manual Reconnect. */
+const RETRY_DELAYS_MS = [2_000, 4_000, 8_000, 15_000, 25_000, 35_000];
 
 /*
  * All PTY input goes through these helpers — a bare ws.send(string) would be
@@ -69,6 +74,34 @@ export default function TerminalPanel({ visible, themeMode, onPhaseChange }: Pro
   const [ready, setReady] = useState(false);
   const [generation, setGeneration] = useState(0);
   const [phase, setPhase] = useState<TerminalPhase>({ tag: "connecting" });
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+
+  /*
+   * Auto-reconnect: transient drops (ingress replacement, network blips)
+   * retry on a backoff ladder; the counter resets the moment a session goes
+   * live. The pending timer lives OUTSIDE the socket effect so a scheduled
+   * retry survives that effect's own teardown (each retry re-runs it).
+   */
+  const attemptRef = useRef(0);
+  const retryTimerRef = useRef<number | null>(null);
+  const scheduleRetry = useCallback((): boolean => {
+    if (attemptRef.current >= RETRY_DELAYS_MS.length) return false;
+    const delay = RETRY_DELAYS_MS[attemptRef.current];
+    attemptRef.current += 1;
+    setPhase({ tag: "reconnecting", attempt: attemptRef.current });
+    retryTimerRef.current = window.setTimeout(() => {
+      retryTimerRef.current = null;
+      setGeneration((g) => g + 1);
+    }, delay);
+    return true;
+  }, []);
+  useEffect(
+    () => () => {
+      if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
+    },
+    []
+  );
 
   /*
    * The parent's callback is read through a ref so its identity NEVER enters
@@ -198,7 +231,8 @@ export default function TerminalPanel({ visible, themeMode, onPhaseChange }: Pro
     let ping: number | null = null;
     const subs: IDisposable[] = [];
 
-    setPhase({ tag: "connecting" });
+    /* A retry attempt keeps its "reconnecting" copy through the new dial. */
+    setPhase((p) => (p.tag === "reconnecting" ? p : { tag: "connecting" }));
 
     /* A session mint that takes more than a moment means the workspace
        machine is cold-starting — say so instead of a silent "connecting". */
@@ -211,7 +245,7 @@ export default function TerminalPanel({ visible, themeMode, onPhaseChange }: Pro
       try {
         res = await fetch("/api/terminal/session", { method: "POST", signal: ac.signal });
       } catch {
-        if (!cancelled) {
+        if (!cancelled && !scheduleRetry()) {
           setPhase({ tag: "error", message: "Network error — check your connection." });
         }
         return;
@@ -222,7 +256,15 @@ export default function TerminalPanel({ visible, themeMode, onPhaseChange }: Pro
       if (!res.ok) {
         const code = body?.error?.code;
         if (isBlockedCode(code)) setPhase({ tag: "blocked", code });
-        else {
+        else if (res.status >= 500 || res.status === 429) {
+          /* Transient (ingress replacement, cold-start contention) — retry. */
+          if (!scheduleRetry()) {
+            setPhase({
+              tag: "error",
+              message: body?.error?.message ?? "Could not start a session.",
+            });
+          }
+        } else {
           setPhase({
             tag: "error",
             message: body?.error?.message ?? "Could not start a session.",
@@ -258,6 +300,7 @@ export default function TerminalPanel({ visible, themeMode, onPhaseChange }: Pro
           if (!msg) return; // unknown control frames are never fatal
           switch (msg.type) {
             case "ready": {
+              attemptRef.current = 0; // a live session re-arms the full ladder
               setPhase({ tag: "live" });
               subs.push(term.onData((d) => sendData(ws, d)));
               subs.push(term.onBinary((d) => sendBinary(ws, d)));
@@ -299,10 +342,12 @@ export default function TerminalPanel({ visible, themeMode, onPhaseChange }: Pro
         if (cancelled) return;
         wsRef.current = null;
         /* A close after exit/conflict/blocked keeps that richer phase; a
-           close out of live/connecting is a genuine drop. */
-        setPhase((p) =>
-          p.tag === "live" || p.tag === "connecting" ? { tag: "disconnected" } : p
-        );
+           close out of live/connecting/reconnecting is a transient drop —
+           ride the retry ladder before surrendering to a manual button. */
+        const tag = phaseRef.current.tag;
+        if (tag === "live" || tag === "connecting" || tag === "reconnecting") {
+          if (!scheduleRetry()) setPhase({ tag: "disconnected" });
+        }
       };
     })();
 
@@ -318,6 +363,11 @@ export default function TerminalPanel({ visible, themeMode, onPhaseChange }: Pro
   }, [ready, generation]); // setPhase from useState is stable by contract
 
   const reconnect = useCallback(() => {
+    attemptRef.current = 0; // a human retry re-arms the auto ladder
+    if (retryTimerRef.current !== null) {
+      window.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
     termRef.current?.writeln("\r\n\x1b[2m— reconnecting —\x1b[0m");
     setGeneration((g) => g + 1); // Effect B rebuilds; the scrollback survives
   }, []);
@@ -362,6 +412,15 @@ function overlayFor(phase: TerminalPhase): OverlayCopy | null {
             cta: "",
           }
         : { title: "connecting…", body: "", cta: "" };
+    case "reconnecting":
+      return {
+        title: "reconnecting…",
+        body:
+          phase.attempt > 2
+            ? "Still restoring your session — your workspace and history are safe."
+            : "",
+        cta: "",
+      };
     case "disconnected":
       return {
         title: "Connection lost",
@@ -404,10 +463,14 @@ function Overlay({
   phase: TerminalPhase;
   onReconnect: () => void;
 }) {
-  if (phase.tag === "connecting") {
+  if (phase.tag === "connecting" || phase.tag === "reconnecting") {
+    /* Quiet, panel-less treatment — a status whisper, not a modal. */
     return (
       <div style={s.overlay}>
-        <span style={s.overlayEyebrow}>connecting…</span>
+        <div style={s.overlayQuiet}>
+          <span style={s.overlayEyebrow}>{overlay.title}</span>
+          {overlay.body && <p style={s.overlayBody}>{overlay.body}</p>}
+        </div>
       </div>
     );
   }
@@ -497,6 +560,14 @@ const s: Record<string, CSSProperties> = {
     borderRadius: "var(--radius-md)",
     boxShadow: "var(--shadow-soft)",
     padding: "1.75rem 2rem",
+  },
+  overlayQuiet: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "0.6rem",
+    maxWidth: "340px",
+    textAlign: "center",
   },
   overlayEyebrow: { ...type.eyebrow, color: "var(--ink-muted)" },
   overlayBody: {

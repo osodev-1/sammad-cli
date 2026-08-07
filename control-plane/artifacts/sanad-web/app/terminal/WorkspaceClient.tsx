@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import Nav from "../ui/Nav";
+import { MoonIcon, SunIcon } from "../ui/icons";
 import ArtifactsStrip from "./ArtifactsStrip";
 import BrowserPanel from "./BrowserPanel";
 import FileTree from "./FileTree";
@@ -262,6 +263,17 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
           { href: "/pricing", label: "Pricing", compactHidden: true },
         ]}
         planBadge={plan}
+        brandExtra={
+          <button
+            type="button"
+            style={s.themeToggle}
+            onClick={toggleTheme}
+            title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            aria-label={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          >
+            {themeMode === "dark" ? <SunIcon size={16} /> : <MoonIcon size={16} />}
+          </button>
+        }
       />
       <div style={s.grid}>
         <aside style={s.sidebar} className="nav-hide-sm">
@@ -322,7 +334,7 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
           />
         </main>
       </div>
-      <StatusBar phase={statusPhase} themeMode={themeMode} onToggleTheme={toggleTheme} />
+      <StatusBar phase={statusPhase} />
       {notice && <div style={s.notice}>{notice}</div>}
     </div>
   );
@@ -383,5 +395,19 @@ const s: Record<string, CSSProperties> = {
     borderRadius: "var(--radius-pill)",
     padding: "0.5rem 1.2rem",
     fontSize: "0.82rem",
+  },
+  themeToggle: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "32px",
+    height: "32px",
+    marginLeft: "0.9rem",
+    background: "none",
+    border: "1px solid var(--rule-strong)",
+    borderRadius: "999px",
+    color: "var(--ink-muted)",
+    cursor: "pointer",
+    transition: "color 0.15s ease, border-color 0.15s ease",
   },
 };

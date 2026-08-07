@@ -72,6 +72,14 @@ if [ "$PHASE" = "router" ]; then
   else
     note "target group exists"
   fi
+  # Forgiving health checks: heavy PTY streaming can stall the event loop for
+  # a few seconds — that must never read as "dead". Fast drains on deploys.
+  aws elbv2 modify-target-group --target-group-arn "$TG_ARN" \
+    --health-check-interval-seconds 30 --health-check-timeout-seconds 10 \
+    --healthy-threshold-count 2 --unhealthy-threshold-count 5 >/dev/null
+  aws elbv2 modify-target-group-attributes --target-group-arn "$TG_ARN" \
+    --attributes Key=deregistration_delay.timeout_seconds,Value=30 >/dev/null
+  note "target group health checks tuned"
 
   # Host rules: compute + preview hosts → router. (apps hosts come with Phase E.)
   EXISTING_RULES=$(aws elbv2 describe-rules --listener-arn "$LISTENER" --query 'Rules[].Conditions[].HostHeaderConfig.Values[]' --output text 2>/dev/null || true)
@@ -94,8 +102,8 @@ if [ "$PHASE" = "router" ]; then
   "family": "sanad-router",
   "requiresCompatibilities": ["FARGATE"],
   "networkMode": "awsvpc",
-  "cpu": "256",
-  "memory": "512",
+  "cpu": "512",
+  "memory": "1024",
   "executionRoleArn": "arn:aws:iam::$ACCT:role/sanad-task-execution",
   "containerDefinitions": [{
     "name": "router",
@@ -114,16 +122,22 @@ TDEOF
   TD_ARN=$(aws ecs register-task-definition --cli-input-json file:///tmp/sanad-router-td.json --query 'taskDefinition.taskDefinitionArn' --output text)
   note "task definition: $TD_ARN"
 
+  # Two replicas: one task dying (or deploying) must never take the compute
+  # layer offline. minimumHealthy 50% keeps one serving through every roll.
   SUBNET_LIST=$(echo $SUBNETS | tr ' ' ',')
   if aws ecs describe-services --cluster sanad-workspaces --services sanad-router --query 'services[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
-    aws ecs update-service --cluster sanad-workspaces --service sanad-router --task-definition "$TD_ARN" --force-new-deployment >/dev/null
-    note "service updated"
+    aws ecs update-service --cluster sanad-workspaces --service sanad-router \
+      --task-definition "$TD_ARN" --desired-count 2 \
+      --deployment-configuration "minimumHealthyPercent=50,maximumPercent=200" \
+      --force-new-deployment >/dev/null
+    note "service updated (2 replicas)"
   else
     aws ecs create-service --cluster sanad-workspaces --service-name sanad-router \
-      --task-definition "$TD_ARN" --desired-count 1 --launch-type FARGATE \
+      --task-definition "$TD_ARN" --desired-count 2 --launch-type FARGATE \
+      --deployment-configuration "minimumHealthyPercent=50,maximumPercent=200" \
       --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_LIST],securityGroups=[$ROUTER_SG],assignPublicIp=ENABLED}" \
       --load-balancers "targetGroupArn=$TG_ARN,containerName=router,containerPort=8080" >/dev/null
-    note "service created"
+    note "service created (2 replicas)"
   fi
   say "DONE — router deploying; verify:  curl https://compute.sanadcode.com/healthz"
   exit 0
