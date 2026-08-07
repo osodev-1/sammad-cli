@@ -89,3 +89,12 @@ jobs:
           docker buildx imagetools create \
             -t "$ECR_IMAGE:latest" -t "$ECR_IMAGE:${{ github.sha }}" \
             "$GHCR_IMAGE:${{ github.sha }}"
+      - name: Roll the ECS service onto the new image
+        # Rolling replace (new task starts before the old one stops). Needs
+        # ecs:UpdateService on the sanad-ci user; tolerated until granted.
+        if: ${{ env.HAS_AWS_CI == 'true' }}
+        continue-on-error: true
+        run: |
+          aws ecs update-service --cluster sanad-workspaces --service sanad-router \
+            --force-new-deployment --region eu-central-1 \
+            --query "service.deployments[0].id" --output text
