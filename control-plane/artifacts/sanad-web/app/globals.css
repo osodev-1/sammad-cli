@@ -73,6 +73,36 @@
     SFMono-Regular, Menlo, monospace;
   --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI",
     system-ui, sans-serif;
+
+  /* Frosted nav veil — tracks the surface, not a literal white. */
+  --nav-veil: rgba(255, 255, 255, 0.85);
+}
+
+/*
+ * Workspace dark mode — the same achromatic system with the ramp flipped.
+ * Scoped to [data-ws-theme="dark"] (the workspace root sets it), so the
+ * marketing pages stay ink-on-paper while the workspace can live in either
+ * mode. Every component reads tokens, so this block is the entire theme.
+ */
+[data-ws-theme="dark"] {
+  --paper: #0f0f0f;
+  --paper-sunken: #161616;
+  --invert-surface: #0a0a0a;
+  --invert-ink: #f5f5f5;
+  --invert-muted: #9a9a9a;
+
+  --ink: #f5f5f5;
+  --ink-soft: #c6c6c6;
+  --ink-muted: #909090;
+
+  --rule: #262626;
+  --rule-strong: #3d3d3d;
+
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 32px rgba(0, 0, 0, 0.5);
+  --nav-veil: rgba(15, 15, 15, 0.85);
+
+  /* Native widgets (scrollbars, form controls) follow the surface. */
+  color-scheme: dark;
 }
 
 html,

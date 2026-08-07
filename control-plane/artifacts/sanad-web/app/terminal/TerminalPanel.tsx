@@ -15,7 +15,12 @@ import {
   type BlockedCode,
   type ClientControl,
 } from "@/lib/terminal/protocol";
-import { XTERM_OPTIONS } from "@/lib/terminal/xtermTheme";
+import {
+  TERM_SURFACE,
+  XTERM_OPTIONS,
+  XTERM_THEMES,
+  type ThemeMode,
+} from "@/lib/terminal/xtermTheme";
 import { button, size, type } from "../ui/theme";
 
 export type TerminalPhase =
@@ -47,15 +52,19 @@ const sendControl = (ws: WebSocket | null, msg: ClientControl) => {
 interface Props {
   /** The panel stays mounted through tab switches; false just hides it. */
   visible: boolean;
+  /** Workspace theme — swaps the xterm palette live, never remounts. */
+  themeMode: ThemeMode;
   onPhaseChange?: (phase: TerminalPhase) => void;
 }
 
-export default function TerminalPanel({ visible, onPhaseChange }: Props) {
+export default function TerminalPanel({ visible, themeMode, onPhaseChange }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const fitTimer = useRef<number | null>(null);
+  const themeModeRef = useRef(themeMode);
+  themeModeRef.current = themeMode;
 
   const [ready, setReady] = useState(false);
   const [generation, setGeneration] = useState(0);
@@ -110,7 +119,10 @@ export default function TerminalPanel({ visible, onPhaseChange }: Props) {
       ]);
       if (disposed || !hostRef.current) return;
 
-      const term = new Terminal(XTERM_OPTIONS);
+      const term = new Terminal({
+        ...XTERM_OPTIONS,
+        theme: XTERM_THEMES[themeModeRef.current],
+      });
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(hostRef.current);
@@ -168,6 +180,12 @@ export default function TerminalPanel({ visible, onPhaseChange }: Props) {
   useEffect(() => {
     if (visible) scheduleFit();
   }, [visible, scheduleFit]);
+
+  /* Theme toggles swap the palette in place — buffer and socket untouched. */
+  useEffect(() => {
+    const term = termRef.current;
+    if (term) term.options.theme = XTERM_THEMES[themeMode];
+  }, [themeMode, ready]);
 
   /* ---- Effect B: session + socket (re-runs per reconnect generation) ---- */
   useEffect(() => {
@@ -306,7 +324,13 @@ export default function TerminalPanel({ visible, onPhaseChange }: Props) {
 
   const overlay = phase.tag === "blocked" ? null : overlayFor(phase);
   return (
-    <div style={{ ...s.body, ...(visible ? null : s.hidden) }}>
+    <div
+      style={{
+        ...s.body,
+        background: TERM_SURFACE[themeMode],
+        ...(visible ? null : s.hidden),
+      }}
+    >
       <div
         ref={hostRef}
         style={{ ...s.host, ...(phase.tag === "live" ? null : s.hostDimmed) }}
@@ -392,7 +416,7 @@ function Overlay({
       <div style={s.overlayPanel}>
         <span style={s.overlayEyebrow}>{overlay.title}</span>
         {overlay.body && <p style={s.overlayBody}>{overlay.body}</p>}
-        <button style={button.onInvert(size.md)} onClick={onReconnect}>
+        <button style={button.primary(size.md)} onClick={onReconnect}>
           {overlay.cta}
         </button>
       </div>
@@ -424,7 +448,7 @@ function BlockedPanel({ code }: { code: BlockedCode }) {
         <span style={s.overlayEyebrow}>{copy.title}</span>
         <p style={s.overlayBody}>{copy.body}</p>
         {copy.cta && (
-          <Link href={copy.cta.href} style={button.onInvert(size.md)}>
+          <Link href={copy.cta.href} style={button.primary(size.md)}>
             {copy.cta.label}
           </Link>
         )}
@@ -468,16 +492,17 @@ const s: Record<string, CSSProperties> = {
     gap: "0.9rem",
     maxWidth: "380px",
     textAlign: "center",
-    background: "var(--invert-surface)",
-    border: "1px solid rgba(255,255,255,0.18)",
+    background: "var(--paper)",
+    border: "1px solid var(--rule-strong)",
     borderRadius: "var(--radius-md)",
+    boxShadow: "var(--shadow-soft)",
     padding: "1.75rem 2rem",
   },
-  overlayEyebrow: { ...type.eyebrow, color: "var(--invert-muted)" },
+  overlayEyebrow: { ...type.eyebrow, color: "var(--ink-muted)" },
   overlayBody: {
     margin: 0,
     fontSize: "0.875rem",
     lineHeight: 1.6,
-    color: "var(--invert-ink)",
+    color: "var(--ink-soft)",
   },
 };

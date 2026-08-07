@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import Nav from "../ui/Nav";
-import TerminalFrame from "../ui/TerminalFrame";
 import ArtifactsStrip from "./ArtifactsStrip";
 import BrowserPanel from "./BrowserPanel";
 import FileTree from "./FileTree";
@@ -22,6 +21,11 @@ import {
   isBrowserViewable,
   type WsEntry,
 } from "@/lib/terminal/workspace-model";
+import {
+  persistThemeMode,
+  readThemeMode,
+  type ThemeMode,
+} from "@/lib/terminal/xtermTheme";
 
 const POLL_MS = 4000;
 const MAX_TERMINALS = 3;
@@ -43,6 +47,19 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
   const [active, setActive] = useState<string>("term-1");
   const [phases, setPhases] = useState<Record<string, TerminalPhase>>({});
   const [notice, setNotice] = useState<string | null>(null);
+  /* SSR renders light; the stored/OS preference applies right after mount
+     (before first paint of the terminal, which loads async anyway). */
+  const [themeMode, setThemeMode] = useState<ThemeMode>("light");
+  useEffect(() => {
+    setThemeMode(readThemeMode());
+  }, []);
+  const toggleTheme = useCallback(() => {
+    setThemeMode((prev) => {
+      const next = prev === "dark" ? "light" : "dark";
+      persistThemeMode(next);
+      return next;
+    });
+  }, []);
   const sessionStart = useRef<number>(Date.now() / 1000);
   const termCounter = useRef(1);
   const viewCounter = useRef(0);
@@ -238,7 +255,7 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
     phases[isTerminalActive ? active : terminals[0].id] ?? { tag: "connecting" };
 
   return (
-    <div style={s.root}>
+    <div style={s.root} data-ws-theme={themeMode}>
       <Nav
         links={[
           { href: "/dashboard", label: "Dashboard" },
@@ -271,25 +288,22 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
             onNewTerminal={addTerminal}
           />
           <div style={s.panelArea}>
-            {/* Terminals stay MOUNTED across tab switches — hidden, never unmounted. */}
+            {/* Terminals stay MOUNTED across tab switches — hidden, never unmounted.
+                No window chrome: the terminal is a pane of the page, not a card. */}
             {terminals.map((t) => (
-              <TerminalFrame
+              <div
                 key={t.id}
-                title={
-                  t.label === "Terminal"
-                    ? "sanad — workspace"
-                    : `sanad — ${t.label.toLowerCase()}`
-                }
                 style={{
-                  ...s.terminalFrame,
-                  ...(active === t.id ? null : s.frameHidden),
+                  ...s.terminalPane,
+                  ...(active === t.id ? null : s.paneHidden),
                 }}
               >
                 <TerminalPanel
                   visible={active === t.id}
+                  themeMode={themeMode}
                   onPhaseChange={(p) => reportPhase(t.id, p)}
                 />
-              </TerminalFrame>
+              </div>
             ))}
             {activeView && (
               <BrowserPanel
@@ -308,7 +322,7 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
           />
         </main>
       </div>
-      <StatusBar phase={statusPhase} />
+      <StatusBar phase={statusPhase} themeMode={themeMode} onToggleTheme={toggleTheme} />
       {notice && <div style={s.notice}>{notice}</div>}
     </div>
   );
@@ -345,18 +359,16 @@ const s: Record<string, CSSProperties> = {
     display: "flex",
     flexDirection: "column",
     position: "relative",
-    padding: "0.75rem",
   },
-  terminalFrame: {
+  terminalPane: {
     flex: 1,
     minHeight: 0,
     display: "flex",
     flexDirection: "column",
-    borderRadius: "var(--radius-md)",
   },
-  frameHidden: {
+  paneHidden: {
     position: "absolute",
-    inset: "0.75rem",
+    inset: 0,
     visibility: "hidden",
     pointerEvents: "none",
   },
@@ -366,8 +378,8 @@ const s: Record<string, CSSProperties> = {
     left: "50%",
     transform: "translateX(-50%)",
     zIndex: 400,
-    background: "var(--invert-surface)",
-    color: "var(--invert-ink)",
+    background: "var(--ink)",
+    color: "var(--paper)",
     borderRadius: "var(--radius-pill)",
     padding: "0.5rem 1.2rem",
     fontSize: "0.82rem",

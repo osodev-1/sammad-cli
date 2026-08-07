@@ -82,7 +82,7 @@ const s: Record<string, CSSProperties> = {
     gap: "1rem",
     padding: "0.9rem 2.5rem",
     borderBottom: "1px solid var(--rule)",
-    background: "rgba(255,255,255,0.85)",
+    background: "var(--nav-veil)",
     backdropFilter: "blur(12px)",
   },
   /* Sets the ink the logo inherits; .sanad-logo owns its own sizing. */
