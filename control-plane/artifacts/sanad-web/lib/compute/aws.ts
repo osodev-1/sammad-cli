@@ -15,6 +15,7 @@ import {
   DescribeAccessPointsCommand,
   EFSClient,
 } from "@aws-sdk/client-efs";
+import { DescribeImagesCommand, ECRClient } from "@aws-sdk/client-ecr";
 
 export interface AwsComputeConfig {
   region: string;
@@ -192,21 +193,62 @@ export async function runWorkspaceTask(
 export async function describeTask(
   config: AwsComputeConfig,
   taskArn: string
-): Promise<{ status: string; privateIp: string | null }> {
+): Promise<{ status: string; privateIp: string | null; imageDigest: string | null }> {
   const result = await ecs(config.region).send(
     new DescribeTasksCommand({ cluster: config.cluster, tasks: [taskArn] })
   );
   const task = result.tasks?.[0];
-  if (!task) return { status: "MISSING", privateIp: null };
+  if (!task) return { status: "MISSING", privateIp: null, imageDigest: null };
   const ip =
     task.attachments
       ?.flatMap((a) => a.details ?? [])
       .find((d) => d.name === "privateIPv4Address")?.value ?? null;
-  return { status: task.lastStatus ?? "UNKNOWN", privateIp: ip };
+  return {
+    status: task.lastStatus ?? "UNKNOWN",
+    privateIp: ip,
+    imageDigest: task.containers?.[0]?.imageDigest ?? null,
+  };
 }
 
 export async function stopTask(config: AwsComputeConfig, taskArn: string): Promise<void> {
   await ecs(config.region).send(
     new StopTaskCommand({ cluster: config.cluster, task: taskArn, reason: "sanad reconcile" })
   );
+}
+
+let ecrClient: ECRClient | null = null;
+let digestCache: { digest: string | null; at: number } = { digest: null, at: 0 };
+
+/**
+ * The digest currently behind the workspace image tag, cached briefly. Used
+ * to notice that a quiet machine is running yesterday's image and recycle it
+ * on its next wake — busy machines are never touched.
+ */
+export async function latestWorkspaceImageDigest(
+  config: AwsComputeConfig
+): Promise<string | null> {
+  if (Date.now() - digestCache.at < 60_000) return digestCache.digest;
+  try {
+    const ref = config.workspaceImage; // <acct>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>
+    const slash = ref.indexOf("/");
+    const repoAndTag = slash >= 0 ? ref.slice(slash + 1) : ref;
+    const colon = repoAndTag.lastIndexOf(":");
+    const repositoryName = colon >= 0 ? repoAndTag.slice(0, colon) : repoAndTag;
+    const tag = colon >= 0 ? repoAndTag.slice(colon + 1) : "latest";
+    if (!repositoryName) return null;
+    ecrClient ??= new ECRClient({ region: config.region });
+    const result = await ecrClient.send(
+      new DescribeImagesCommand({
+        repositoryName,
+        imageIds: [{ imageTag: tag }],
+      })
+    );
+    const digest = result.imageDetails?.[0]?.imageDigest ?? null;
+    digestCache = { digest, at: Date.now() };
+    return digest;
+  } catch {
+    // ECR read denied/unavailable — freshness checks just switch off.
+    digestCache = { digest: null, at: Date.now() };
+    return null;
+  }
 }

@@ -108,6 +108,24 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
     });
   }, []);
 
+  /* Reboot a session's machine (files/history persist). Restarting the one
+     on screen remounts its pane so it dials the fresh machine immediately. */
+  const [paneEpoch, setPaneEpoch] = useState(0);
+  const restartSession = useCallback(
+    async (id: string) => {
+      await fetch(`/api/sessions/${encodeURIComponent(id)}/restart`, {
+        method: "POST",
+      }).catch(() => {
+        /* the machine may already be asleep — the next wake is fresh anyway */
+      });
+      if (id === activeSessionId) {
+        setPaneStatus({ tag: "connecting" });
+        setPaneEpoch((e) => e + 1);
+      }
+    },
+    [activeSessionId]
+  );
+
   /* Session controller pane — collapse state survives reloads. */
   const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
   useEffect(() => {
@@ -157,7 +175,7 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
         {/* Keyed by session: switching remounts the pane against that
             session's machine; its agents re-adopt and replay. */}
         <SessionWorkspace
-          key={activeSessionId ?? "default"}
+          key={`${activeSessionId ?? "default"}:${paneEpoch}`}
           sessionId={activeSessionId}
           themeMode={themeMode}
           onStatusPhase={onStatusPhase}
@@ -173,6 +191,7 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
               onSelect={selectSession}
               onRename={renameSession}
               onCreate={createSession}
+              onRestart={restartSession}
               onToggleCollapsed={toggleSessions}
             />
           </div>

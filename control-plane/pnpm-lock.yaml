@@ -209,6 +209,9 @@ importers:
 
   artifacts/sanad-web:
     dependencies:
+      '@aws-sdk/client-ecr':
+        specifier: ^3.1104.0
+        version: 3.1104.0
       '@aws-sdk/client-ecs':
         specifier: ^3.1103.0
         version: 3.1103.0
@@ -343,6 +346,10 @@ packages:
   '@ampproject/remapping@2.3.0':
     resolution: {integrity: sha512-30iZtAPgz+LTIYoeivqYo853f02jBYSd5uGnGpkFV0M3xOt9aN73erkgYAmZU43x4VfqcnLxW9Kpg3R5LC4YYw==}
     engines: {node: '>=6.0.0'}
+
+  '@aws-sdk/client-ecr@3.1104.0':
+    resolution: {integrity: sha512-U3YRTQs3TTfS9ywLXeB8TwvdL7HnqMxD24hbTPlyKZe6iUa10pv08RAZUzkH0902Fy1O7bt2nobFvE9wlhSAOw==}
+    engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-ecs@3.1103.0':
     resolution: {integrity: sha512-tmciwOTT02q1BM+eub7WBUnOs4TvzbYPCu2hQRE+47boJD5XQKJUSKRIhzQ/zU2IL+sAv/S82hES8TDBCXzCpg==}
@@ -2435,6 +2442,17 @@ snapshots:
     dependencies:
       '@jridgewell/gen-mapping': 0.3.13
       '@jridgewell/trace-mapping': 0.3.31
+
+  '@aws-sdk/client-ecr@3.1104.0':
+    dependencies:
+      '@aws-sdk/core': 3.977.6
+      '@aws-sdk/credential-provider-node': 3.972.78
+      '@aws-sdk/types': 3.974.2
+      '@smithy/core': 3.31.1
+      '@smithy/fetch-http-handler': 5.6.13
+      '@smithy/node-http-handler': 4.9.13
+      '@smithy/types': 4.16.1
+      tslib: 2.8.1
 
   '@aws-sdk/client-ecs@3.1103.0':
     dependencies:

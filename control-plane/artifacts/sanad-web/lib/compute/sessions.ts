@@ -14,6 +14,7 @@ import {
   awsComputeConfig,
   describeTask,
   ensureAccessPoint,
+  latestWorkspaceImageDigest,
   registerTaskDefinition,
   runWorkspaceTask,
   stopTask,
@@ -55,6 +56,29 @@ async function probeHealthz(url: string, timeoutMs = 3_000): Promise<boolean> {
     return res.ok;
   } catch {
     return false;
+  }
+}
+
+/** agentd's healthz body — session counts drive the safe-to-recycle check. */
+async function probeAgentd(
+  baseUrl: string
+): Promise<{ activeSessions: number; detachedSessions: number } | null> {
+  try {
+    const res = await fetch(`${baseUrl}/healthz`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as {
+      activeSessions?: number;
+      detachedSessions?: number;
+    };
+    return {
+      activeSessions: body.activeSessions ?? 0,
+      detachedSessions: body.detachedSessions ?? 0,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -189,7 +213,7 @@ export async function ensureSessionTask(
 
   // A recorded task may still be running (warm attach) …
   if (row.taskArn && row.runNonce) {
-    const { status, privateIp } = await describeTask(config, row.taskArn);
+    const { status, privateIp, imageDigest } = await describeTask(config, row.taskArn);
     if (status === "RUNNING" && privateIp) {
       if (privateIp !== row.taskIp) {
         await db
@@ -199,24 +223,38 @@ export async function ensureSessionTask(
       }
       // "RUNNING" at ECS is not "reachable": verify agentd answers through
       // the router — the same path the browser is about to use.
-      if (await probeHealthz(`${baseUrl}/healthz`)) {
-        return {
-          sessionId: row.id,
-          hash12: row.hash12,
-          wsUrl: `${baseUrl.replace("https://", "wss://")}/ws`,
-          baseUrl,
-          agentdToken: deriveMachineToken(userId, row.runNonce),
-          coldStart: false,
-        };
+      const counts = await probeAgentd(baseUrl);
+      if (counts) {
+        // A QUIET machine on yesterday's image recycles now so features land
+        // without manual restarts; anything with live or detached work is
+        // never touched — it picks the new image up after its own idle stop.
+        const quiet = counts.activeSessions === 0 && counts.detachedSessions === 0;
+        const latest = quiet ? await latestWorkspaceImageDigest(config) : null;
+        const stale = latest !== null && imageDigest !== null && latest !== imageDigest;
+        if (!(quiet && stale)) {
+          return {
+            sessionId: row.id,
+            hash12: row.hash12,
+            wsUrl: `${baseUrl.replace("https://", "wss://")}/ws`,
+            baseUrl,
+            agentdToken: deriveMachineToken(userId, row.runNonce),
+            coldStart: false,
+          };
+        }
+        console.log(`session ${row.id} machine is quiet on a stale image — recycling`);
+        await stopTask(config, row.taskArn).catch(() => {});
+        // fall through to a fresh run on the current image
+      } else {
+        // Unreachable. If the ingress itself is down, the task is likely
+        // fine — never stop it (it may be mid-task); surface a retryable
+        // error instead.
+        const host = process.env.COMPUTE_HOST ?? "compute.sanadcode.com";
+        if (!(await probeHealthz(`https://${host}/healthz`))) {
+          throw new Error("compute ingress is unavailable — retry shortly");
+        }
+        console.error(`session task ${row.taskArn} is RUNNING but unreachable — replacing`);
+        await stopTask(config, row.taskArn).catch(() => {});
       }
-      // Unreachable. If the ingress itself is down, the task is likely fine —
-      // never stop it (it may be mid-task); surface a retryable error instead.
-      const host = process.env.COMPUTE_HOST ?? "compute.sanadcode.com";
-      if (!(await probeHealthz(`https://${host}/healthz`))) {
-        throw new Error("compute ingress is unavailable — retry shortly");
-      }
-      console.error(`session task ${row.taskArn} is RUNNING but unreachable — replacing`);
-      await stopTask(config, row.taskArn).catch(() => {});
     }
   }
 
@@ -266,6 +304,32 @@ export async function ensureSessionTask(
     agentdToken,
     coldStart: true,
   };
+}
+
+/**
+ * Stop a session's machine now (files persist; the agent conversation resumes
+ * on the next wake). The next connect provisions a fresh task on the current
+ * image — this is how a user picks up platform updates without waiting for
+ * the idle stop.
+ */
+export async function restartSession(userId: string, sessionId: string): Promise<boolean> {
+  const row = await getSession(userId, sessionId);
+  if (!row) return false;
+  if (row.taskArn) {
+    const config = awsComputeConfig();
+    await stopTask(config, row.taskArn).catch(() => {});
+  }
+  await db
+    .update(workspaceSessions)
+    .set({
+      taskArn: null,
+      taskIp: null,
+      runNonce: null,
+      state: "provisioning",
+      updatedAt: new Date(),
+    })
+    .where(eq(workspaceSessions.id, row.id));
+  return true;
 }
 
 /** Auth material for proxying workspace REST to a (hopefully) running session machine. */

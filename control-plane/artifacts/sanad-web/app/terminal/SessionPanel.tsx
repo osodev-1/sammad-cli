@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
 import type { TerminalPhase } from "./TerminalPanel";
-import { PanelRightIcon, PencilIcon, PlusIcon } from "../ui/icons";
+import { PanelRightIcon, PencilIcon, PlusIcon, RefreshIcon } from "../ui/icons";
 
 export interface WorkspaceSessionInfo {
   id: string;
@@ -25,6 +25,7 @@ export default function SessionPanel({
   onSelect,
   onRename,
   onCreate,
+  onRestart,
   onToggleCollapsed,
 }: {
   sessions: WorkspaceSessionInfo[];
@@ -35,6 +36,7 @@ export default function SessionPanel({
   onSelect: (id: string) => void;
   onRename: (id: string, name: string) => void;
   onCreate: (name: string) => Promise<void>;
+  onRestart: (id: string) => void;
   onToggleCollapsed: () => void;
 }) {
   const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
@@ -155,18 +157,32 @@ export default function SessionPanel({
                 </span>
               )}
               {!isEditing && (
-                <button
-                  type="button"
-                  style={s.iconButton}
-                  title="Rename session"
-                  aria-label={`Rename ${row.name}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setEditing({ id: row.id, draft: row.name });
-                  }}
-                >
-                  <PencilIcon size={13} />
-                </button>
+                <span style={s.rowActions}>
+                  <button
+                    type="button"
+                    style={s.iconButton}
+                    title="Rename session"
+                    aria-label={`Rename ${row.name}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setEditing({ id: row.id, draft: row.name });
+                    }}
+                  >
+                    <PencilIcon size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    style={s.iconButton}
+                    title="Restart machine — picks up platform updates; files and history persist"
+                    aria-label={`Restart ${row.name}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRestart(row.id);
+                    }}
+                  >
+                    <RefreshIcon size={13} />
+                  </button>
+                </span>
               )}
             </div>
           );
@@ -298,6 +314,11 @@ const s: Record<string, CSSProperties> = {
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
+  },
+  rowActions: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "2px",
   },
   iconButton: {
     display: "inline-flex",
