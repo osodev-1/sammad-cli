@@ -39,7 +39,9 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
   const [sessions, setSessions] = useState<WorkspaceSessionInfo[]>([]);
   const [sessionLimit, setSessionLimit] = useState(5);
   const [activeSessionId, setActiveSessionId] = useState<string | undefined>();
-  const [paneStatus, setPaneStatus] = useState<TerminalPhase>({ tag: "connecting" });
+  const [paneStatus, setPaneStatus] = useState<TerminalPhase>({
+    tag: "connecting",
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -50,12 +52,16 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
         const body = await res.json();
         const rows: WorkspaceSessionInfo[] | undefined = body?.data?.sessions;
         if (cancelled || !Array.isArray(rows) || rows.length === 0) return;
-        if (typeof body?.data?.limit === "number") setSessionLimit(body.data.limit);
+        if (typeof body?.data?.limit === "number")
+          setSessionLimit(body.data.limit);
         setSessions(rows);
         let initial = rows[0].id;
         try {
-          const remembered = window.localStorage.getItem("sanad-ws-active-session");
-          if (remembered && rows.some((r) => r.id === remembered)) initial = remembered;
+          const remembered = window.localStorage.getItem(
+            "sanad-ws-active-session",
+          );
+          if (remembered && rows.some((r) => r.id === remembered))
+            initial = remembered;
         } catch {
           /* storage blocked */
         }
@@ -94,7 +100,7 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
       setSessions((prev) => [...prev, session]);
       selectSession(session.id);
     },
-    [selectSession]
+    [selectSession],
   );
 
   const renameSession = useCallback(async (id: string, name: string) => {
@@ -123,14 +129,16 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
         setPaneEpoch((e) => e + 1);
       }
     },
-    [activeSessionId]
+    [activeSessionId],
   );
 
   /* Session controller pane — collapse state survives reloads. */
   const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
   useEffect(() => {
     try {
-      setSessionsCollapsed(window.localStorage.getItem("sanad-ws-sessions") === "collapsed");
+      setSessionsCollapsed(
+        window.localStorage.getItem("sanad-ws-sessions") === "collapsed",
+      );
     } catch {
       /* storage blocked — default open */
     }
@@ -139,7 +147,10 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
     setSessionsCollapsed((prev) => {
       const next = !prev;
       try {
-        window.localStorage.setItem("sanad-ws-sessions", next ? "collapsed" : "open");
+        window.localStorage.setItem(
+          "sanad-ws-sessions",
+          next ? "collapsed" : "open",
+        );
       } catch {
         /* storage blocked */
       }
@@ -165,10 +176,22 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
             type="button"
             style={s.themeToggle}
             onClick={toggleTheme}
-            title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-            aria-label={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            title={
+              themeMode === "dark"
+                ? "Switch to light mode"
+                : "Switch to dark mode"
+            }
+            aria-label={
+              themeMode === "dark"
+                ? "Switch to light mode"
+                : "Switch to dark mode"
+            }
           >
-            {themeMode === "dark" ? <SunIcon size={16} /> : <MoonIcon size={16} />}
+            {themeMode === "dark" ? (
+              <SunIcon size={16} />
+            ) : (
+              <MoonIcon size={16} />
+            )}
           </button>
         }
       />
@@ -178,6 +201,7 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
         <SessionWorkspace
           key={`${activeSessionId ?? "default"}:${paneEpoch}`}
           sessionId={activeSessionId}
+          projectName={sessions.find((x) => x.id === activeSessionId)?.name}
           themeMode={themeMode}
           onStatusPhase={onStatusPhase}
         />

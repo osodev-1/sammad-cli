@@ -78,6 +78,22 @@ def create_app(
         manager.start()
         if idle_stopper:
             idle_stopper.start()
+        # Every workspace is a git repo from first boot, so the context header
+        # shows a real branch immediately (best-effort; git endpoints also
+        # ensure it on demand).
+        if resolved.mode == "task":
+            with contextlib.suppress(Exception):
+                from sanad_terminal.git_ops import GitRepo
+                from sanad_terminal.workspace import prepare_single_user_dirs
+
+                root = prepare_single_user_dirs(resolved.data_dir) / "workspace"
+                uid = gid = None
+                if resolved.agent_user:
+                    import pwd
+
+                    pw = pwd.getpwnam(resolved.agent_user)
+                    uid, gid = pw.pw_uid, pw.pw_gid
+                await GitRepo(root, uid=uid, gid=gid, home=root.parent / "home").ensure_repo()
         yield
         if idle_stopper:
             await idle_stopper.stop()
@@ -96,6 +112,9 @@ def create_app(
     from sanad_terminal.routes_blueprint import router as blueprint_router
 
     app.include_router(blueprint_router)
+    from sanad_terminal.routes_git import router as git_router
+
+    app.include_router(git_router)
     register_error_handlers(app)
 
     if idle_stopper is not None:

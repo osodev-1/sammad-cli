@@ -357,3 +357,14 @@ export function GraphIcon(props: IconProps) {
     </Svg>
   );
 }
+
+export function GitBranchIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="6" cy="5" r="2.2" />
+      <circle cx="6" cy="19" r="2.2" />
+      <circle cx="18" cy="7" r="2.2" />
+      <path d="M6 7.2v9.6M8.2 6.4A6 6 0 0 1 15.8 8.4M15.8 9.2A6 6 0 0 1 8 15" />
+    </Svg>
+  );
+}

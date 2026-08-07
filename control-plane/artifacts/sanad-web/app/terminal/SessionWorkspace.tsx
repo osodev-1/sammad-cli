@@ -15,6 +15,7 @@ import {
   type WorkspaceTab,
 } from "./tabs";
 import GraphPanel from "./graph/GraphPanel";
+import WorkspaceContextHeader from "./WorkspaceContextHeader";
 import {
   buildTree,
   detectArtifacts,
@@ -37,10 +38,12 @@ const MAX_TERMINALS = 3;
  */
 export default function SessionWorkspace({
   sessionId,
+  projectName,
   themeMode,
   onStatusPhase,
 }: {
   sessionId?: string;
+  projectName?: string;
   themeMode: ThemeMode;
   onStatusPhase?: (phase: TerminalPhase) => void;
 }) {
@@ -365,15 +368,22 @@ export default function SessionWorkspace({
   return (
     <>
       <aside style={s.sidebar} className="nav-hide-sm">
-        <FileTree
+        <WorkspaceContextHeader
+          projectName={projectName ?? "Workspace"}
           sessionId={sessionId}
-          tree={tree}
-          busy={polling}
-          onOpenFile={openFile}
-          onOpenInBrowser={openInBrowser}
-          onRefresh={() => void refresh()}
-          onError={setNotice}
+          onChanged={() => void refresh()}
         />
+        <div style={s.treeScroll}>
+          <FileTree
+            sessionId={sessionId}
+            tree={tree}
+            busy={polling}
+            onOpenFile={openFile}
+            onOpenInBrowser={openInBrowser}
+            onRefresh={() => void refresh()}
+            onError={setNotice}
+          />
+        </div>
       </aside>
       <main style={s.main}>
         <TabsBar
@@ -468,6 +478,14 @@ const s: Record<string, CSSProperties> = {
     width: "250px",
     minWidth: "250px",
     minHeight: 0,
+    display: "flex",
+    flexDirection: "column",
+  },
+  treeScroll: {
+    flex: 1,
+    minHeight: 0,
+    display: "flex",
+    flexDirection: "column",
   },
   main: {
     flex: 1,
