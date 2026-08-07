@@ -153,6 +153,14 @@ if (process.env.NODE_ENV !== "test") {
   });
   const config = loadConfig();
   createServer(config).listen(config.port, "0.0.0.0", () => {
-    console.log(JSON.stringify({ msg: "sanad-router listening", port: config.port }));
+    // rev names the commit this build shipped from — a deploy is only real
+    // when this line's rev matches the pushed sha (stale-cache postmortem).
+    console.log(
+      JSON.stringify({
+        msg: "sanad-router listening",
+        port: config.port,
+        rev: process.env.GIT_SHA ?? "unknown",
+      })
+    );
   });
 }

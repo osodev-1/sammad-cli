@@ -71,8 +71,11 @@ jobs:
           tags: |
             ${{ env.GHCR_IMAGE }}:latest
             ${{ env.GHCR_IMAGE }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+          # No layer cache: a stale gha cache once shipped old source under a
+          # new tag (the healthz-404 outage). This image builds in ~90s.
+          no-cache: true
       - name: Configure AWS credentials
         if: ${{ env.HAS_AWS_CI == 'true' }}
         uses: aws-actions/configure-aws-credentials@v4
@@ -91,9 +94,9 @@ jobs:
             "$GHCR_IMAGE:${{ github.sha }}"
       - name: Roll the ECS service onto the new image
         # Rolling replace (new task starts before the old one stops). Needs
-        # ecs:UpdateService on the sanad-ci user; tolerated until granted.
+        # ecs:UpdateService on the sanad-ci user. NO continue-on-error: a
+        # masked AccessDenied here once hid that no deploy ever rolled.
         if: ${{ env.HAS_AWS_CI == 'true' }}
-        continue-on-error: true
         run: |
           aws ecs update-service --cluster sanad-workspaces --service sanad-router \
             --desired-count 2 --force-new-deployment --region eu-central-1 \

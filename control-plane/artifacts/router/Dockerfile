@@ -13,6 +13,10 @@ RUN corepack enable && corepack prepare pnpm@10.34.5 --activate
 WORKDIR /workspace
 
 FROM base AS build
+# Cache-buster + provenance: a changed sha invalidates every layer below, so a
+# stale layer cache can never ship old source under a new tag again.
+ARG GIT_SHA=dev
+ENV GIT_SHA=$GIT_SHA
 COPY . .
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
@@ -22,6 +26,8 @@ FROM node:22-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8080
+ARG GIT_SHA=dev
+ENV GIT_SHA=$GIT_SHA
 COPY --from=build /workspace/artifacts/router/dist ./dist
 EXPOSE 8080
 CMD ["node", "dist/index.mjs"]
