@@ -52,9 +52,7 @@ def _seed(client: TestClient) -> None:
         (".sanad/agents/primary/agent.yaml", AGENT),
         (".sanad/skills/code-review/skill.yaml", SKILL),
     ):
-        res = client.put(
-            f"/internal/workspace/file?path={path}", headers=HEADERS, content=body
-        )
+        res = client.put(f"/internal/workspace/file?path={path}", headers=HEADERS, content=body)
         assert res.status_code == 200, res.text
 
 
@@ -114,9 +112,9 @@ def test_resource_endpoint(client: TestClient):
     body = res.json()
     assert body["kind"] == "Agent"
     assert body["manifestPath"].endswith("agent.yaml")
-    assert client.get(
-        "/internal/blueprint/resource?id=agent:nope", headers=HEADERS
-    ).status_code == 404
+    assert (
+        client.get("/internal/blueprint/resource?id=agent:nope", headers=HEADERS).status_code == 404
+    )
 
 
 def test_schemas_cover_every_kind(client: TestClient):

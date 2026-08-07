@@ -14,11 +14,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
-
 from sanad_blueprint.graph import compile_graph
 from sanad_blueprint.indexer import index_blueprint
 from sanad_blueprint.schemas import json_schemas
 from sanad_blueprint.validate import validate_index
+
 from sanad_terminal.routes_workspace import workspace_root
 
 router = APIRouter(prefix="/internal/blueprint")

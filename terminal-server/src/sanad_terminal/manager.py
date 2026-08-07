@@ -119,11 +119,7 @@ class SessionManager:
         async with self._lock:
             while self.count_for(user_id, kind) >= cap:
                 oldest = min(
-                    (
-                        s
-                        for s in self._sessions.values()
-                        if s.user_id == user_id and s.kind == kind
-                    ),
+                    (s for s in self._sessions.values() if s.user_id == user_id and s.kind == kind),
                     key=lambda s: s.started_at,
                 )
                 del self._sessions[oldest.conn_id]
@@ -173,9 +169,7 @@ class SessionManager:
                 (
                     s
                     for s in self._sessions.values()
-                    if s.user_id == user_id
-                    and s.kind == kind
-                    and s.detached_at is not None
+                    if s.user_id == user_id and s.kind == kind and s.detached_at is not None
                 ),
                 key=lambda s: s.detached_at or 0.0,
                 reverse=True,

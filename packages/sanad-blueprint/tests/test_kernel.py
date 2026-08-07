@@ -95,8 +95,7 @@ def test_delegation_cycle_is_blocking() -> None:
             f".sanad/agents/{rid}/agent.yaml",
             f"apiVersion: sanad.dev/v1alpha1\nkind: Agent\n"
             f"metadata:\n  id: agent:{rid}\n  name: {rid}\n"
-            f"spec:\n  delegatesTo:\n"
-            + "".join(f"    - agent:{d}\n" for d in delegates),
+            f"spec:\n  delegatesTo:\n" + "".join(f"    - agent:{d}\n" for d in delegates),
         )
         return IndexedResource(resource=p.resource, manifest_path=p.path)
 
