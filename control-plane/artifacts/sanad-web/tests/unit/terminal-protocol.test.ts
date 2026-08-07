@@ -36,6 +36,11 @@ describe("terminal protocol", () => {
       code: "invalid_ticket",
       message: undefined,
     });
+    expect(parseServerControl('{"type":"event","channel":"blueprint","version":7}')).toEqual({
+      type: "event",
+      channel: "blueprint",
+      version: 7,
+    });
   });
 
   it("returns null for malformed or unknown frames (never throws)", () => {
@@ -44,6 +49,16 @@ describe("terminal protocol", () => {
     expect(parseServerControl('{"type":"mystery"}')).toBeNull();
     expect(parseServerControl('{"type":"ready"}')).toBeNull(); // missing userId
     expect(parseServerControl('{"type":"error"}')).toBeNull(); // missing code
+    expect(parseServerControl('{"type":"event","channel":"blueprint"}')).toBeNull(); // no version
+    expect(parseServerControl('{"type":"event","version":1}')).toBeNull(); // no channel
+  });
+
+  it("encodes an events-channel auth frame (no grid needed)", () => {
+    expect(JSON.parse(encodeControl({ type: "auth", ticket: "tt_e", mode: "events" }))).toEqual({
+      type: "auth",
+      ticket: "tt_e",
+      mode: "events",
+    });
   });
 
   it("classifies conflict codes", () => {

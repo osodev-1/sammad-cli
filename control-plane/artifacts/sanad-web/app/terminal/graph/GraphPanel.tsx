@@ -8,11 +8,20 @@ import {
   Controls,
   MiniMap,
   ReactFlow,
+  type Connection,
   type Edge,
   type Node,
   type NodeTypes,
 } from "@xyflow/react";
-import { fetchBlueprintGraph } from "@/lib/blueprint/api";
+import {
+  applyPlan,
+  draftPlan,
+  fetchBlueprintGraph,
+  fetchCreatableKinds,
+  type ChangePlan,
+  type CreatableKind,
+} from "@/lib/blueprint/api";
+import { subscribeBlueprintEvents } from "@/lib/blueprint/events";
 import {
   worstSeverity,
   type BlueprintGraph,
@@ -21,15 +30,16 @@ import {
 import { BlueprintNode as BlueprintNodeView } from "./nodes";
 import { layoutGraph, type LayoutKind } from "./layout";
 import Inspector from "./Inspector";
+import PlanPreview from "./PlanPreview";
 
 const POLL_MS = 4000;
 const nodeTypes: NodeTypes = { blueprint: BlueprintNodeView };
 
 /**
- * The read-only Blueprint Graph (M1). Polls the compiled graph, lays it out
- * with dagre, renders it with React Flow styled by the design system, and
- * cross-focuses with the file tree: selecting a node reveals its manifest,
- * and `focusResourceId` (from clicking a .sanad file) highlights its node.
+ * The Blueprint Graph. Reads the compiled graph (dagre layout, React Flow
+ * styled by the design system) and — M2 — authors it: a New Node menu and
+ * drag-to-connect both produce a change plan the user reviews before it is
+ * written (MA-005/GR-007). Cross-focuses with the file tree (GR-004/005).
  */
 export default function GraphPanel({
   sessionId,
@@ -48,6 +58,16 @@ export default function GraphPanel({
   const [layout, setLayout] = useState<LayoutKind>("hierarchy");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
+  /* Authoring state: a drafted plan awaiting the user's review, plus the
+     New Node menu. */
+  const [pendingPlan, setPendingPlan] = useState<ChangePlan | null>(null);
+  const [applyBusy, setApplyBusy] = useState(false);
+  const [applyError, setApplyError] = useState<string | null>(null);
+  const [newMenu, setNewMenu] = useState(false);
+  const [kinds, setKinds] = useState<CreatableKind[]>([]);
+  const [newKind, setNewKind] = useState<string>("");
+  const [newName, setNewName] = useState("");
+
   /* Poll while visible. The graph is cheap and the payload small; a version
      check (?ifVersionNot) is a fast-follow once the watcher lands in M2. */
   const load = useCallback(async () => {
@@ -64,6 +84,37 @@ export default function GraphPanel({
     }, POLL_MS);
     return () => window.clearInterval(t);
   }, [visible, load]);
+
+  /* Prompt refresh on external edits (a PTY-agent write, a git checkout) via
+     the machine's events channel — the 4s poll above is the reliable fallback
+     if the socket drops (NF-001).
+
+     The events socket mints a session, which would WAKE a stopped machine, so
+     it is a strict follower of liveness, never a driver: run it only while the
+     last poll succeeded (machine confirmed up — the poll itself never wakes)
+     AND the browser tab is foregrounded. That also matches the invariant that
+     external .sanad edits only happen while a session is live, so there is
+     nothing to miss when the machine is asleep. */
+  const machineUp = graph !== null;
+  useEffect(() => {
+    if (!visible || !machineUp) return;
+    let dispose: (() => void) | null = null;
+    const sync = () => {
+      const shouldRun = document.visibilityState === "visible";
+      if (shouldRun && !dispose) {
+        dispose = subscribeBlueprintEvents(() => void load(), sessionId);
+      } else if (!shouldRun && dispose) {
+        dispose();
+        dispose = null;
+      }
+    };
+    sync();
+    document.addEventListener("visibilitychange", sync);
+    return () => {
+      document.removeEventListener("visibilitychange", sync);
+      if (dispose) dispose();
+    };
+  }, [visible, machineUp, sessionId, load]);
 
   /* focusResourceId may be a resource id or a manifest path; resolve to an id. */
   const focused = useMemo(() => {
@@ -139,6 +190,84 @@ export default function GraphPanel({
     [graph, onOpenFile],
   );
 
+  /* Load the creatable kinds once, lazily — powers the New menu. */
+  useEffect(() => {
+    if (!visible || kinds.length) return;
+    let live = true;
+    void fetchCreatableKinds(sessionId)
+      .then((k) => {
+        if (!live) return;
+        setKinds(k);
+        if (k.length) setNewKind((cur) => cur || k[0].kind);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [visible, kinds.length, sessionId]);
+
+  /* Draft (never write) a plan; the PlanPreview modal reviews it before apply.
+     A planning error (illegal edge, duplicate) surfaces in the toolbar banner. */
+  const draft = useCallback(
+    async (req: Parameters<typeof draftPlan>[0]) => {
+      setApplyError(null);
+      const outcome = await draftPlan(req, sessionId);
+      if (outcome.plan) {
+        setPendingPlan(outcome.plan);
+      } else {
+        setPendingPlan(null);
+        setApplyError(outcome.error?.message ?? "Could not plan that change.");
+      }
+    },
+    [sessionId],
+  );
+
+  /* Drag-to-connect: React Flow hands us source+target; the kernel infers the
+     one legal relationship between those two kinds (or rejects it). */
+  const onConnect = useCallback(
+    (conn: Connection) => {
+      if (!conn.source || !conn.target || conn.source === conn.target) return;
+      void draft({
+        action: "createEdge",
+        source: conn.source,
+        target: conn.target,
+      });
+    },
+    [draft],
+  );
+
+  const submitNewNode = useCallback(() => {
+    if (!newKind || !newName.trim()) return;
+    setNewMenu(false);
+    void draft({
+      action: "createResource",
+      kind: newKind,
+      name: newName.trim(),
+    });
+    setNewName("");
+  }, [newKind, newName, draft]);
+
+  const applyPending = useCallback(async () => {
+    if (!pendingPlan) return;
+    setApplyBusy(true);
+    setApplyError(null);
+    const outcome = await applyPlan(pendingPlan, sessionId);
+    setApplyBusy(false);
+    if (outcome.graph) {
+      setGraph(outcome.graph);
+      setPendingPlan(null);
+    } else {
+      setApplyError(
+        outcome.error?.message ?? "Apply failed — nothing was written.",
+      );
+    }
+  }, [pendingPlan, sessionId]);
+
+  const cancelPending = useCallback(() => {
+    setPendingPlan(null);
+    setApplyError(null);
+  }, []);
+
   if (!visible) return null;
 
   return (
@@ -146,21 +275,80 @@ export default function GraphPanel({
       <div style={s.main}>
         <div style={s.toolbar}>
           <span style={s.title}>Blueprint</span>
-          <div style={s.views}>
-            {(["hierarchy", "layered"] as const).map((k) => (
+          <div style={s.toolRight}>
+            <div style={s.views}>
+              {(["hierarchy", "layered"] as const).map((k) => (
+                <button
+                  key={k}
+                  style={{
+                    ...s.viewBtn,
+                    ...(layout === k ? s.viewBtnActive : null),
+                  }}
+                  onClick={() => setLayout(k)}
+                >
+                  {k}
+                </button>
+              ))}
+            </div>
+            {graph?.initialized && (
               <button
-                key={k}
-                style={{
-                  ...s.viewBtn,
-                  ...(layout === k ? s.viewBtnActive : null),
-                }}
-                onClick={() => setLayout(k)}
+                style={{ ...s.newBtn, ...(newMenu ? s.newBtnActive : null) }}
+                onClick={() => setNewMenu((v) => !v)}
+                disabled={kinds.length === 0}
+                title={
+                  kinds.length === 0
+                    ? "No creatable kinds available"
+                    : "Scaffold a new resource"
+                }
               >
-                {k}
+                + New
               </button>
-            ))}
+            )}
           </div>
         </div>
+
+        {newMenu && graph?.initialized && (
+          <div style={s.newRow}>
+            <select
+              style={s.newSelect}
+              value={newKind}
+              onChange={(e) => setNewKind(e.target.value)}
+            >
+              {kinds.map((k) => (
+                <option key={k.kind} value={k.kind}>
+                  {k.kind}
+                </option>
+              ))}
+            </select>
+            <input
+              style={s.newInput}
+              placeholder="Name (e.g. Code Review)"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitNewNode();
+                if (e.key === "Escape") setNewMenu(false);
+              }}
+              autoFocus
+            />
+            <button
+              style={s.newCreate}
+              onClick={submitNewNode}
+              disabled={!newName.trim()}
+            >
+              Plan…
+            </button>
+          </div>
+        )}
+
+        {applyError && !pendingPlan && (
+          <div style={s.banner}>
+            {applyError}
+            <button style={s.bannerClose} onClick={() => setApplyError(null)}>
+              ✕
+            </button>
+          </div>
+        )}
 
         {loading ? (
           <div style={s.empty}>Reading your blueprint…</div>
@@ -179,6 +367,7 @@ export default function GraphPanel({
             nodeTypes={nodeTypes}
             onNodeClick={onNodeClick}
             onNodeDoubleClick={onNodeDoubleClick}
+            onConnect={onConnect}
             fitView
             minZoom={0.2}
             maxZoom={2}
@@ -205,12 +394,22 @@ export default function GraphPanel({
           onClose={() => setSelectedId(null)}
         />
       )}
+
+      {pendingPlan && (
+        <PlanPreview
+          plan={pendingPlan}
+          busy={applyBusy}
+          error={applyError}
+          onApply={applyPending}
+          onCancel={cancelPending}
+        />
+      )}
     </div>
   );
 }
 
 const s: Record<string, CSSProperties> = {
-  wrap: { flex: 1, minHeight: 0, display: "flex" },
+  wrap: { flex: 1, minHeight: 0, display: "flex", position: "relative" },
   main: {
     flex: 1,
     minWidth: 0,
@@ -234,6 +433,7 @@ const s: Record<string, CSSProperties> = {
     textTransform: "uppercase",
     color: "var(--ink-muted)",
   },
+  toolRight: { display: "inline-flex", alignItems: "center", gap: "0.6rem" },
   views: { display: "inline-flex", gap: "2px" },
   viewBtn: {
     font: "inherit",
@@ -249,6 +449,77 @@ const s: Record<string, CSSProperties> = {
     background: "var(--paper-sunken)",
     color: "var(--ink)",
     borderColor: "var(--ink)",
+  },
+  newBtn: {
+    font: "inherit",
+    fontSize: "0.72rem",
+    fontWeight: 600,
+    color: "var(--ink)",
+    background: "none",
+    border: "1px solid var(--ink)",
+    borderRadius: "var(--radius-pill)",
+    padding: "0.1rem 0.7rem",
+    cursor: "pointer",
+  },
+  newBtnActive: { background: "var(--ink)", color: "var(--paper)" },
+  newRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.5rem",
+    padding: "0.5rem 0.85rem",
+    borderBottom: "1px solid var(--rule)",
+    background: "var(--paper-sunken)",
+  },
+  newSelect: {
+    font: "inherit",
+    fontSize: "0.78rem",
+    color: "var(--ink)",
+    background: "var(--paper)",
+    border: "1px solid var(--rule-strong)",
+    borderRadius: "var(--radius-sm)",
+    padding: "0.2rem 0.4rem",
+  },
+  newInput: {
+    flex: 1,
+    minWidth: 0,
+    font: "inherit",
+    fontSize: "0.78rem",
+    color: "var(--ink)",
+    background: "var(--paper)",
+    border: "1px solid var(--rule-strong)",
+    borderRadius: "var(--radius-sm)",
+    padding: "0.2rem 0.5rem",
+  },
+  newCreate: {
+    font: "inherit",
+    fontSize: "0.78rem",
+    fontWeight: 600,
+    color: "var(--paper)",
+    background: "var(--ink)",
+    border: "none",
+    borderRadius: "var(--radius-pill)",
+    padding: "0.25rem 0.9rem",
+    cursor: "pointer",
+  },
+  banner: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "0.75rem",
+    padding: "0.5rem 0.85rem",
+    borderBottom: "1px solid var(--rule)",
+    background: "var(--paper-sunken)",
+    color: "var(--ink)",
+    fontSize: "0.8rem",
+  },
+  bannerClose: {
+    background: "none",
+    border: "none",
+    color: "var(--ink-muted)",
+    cursor: "pointer",
+    fontSize: "0.8rem",
+    lineHeight: 1,
+    padding: "0.1rem 0.3rem",
   },
   empty: {
     flex: 1,

@@ -30,6 +30,7 @@ from sanad_terminal.protocol import (
     ResizeFrame,
     clamp_size,
     error_frame,
+    event_frame,
     exit_frame,
     parse_client_frame,
     pong_frame,
@@ -97,6 +98,9 @@ def create_app(
         yield
         if idle_stopper:
             await idle_stopper.stop()
+        from sanad_terminal.blueprint_events import shutdown_buses
+
+        await shutdown_buses()
         await manager.shutdown()
         await cp.aclose()
 
@@ -197,6 +201,15 @@ def create_app(
             idle_stopper.touch()
         cols, rows = clamp_size(frame.cols, frame.rows)
         mode = frame.mode
+
+        # -- events channel: PTY-less blueprint push (no session, no idle hold) -
+        if mode == "events":
+            if resolved.mode == "task":
+                user_dir = prepare_single_user_dirs(resolved.data_dir)
+            else:
+                user_dir = prepare_user_dirs(resolved.users_dir, user_id)
+            await _serve_events(ws, user_dir / "workspace" / ".sanad")
+            return
 
         # -- reattach the most recent detached session, else spawn fresh -------
         # Adoption is kind-scoped: a drawer shell can never adopt an agent.
@@ -389,3 +402,40 @@ async def _safe_send(ws: WebSocket, text: str) -> None:
 async def _safe_close(ws: WebSocket, code: int) -> None:
     with contextlib.suppress(Exception):
         await ws.close(code=code)
+
+
+async def _serve_events(ws: WebSocket, sanad_dir) -> None:  # noqa: ANN001
+    """Run the blueprint events channel until the client disconnects.
+
+    Sends the current version immediately (so a client that reconnected after a
+    missed change re-syncs at once), then one frame per subsequent change. Reads
+    client frames only to answer pings and notice the disconnect; nothing here
+    touches idle accounting, so an idle machine still stops with the tab open.
+    """
+    from sanad_terminal.blueprint_events import get_bus
+
+    bus = get_bus(sanad_dir)
+    async with bus.subscribe() as queue:
+        await _safe_send(ws, event_frame("blueprint", bus.version))
+
+        async def _pump() -> None:
+            while True:
+                version = await queue.get()
+                await _safe_send(ws, event_frame("blueprint", version))
+
+        pusher = asyncio.create_task(_pump())
+        try:
+            while True:
+                message = await ws.receive()
+                if message.get("type") == "websocket.disconnect":
+                    break
+                text = message.get("text")
+                if not text:
+                    continue
+                with contextlib.suppress(ProtocolError):
+                    if isinstance(parse_client_frame(text), PingFrame):
+                        await _safe_send(ws, pong_frame())
+        finally:
+            pusher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pusher

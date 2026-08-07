@@ -8,7 +8,7 @@
  */
 
 export type ClientControl =
-  | { type: "auth"; ticket: string; cols: number; rows: number; mode?: "agent" | "shell" }
+  | { type: "auth"; ticket: string; cols?: number; rows?: number; mode?: "agent" | "shell" | "events" }
   | { type: "resize"; cols: number; rows: number }
   | { type: "ping" };
 
@@ -17,6 +17,7 @@ export type ServerControl =
   | { type: "pong" }
   | { type: "warning"; reason: string; secondsLeft: number }
   | { type: "exit"; code: number | null }
+  | { type: "event"; channel: string; version: number }
   | { type: "error"; code: string; message?: string };
 
 export const encodeControl = (msg: ClientControl): string => JSON.stringify(msg);
@@ -50,6 +51,9 @@ export function parseServerControl(raw: string): ServerControl | null {
       };
     case "exit":
       return { type: "exit", code: typeof m.code === "number" ? m.code : null };
+    case "event":
+      if (typeof m.channel !== "string" || typeof m.version !== "number") return null;
+      return { type: "event", channel: m.channel, version: m.version };
     case "error":
       if (typeof m.code !== "string") return null;
       return {

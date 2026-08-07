@@ -25,8 +25,9 @@ class AuthFrame(BaseModel):
     ticket: str = Field(min_length=1, max_length=256)
     cols: int = Field(default=80, ge=1, le=10_000)
     rows: int = Field(default=24, ge=1, le=10_000)
-    # "agent" runs the sanad CLI; "shell" is the drawer's plain login shell.
-    mode: Literal["agent", "shell"] = "agent"
+    # "agent" runs the sanad CLI; "shell" is the drawer's plain login shell;
+    # "events" is a PTY-less push channel (blueprint graph-version bumps).
+    mode: Literal["agent", "shell", "events"] = "agent"
 
 
 class ResizeFrame(BaseModel):
@@ -76,6 +77,12 @@ def ready_frame(user_id: str, cols: int, rows: int, *, resumed: bool = False) ->
 
 def pong_frame() -> str:
     return json.dumps({"type": "pong"})
+
+
+def event_frame(channel: str, version: int) -> str:
+    """A push on the events channel: `channel` changed; its version is now N.
+    The client compares versions and re-fetches the affected resource."""
+    return json.dumps({"type": "event", "channel": channel, "version": version})
 
 
 def warning_frame(reason: str, seconds_left: float) -> str:

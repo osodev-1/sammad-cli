@@ -122,3 +122,100 @@ def test_schemas_cover_every_kind(client: TestClient):
     assert res.status_code == 200
     schemas = res.json()["schemas"]
     assert "Agent" in schemas and "PublishProfile" in schemas
+
+
+def test_templates_lists_creatable_kinds(client: TestClient):
+    res = client.get("/internal/blueprint/templates", headers=HEADERS)
+    assert res.status_code == 200
+    kinds = {k["kind"] for k in res.json()["kinds"]}
+    assert {"Agent", "Skill", "Tool"} <= kinds
+
+
+def test_plan_and_apply_create_resource(client: TestClient):
+    _seed(client)
+    # Plan a new Tool — nothing is written yet.
+    plan_res = client.post(
+        "/internal/blueprint/plan",
+        headers=HEADERS,
+        json={"action": "createResource", "kind": "Tool", "name": "Workspace Files"},
+    )
+    assert plan_res.status_code == 200
+    plan = plan_res.json()["plan"]
+    assert plan["graphDelta"]["nodesAdded"] == ["tool:workspace-files"]
+    # Graph still lacks it (plan didn't write).
+    before = client.get("/internal/blueprint/graph", headers=HEADERS).json()
+    assert not any(n["id"] == "tool:workspace-files" for n in before["nodes"])
+
+    # Apply → written + indexed, returns the fresh graph + a txId.
+    apply_res = client.post("/internal/blueprint/apply", headers=HEADERS, json={"plan": plan})
+    assert apply_res.status_code == 200, apply_res.text
+    body = apply_res.json()
+    assert body["txId"].startswith("tx_")
+    assert any(n["id"] == "tool:workspace-files" for n in body["graph"]["nodes"])
+
+
+def test_apply_edge_then_rollback(client: TestClient):
+    _seed(client)  # agent:primary (already uses skill:code-review) + skill:code-review
+    # Scaffold a fresh skill the agent does NOT yet use, then connect it.
+    extra = client.post(
+        "/internal/blueprint/plan",
+        headers=HEADERS,
+        json={"action": "createResource", "kind": "Skill", "name": "Extra"},
+    ).json()["plan"]
+    client.post("/internal/blueprint/apply", headers=HEADERS, json={"plan": extra})
+    plan = client.post(
+        "/internal/blueprint/plan",
+        headers=HEADERS,
+        json={
+            "action": "createEdge",
+            "source": "agent:primary",
+            "edgeType": "uses",
+            "target": "skill:extra",
+        },
+    ).json()["plan"]
+    applied = client.post("/internal/blueprint/apply", headers=HEADERS, json={"plan": plan})
+    assert applied.status_code == 200
+    tx_id = applied.json()["txId"]
+    edges = applied.json()["graph"]["edges"]
+    assert any(
+        e["source"] == "agent:primary" and e["type"] == "uses" and e["target"] == "skill:extra"
+        for e in edges
+    )
+
+    rb = client.post("/internal/blueprint/rollback", headers=HEADERS, json={"txId": tx_id})
+    assert rb.status_code == 200
+    edges2 = rb.json()["graph"]["edges"]
+    assert not any(e["source"] == "agent:primary" and e["target"] == "skill:extra" for e in edges2)
+
+
+def test_stale_apply_is_rejected(client: TestClient):
+    _seed(client)
+    tool = client.post(
+        "/internal/blueprint/plan",
+        headers=HEADERS,
+        json={"action": "createResource", "kind": "Tool", "name": "T"},
+    ).json()["plan"]
+    client.post("/internal/blueprint/apply", headers=HEADERS, json={"plan": tool})
+    plan = client.post(
+        "/internal/blueprint/plan",
+        headers=HEADERS,
+        json={
+            "action": "createEdge",
+            "source": "agent:primary",
+            "edgeType": "invokes",
+            "target": "tool:t",
+        },
+    ).json()["plan"]
+    # Change the source manifest after planning.
+    client.put(
+        "/internal/workspace/file?path=.sanad/agents/primary/agent.yaml",
+        headers=HEADERS,
+        content=AGENT + "\n# edited\n",
+    )
+    res = client.post("/internal/blueprint/apply", headers=HEADERS, json={"plan": plan})
+    assert res.status_code == 409
+    assert res.json()["error"]["code"] == "stale_plan"
+
+
+def test_apply_requires_credential(client: TestClient):
+    assert client.post("/internal/blueprint/apply", json={"plan": {}}).status_code == 401

@@ -2955,6 +2955,7 @@ dependencies = [
     { name = "python-multipart" },
     { name = "sanad-blueprint" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "watchfiles" },
 ]
 
 [package.dev-dependencies]
@@ -2974,6 +2975,7 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.18" },
     { name = "sanad-blueprint", editable = "packages/sanad-blueprint" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
+    { name = "watchfiles", specifier = ">=0.24" },
 ]
 
 [package.metadata.requires-dev]
