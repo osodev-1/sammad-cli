@@ -64,7 +64,8 @@ class _SpecBase(BaseModel):
 
 
 class ProjectSpec(_SpecBase):
-    projectType: str = "unknown"  # application|service|static-site|library|agent-package|documentation|unknown
+    # application|service|static-site|library|agent-package|documentation|unknown
+    projectType: str = "unknown"
     applicationRoot: str = "."
     entrypoints: dict[str, list[str]] = Field(default_factory=dict)  # {"agents": ["agent:primary"]}
     publishProfiles: list[str] = Field(default_factory=list)

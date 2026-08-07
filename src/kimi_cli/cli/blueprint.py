@@ -80,7 +80,9 @@ def validate(
 
 @cli.command()
 def graph(
-    path: Annotated[Path, typer.Argument(help="Repository root or a .sanad directory.")] = Path("."),
+    path: Annotated[Path, typer.Argument(help="Repository root or a .sanad directory.")] = Path(
+        "."
+    ),
 ) -> None:
     """Print the compiled blueprint graph as JSON."""
     from sanad_blueprint.graph import compile_graph

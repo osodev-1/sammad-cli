@@ -18,7 +18,7 @@ class LazySubcommandGroup(typer.core.TyperGroup):
         "export": ("kimi_cli.cli.export", "cli", "Export session data."),
         "mcp": ("kimi_cli.cli.mcp", "cli", "Manage MCP server configurations."),
         "plugin": ("kimi_cli.cli.plugin", "cli", "Manage plugins."),
-        "blueprint": ("kimi_cli.cli.blueprint", "cli", "Validate and inspect the .sanad blueprint."),
+        "blueprint": ("kimi_cli.cli.blueprint", "cli", "Validate and inspect the blueprint."),
         "vis": ("kimi_cli.cli.vis", "cli", "Run Kimi Agent Tracing Visualizer."),
         "web": ("kimi_cli.cli.web", "cli", "Run Kimi Code CLI web interface."),
     }

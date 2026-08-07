@@ -42,7 +42,9 @@ class ParsedManifest:
         return None
 
 
-def _pydantic_messages(exc: ValidationError, path: str, resource_id: str | None) -> list[Diagnostic]:
+def _pydantic_messages(
+    exc: ValidationError, path: str, resource_id: str | None
+) -> list[Diagnostic]:
     out: list[Diagnostic] = []
     for err in exc.errors():
         loc = ".".join(str(p) for p in err.get("loc", ()))

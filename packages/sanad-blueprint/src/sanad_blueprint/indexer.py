@@ -117,9 +117,7 @@ def index_blueprint(sanad_dir: str | Path) -> BlueprintIndex:
 
     # Attach supporting files to the nearest owning resource folder; the rest
     # are unclassified.
-    resource_dirs = {
-        str(Path(r.manifest_path).parent): rid for rid, r in index.resources.items()
-    }
+    resource_dirs = {str(Path(r.manifest_path).parent): rid for rid, r in index.resources.items()}
     for path in all_files:
         if path in manifest_paths:
             continue
@@ -138,7 +136,8 @@ def _nearest_owner(rel_path: str, resource_dirs: dict[str, str]) -> str | None:
     parent = str(Path(rel_path).parent)
     best_dir: str | None = None
     for rdir in resource_dirs:
-        if parent == rdir or parent.startswith(rdir + "/"):
-            if best_dir is None or len(rdir) > len(best_dir):
-                best_dir = rdir
+        if (parent == rdir or parent.startswith(rdir + "/")) and (
+            best_dir is None or len(rdir) > len(best_dir)
+        ):
+            best_dir = rdir
     return resource_dirs[best_dir] if best_dir is not None else None

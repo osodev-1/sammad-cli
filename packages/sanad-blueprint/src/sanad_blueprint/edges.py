@@ -36,26 +36,36 @@ EDGE_RULES: tuple[EdgeRule, ...] = (
     EdgeRule("invokes", "tools", ResourceKind.SKILL, (ResourceKind.TOOL,)),
     EdgeRule("connects_to", "mcps", ResourceKind.SKILL, (ResourceKind.MCP_SERVER,)),
     EdgeRule("governed_by", "policies", ResourceKind.SKILL, (ResourceKind.POLICY,)),
-    EdgeRule("triggers", "targets", ResourceKind.HOOK, (
-        ResourceKind.AGENT,
-        ResourceKind.TOOL,
-        ResourceKind.WORKFLOW,
-    )),
+    EdgeRule(
+        "triggers",
+        "targets",
+        ResourceKind.HOOK,
+        (
+            ResourceKind.AGENT,
+            ResourceKind.TOOL,
+            ResourceKind.WORKFLOW,
+        ),
+    ),
     EdgeRule("governed_by", "policies", ResourceKind.HOOK, (ResourceKind.POLICY,)),
-    EdgeRule("publishes_with", "publishProfiles", ResourceKind.PROJECT, (ResourceKind.PUBLISH_PROFILE,)),
+    EdgeRule(
+        "publishes_with", "publishProfiles", ResourceKind.PROJECT, (ResourceKind.PUBLISH_PROFILE,)
+    ),
     EdgeRule("governed_by", "defaultPolicies", ResourceKind.PROJECT, (ResourceKind.POLICY,)),
-    EdgeRule("evaluated_by", "targets", ResourceKind.EVALUATION, (
-        ResourceKind.AGENT,
-        ResourceKind.SKILL,
-        ResourceKind.WORKFLOW,
-    )),
+    EdgeRule(
+        "evaluated_by",
+        "targets",
+        ResourceKind.EVALUATION,
+        (
+            ResourceKind.AGENT,
+            ResourceKind.SKILL,
+            ResourceKind.WORKFLOW,
+        ),
+    ),
 )
 
 # Edges that expand capability/permission — flagged for elevated review in a
 # change plan (PRD §11.2, §19.4). Not a security boundary here, just a hint.
-PERMISSION_EXPANDING_EDGES: frozenset[str] = frozenset(
-    {"connects_to", "invokes", "triggers"}
-)
+PERMISSION_EXPANDING_EDGES: frozenset[str] = frozenset({"connects_to", "invokes", "triggers"})
 
 
 def target_field_ids(spec: object, field: str) -> list[str]:

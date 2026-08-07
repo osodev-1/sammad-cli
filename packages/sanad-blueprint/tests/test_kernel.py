@@ -5,8 +5,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from sanad_blueprint.envelope import parse_manifest
 from sanad_blueprint.graph import compile_graph
 from sanad_blueprint.indexer import index_blueprint

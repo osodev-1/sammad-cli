@@ -34,7 +34,7 @@ class Diagnostic(BaseModel):
     @classmethod
     def blocking(
         cls, code: str, message: str, *, resource_id: str | None = None, path: str | None = None
-    ) -> "Diagnostic":
+    ) -> Diagnostic:
         return cls(
             severity=Severity.BLOCKING,
             code=code,
@@ -46,7 +46,7 @@ class Diagnostic(BaseModel):
     @classmethod
     def warning(
         cls, code: str, message: str, *, resource_id: str | None = None, path: str | None = None
-    ) -> "Diagnostic":
+    ) -> Diagnostic:
         return cls(
             severity=Severity.WARNING,
             code=code,
@@ -58,7 +58,7 @@ class Diagnostic(BaseModel):
     @classmethod
     def info(
         cls, code: str, message: str, *, resource_id: str | None = None, path: str | None = None
-    ) -> "Diagnostic":
+    ) -> Diagnostic:
         return cls(
             severity=Severity.INFO,
             code=code,

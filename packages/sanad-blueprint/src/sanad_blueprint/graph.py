@@ -46,7 +46,7 @@ class BlueprintGraph:
     edges: list[Edge]
     diagnostics: list[Diagnostic]
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return {
             "nodes": [asdict(n) for n in self.nodes],
             "edges": [asdict(e) for e in self.edges],
@@ -156,7 +156,11 @@ def _delegation_cycles(index: BlueprintIndex) -> list[Diagnostic]:
             if nxt not in graph:
                 continue
             if color[nxt] == GREY:
-                cycle = " → ".join([*stack[stack.index(nxt) :], nxt]) if nxt in stack else f"{node} → {nxt}"
+                cycle = (
+                    " → ".join([*stack[stack.index(nxt) :], nxt])
+                    if nxt in stack
+                    else f"{node} → {nxt}"
+                )
                 diags.append(
                     Diagnostic.blocking(
                         "delegation_cycle",
