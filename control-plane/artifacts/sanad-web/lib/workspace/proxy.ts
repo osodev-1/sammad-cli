@@ -76,7 +76,37 @@ export async function workspaceFetch(
 
   // Streaming request bodies (uploads, file writes) require half duplex.
   if (init.body && !init.duplex) init.duplex = "half";
-  return fetch(`${base.replace(/\/+$/, "")}${path}`, { ...init, headers });
+
+  /*
+   * A machine mid-stop can black-hole connections; without a bound these
+   * requests hang until the platform's 60s edge timeout. The timer only
+   * guards TIME-TO-HEADERS — it is cleared once the response arrives, so
+   * large streamed downloads are never cut off. Uploads carry a body and
+   * finish before headers, so they get the longer bound.
+   */
+  const timeoutMs = init.body ? 60_000 : 15_000;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${base.replace(/\/+$/, "")}${path}`, {
+      ...init,
+      headers,
+      signal: init.signal ?? ac.signal,
+    });
+    return res;
+  } catch (e) {
+    if ((e as Error).name === "AbortError" || (e as Error).name === "TimeoutError") {
+      return new Response(
+        JSON.stringify({
+          error: { code: "workspace_unreachable", message: "Workspace is not responding — it may be waking" },
+        }),
+        { status: 503, headers: { "content-type": "application/json" } }
+      );
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

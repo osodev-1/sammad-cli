@@ -200,8 +200,30 @@ export async function renameSession(
 
 /* ------------------------------------------------------- machine control --- */
 
+/*
+ * Concurrent wakes for one session (three terminal panels + the drawer all
+ * mount at once) must produce ONE machine, not a RunTask stampede with
+ * last-writer-wins nonces. In-process serialization is sound because
+ * sanad-web runs a single replica; a second replica would need a DB lock.
+ */
+const ensureInFlight = new Map<string, Promise<SessionTarget>>();
+
 /** Ensure the session's machine is running and reachable; wake it if not. */
-export async function ensureSessionTask(
+export function ensureSessionTask(
+  userId: string,
+  sessionId: string
+): Promise<SessionTarget> {
+  const key = `${userId}:${sessionId}`;
+  const existing = ensureInFlight.get(key);
+  if (existing) return existing;
+  const run = ensureSessionTaskInner(userId, sessionId).finally(() => {
+    ensureInFlight.delete(key);
+  });
+  ensureInFlight.set(key, run);
+  return run;
+}
+
+async function ensureSessionTaskInner(
   userId: string,
   sessionId: string
 ): Promise<SessionTarget> {

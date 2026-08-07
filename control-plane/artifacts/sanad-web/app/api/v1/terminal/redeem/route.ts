@@ -5,7 +5,7 @@ import { z } from "zod";
 import { ok, err } from "@/lib/http/envelope";
 import { redeemTerminalTicket } from "@/lib/auth/terminal-tickets";
 import { db } from "@/lib/db";
-import { workspaceTasks } from "@/lib/db/schema";
+import { workspaceSessions, workspaceTasks } from "@/lib/db/schema";
 import { machineTokenMatches } from "@/lib/compute/tokens";
 
 const Body = z.object({ ticket: z.string().min(1).max(256) });
@@ -35,20 +35,32 @@ async function identifyCaller(req: NextRequest): Promise<Caller> {
   const machineToken = req.headers.get("x-machine-token");
   const machineNonce = req.headers.get("x-machine-nonce");
   if (machineToken && machineNonce) {
-    const [row] = await db
-      .select()
-      .from(workspaceTasks)
-      .where(eq(workspaceTasks.runNonce, machineNonce))
+    // Session machines own nonces now; the legacy per-user table covers any
+    // machine born before the session-manager migration. Missing the sessions
+    // table here is exactly the bug that 401'd every post-migration machine.
+    const [sessionRow] = await db
+      .select({ userId: workspaceSessions.userId })
+      .from(workspaceSessions)
+      .where(eq(workspaceSessions.runNonce, machineNonce))
       .limit(1);
-    if (!row) return { kind: "unauthorized" };
+    let ownerId = sessionRow?.userId;
+    if (!ownerId) {
+      const [legacyRow] = await db
+        .select({ userId: workspaceTasks.userId })
+        .from(workspaceTasks)
+        .where(eq(workspaceTasks.runNonce, machineNonce))
+        .limit(1);
+      ownerId = legacyRow?.userId;
+    }
+    if (!ownerId) return { kind: "unauthorized" };
     try {
-      if (!machineTokenMatches(machineToken, row.userId, machineNonce)) {
+      if (!machineTokenMatches(machineToken, ownerId, machineNonce)) {
         return { kind: "unauthorized" };
       }
     } catch {
       return { kind: "unauthorized" }; // TERMINAL_MACHINE_KEY unset
     }
-    return { kind: "machine", userId: row.userId };
+    return { kind: "machine", userId: ownerId };
   }
   if (secretMatches(req.headers.get("x-terminal-secret"))) {
     return { kind: "legacy" };
