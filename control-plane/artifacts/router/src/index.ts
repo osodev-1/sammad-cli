@@ -51,6 +51,18 @@ export function createServer(
 
   const server = http.createServer(async (req: PreviewTagged, res) => {
     try {
+      /*
+       * Health first, before ANY host parsing: the ALB's health checker sends
+       * the target's raw IP as Host, which no route matches. Requiring the
+       * public hostname here meant every ALB check 404'd — targets never went
+       * healthy, the ALB served fail-open, and ECS kept "replacing" perfectly
+       * good tasks. A health probe is infrastructure, not routing.
+       */
+      if (req.url === "/healthz") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
       const parsed = parseRequest(config, req.headers.host, req.url ?? "/");
       if (!parsed) {
         fail(res, 404, "not found");

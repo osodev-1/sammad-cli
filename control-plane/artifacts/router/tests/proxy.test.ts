@@ -114,6 +114,16 @@ describe("router proxying", () => {
     expect(JSON.parse(res.body)).toEqual({ status: "ok" });
   });
 
+  it("answers healthz for ANY Host header (ALB checks send the raw IP)", async () => {
+    // Regression: requiring the public hostname made every ALB health check
+    // 404 → targets never healthy → ECS kill-looped the fleet.
+    for (const host of ["10.0.1.23:8080", "evil.example.com", ""]) {
+      const res = await get("/healthz", host);
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({ status: "ok" });
+    }
+  });
+
   it("proxies WebSocket upgrades end-to-end", async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${routerPort}/u/${HASH}/ws`, {
       headers: { host: "compute.sanadcode.com" },
