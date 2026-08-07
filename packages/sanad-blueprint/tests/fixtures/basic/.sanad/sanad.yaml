@@ -1,0 +1,15 @@
+apiVersion: sanad.dev/v1alpha1
+kind: Project
+metadata:
+  id: project:sanad-code
+  name: Sanad Code
+spec:
+  projectType: application
+  applicationRoot: .
+  entrypoints:
+    agents:
+      - agent:primary
+  defaultPolicies:
+    - policy:safe-workspace
+  validation:
+    mode: strict

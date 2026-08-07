@@ -1,0 +1,12 @@
+apiVersion: sanad.dev/v1alpha1
+kind: Policy
+metadata:
+  id: policy:safe-workspace
+  name: Safe Workspace
+spec:
+  filesystem:
+    deny:
+      - "../**"
+      - "/**"
+  network:
+    default: deny

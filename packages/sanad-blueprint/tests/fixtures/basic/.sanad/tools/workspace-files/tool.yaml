@@ -1,0 +1,16 @@
+apiVersion: sanad.dev/v1alpha1
+kind: Tool
+metadata:
+  id: tool:workspace-files
+  name: Workspace Files
+spec:
+  handler:
+    type: builtin
+    name: workspace.files
+  permissions:
+    read:
+      - "**/*"
+    write:
+      - "src/**/*"
+      - ".sanad/**/*"
+  timeoutMs: 30000

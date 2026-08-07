@@ -1,0 +1,16 @@
+apiVersion: sanad.dev/v1alpha1
+kind: Agent
+metadata:
+  id: agent:primary
+  name: Primary Coding Agent
+  description: Owns implementation work in the active repository.
+spec:
+  prompt: prompt.md
+  skills:
+    - skill:code-review
+  tools:
+    - tool:workspace-files
+  policies:
+    - policy:safe-workspace
+  limits:
+    maxDelegationDepth: 3

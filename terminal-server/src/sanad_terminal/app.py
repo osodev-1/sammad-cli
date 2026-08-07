@@ -93,6 +93,9 @@ def create_app(
     from sanad_terminal.routes_workspace import register_error_handlers, router
 
     app.include_router(router)
+    from sanad_terminal.routes_blueprint import router as blueprint_router
+
+    app.include_router(blueprint_router)
     register_error_handlers(app)
 
     if idle_stopper is not None:

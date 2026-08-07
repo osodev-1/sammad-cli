@@ -38,7 +38,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
       - run: uv sync --frozen --all-packages
-      - run: uv run pytest terminal-server/tests tests/sanad -vv
+      - run: uv run pytest terminal-server/tests tests/sanad packages/sanad-blueprint/tests -vv
         env:
           PYTHONUTF8: "1"
 

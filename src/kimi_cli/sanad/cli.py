@@ -297,6 +297,20 @@ def run(ctx: typer.Context) -> None:
     _launch_workspace(Console(), ctx.args)
 
 
+def _blueprint_app() -> "typer.Typer":
+    # Imported lazily so `sanad run` startup never pays for the blueprint deps.
+    from kimi_cli.cli.blueprint import cli as blueprint_cli
+
+    return blueprint_cli
+
+
+sanad_app.add_typer(
+    _blueprint_app(),
+    name="blueprint",
+    help="Validate and inspect the .sanad blueprint.",
+)
+
+
 def main() -> None:
     sanad_app()
 

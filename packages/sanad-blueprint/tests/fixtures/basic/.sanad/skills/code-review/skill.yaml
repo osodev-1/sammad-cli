@@ -1,0 +1,9 @@
+apiVersion: sanad.dev/v1alpha1
+kind: Skill
+metadata:
+  id: skill:code-review
+  name: Code Review
+spec:
+  instructions: SKILL.md
+  tools:
+    - tool:workspace-files

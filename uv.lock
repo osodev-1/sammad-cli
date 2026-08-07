@@ -13,6 +13,7 @@ members = [
     "kimi-sdk",
     "kosong",
     "pykaos",
+    "sanad-blueprint",
     "sanad-terminal",
 ]
 
@@ -1307,6 +1308,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rich" },
     { name = "ripgrepy" },
+    { name = "sanad-blueprint" },
     { name = "scalar-fastapi" },
     { name = "setproctitle" },
     { name = "streamingjson" },
@@ -1351,6 +1353,7 @@ requires-dist = [
     { name = "pyyaml", specifier = "==6.0.3" },
     { name = "rich", specifier = "==14.2.0" },
     { name = "ripgrepy", specifier = "==2.2.0" },
+    { name = "sanad-blueprint", editable = "packages/sanad-blueprint" },
     { name = "scalar-fastapi", specifier = ">=1.5.0" },
     { name = "setproctitle", specifier = ">=1.3.0" },
     { name = "streamingjson", specifier = "==0.0.5" },
@@ -2916,6 +2919,29 @@ wheels = [
 ]
 
 [[package]]
+name = "sanad-blueprint"
+version = "0.1.0"
+source = { editable = "packages/sanad-blueprint" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "pyyaml" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.12.5" },
+    { name = "pyyaml", specifier = ">=6.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.0.2" }]
+
+[[package]]
 name = "sanad-terminal"
 version = "0.1.0"
 source = { editable = "terminal-server" }
@@ -2927,6 +2953,7 @@ dependencies = [
     { name = "loguru", version = "0.7.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
     { name = "pydantic" },
     { name = "python-multipart" },
+    { name = "sanad-blueprint" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -2945,6 +2972,7 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.6.0,<0.8" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "python-multipart", specifier = ">=0.0.18" },
+    { name = "sanad-blueprint", editable = "packages/sanad-blueprint" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
 ]
 
