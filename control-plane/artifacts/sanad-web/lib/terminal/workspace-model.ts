@@ -86,14 +86,20 @@ export function isBrowserViewable(name: string): boolean {
  * absolute http(s) URLs pass through untouched — forward-compat with the
  * compute preview subdomains.
  */
-export function previewUrl(pathOrUrl: string): string {
+export function previewUrl(pathOrUrl: string, sessionId?: string): string {
   if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
   const encoded = pathOrUrl
     .split("/")
     .filter(Boolean)
     .map(encodeURIComponent)
     .join("/");
-  return `/api/workspace/preview/${encoded}`;
+  return withSession(`/api/workspace/preview/${encoded}`, sessionId);
+}
+
+/** Append the session scope to a workspace API url (handles ? vs &). */
+export function withSession(url: string, sessionId?: string): string {
+  if (!sessionId) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}session=${encodeURIComponent(sessionId)}`;
 }
 
 export interface TreeNode extends WsEntry {

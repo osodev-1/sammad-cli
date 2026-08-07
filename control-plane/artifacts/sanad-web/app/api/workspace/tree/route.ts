@@ -4,10 +4,12 @@ import { authenticateWorkspace, relayJson, workspaceFetch } from "@/lib/workspac
 export async function GET(req: NextRequest) {
   const gate = await authenticateWorkspace();
   if (!gate.ok) return gate.response;
+  const sessionId = req.nextUrl.searchParams.get("session") ?? undefined;
   const path = req.nextUrl.searchParams.get("path") ?? "";
   const upstream = await workspaceFetch(
     gate.userId,
-    `/internal/workspace/tree?path=${encodeURIComponent(path)}`
+    `/internal/workspace/tree?path=${encodeURIComponent(path)}`,
+    { sessionId }
   );
   return relayJson(upstream);
 }

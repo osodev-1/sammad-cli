@@ -8,7 +8,7 @@ import { isTerminalAllowed } from "@/lib/auth/terminal";
 import { mintTerminalTicket } from "@/lib/auth/terminal-tickets";
 import { provisionPersonalOrg } from "@/lib/clerk/provisioning";
 import { computeMode } from "@/lib/compute/mode";
-import { ensureWorkspaceTask } from "@/lib/compute/workspace";
+import { ensureSessionTask, getOrCreateMainSession, getSession } from "@/lib/compute/sessions";
 
 /**
  * Browser-facing: mint a one-time terminal ticket for the signed-in user.
@@ -16,11 +16,13 @@ import { ensureWorkspaceTask } from "@/lib/compute/workspace";
  * service redeems it server-to-server. Mirrors the device-approve gate:
  * provisioning, personal-org fallback, entitlement.
  */
-export async function POST() {
+export async function POST(req: Request) {
   const { userId, orgId } = await auth();
   if (!userId) {
     return err(401, "unauthorized", "Must be signed in to open a terminal");
   }
+  const body = (await req.json().catch(() => null)) as { sessionId?: string } | null;
+  const requestedSession = body?.sessionId;
 
   const clerkUser = await currentUser();
   const email = clerkUser?.emailAddresses[0]?.emailAddress ?? "";
@@ -73,13 +75,19 @@ export async function POST() {
 
   let wsUrl: string;
   let coldStart = false;
+  let sessionId: string | undefined;
   if (computeMode() === "aws") {
-    // Ensure the user's machine FIRST; the 60s ticket is minted last so its
-    // whole TTL is spent on the browser's connect, never on a cold start.
+    // Ensure the SESSION's machine FIRST; the 60s ticket is minted last so
+    // its whole TTL is spent on the browser's connect, never on a cold start.
     try {
-      const target = await ensureWorkspaceTask(userId);
+      const session = requestedSession
+        ? await getSession(userId, requestedSession)
+        : await getOrCreateMainSession(userId);
+      if (!session) return err(404, "unknown_session", "No such session");
+      const target = await ensureSessionTask(userId, session.id);
       wsUrl = target.wsUrl;
       coldStart = target.coldStart;
+      sessionId = session.id;
     } catch (e) {
       console.error("workspace provisioning failed", e);
       return err(503, "terminal_unavailable", "Could not start your workspace", true);
@@ -93,5 +101,5 @@ export async function POST() {
   }
 
   const { ticket, expiresIn } = await mintTerminalTicket(userId, activeOrgId);
-  return ok({ ticket, wsUrl, expiresIn, coldStart });
+  return ok({ ticket, wsUrl, expiresIn, coldStart, sessionId });
 }

@@ -4,8 +4,10 @@ import { authenticateWorkspace, relayJson, workspaceFetch } from "@/lib/workspac
 export async function PATCH(req: NextRequest) {
   const gate = await authenticateWorkspace();
   if (!gate.ok) return gate.response;
+  const sessionId = req.nextUrl.searchParams.get("session") ?? undefined;
   const body = await req.text();
   const upstream = await workspaceFetch(gate.userId, "/internal/workspace/move", {
+    sessionId,
     method: "PATCH",
     body,
     headers: { "content-type": "application/json" },

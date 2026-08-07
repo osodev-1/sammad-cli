@@ -8,11 +8,13 @@ import { authenticateWorkspace, relayJson, workspaceFetch } from "@/lib/workspac
 export async function POST(req: NextRequest) {
   const gate = await authenticateWorkspace();
   if (!gate.ok) return gate.response;
+  const sessionId = req.nextUrl.searchParams.get("session") ?? undefined;
   const dir = req.nextUrl.searchParams.get("dir") ?? "";
   const upstream = await workspaceFetch(
     gate.userId,
     `/internal/workspace/upload?dir=${encodeURIComponent(dir)}`,
     {
+      sessionId,
       method: "POST",
       body: req.body,
       duplex: "half",

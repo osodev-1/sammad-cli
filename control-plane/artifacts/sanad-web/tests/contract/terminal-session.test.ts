@@ -59,16 +59,19 @@ afterAll(() => {
   }
 });
 
+const sessionRequest = () =>
+  new Request("http://test/api/terminal/session", { method: "POST" });
+
 describe("POST /api/terminal/session", () => {
   it("401 when signed out", async () => {
     vi.mocked(auth).mockResolvedValue({ userId: null, orgId: null } as never);
-    const res = await POST();
+    const res = await POST(sessionRequest());
     expect(res.status).toBe(401);
   });
 
   it("403 terminal_not_enabled when not on the allowlist", async () => {
     signIn(null, "stranger@x.test");
-    const res = await POST();
+    const res = await POST(sessionRequest());
     expect(res.status).toBe(403);
     const body = await res.json();
     expect(body.error.code).toBe("terminal_not_enabled");
@@ -78,7 +81,7 @@ describe("POST /api/terminal/session", () => {
   it("403 no_plan when entitlement fails", async () => {
     signIn();
     vi.mocked(requireEntitled).mockResolvedValue({ ok: false, reason: "no_plan" });
-    const res = await POST();
+    const res = await POST(sessionRequest());
     expect(res.status).toBe(403);
     const body = await res.json();
     expect(body.error.code).toBe("no_plan");
@@ -87,7 +90,7 @@ describe("POST /api/terminal/session", () => {
   it("503 when TERMINAL_WS_URL is not configured", async () => {
     signIn();
     delete process.env.TERMINAL_WS_URL;
-    const res = await POST();
+    const res = await POST(sessionRequest());
     expect(res.status).toBe(503);
     const body = await res.json();
     expect(body.error.code).toBe("terminal_unavailable");
@@ -95,7 +98,7 @@ describe("POST /api/terminal/session", () => {
 
   it("200 mints a ticket for the personal org", async () => {
     signIn();
-    const res = await POST();
+    const res = await POST(sessionRequest());
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.data).toEqual({
@@ -111,7 +114,7 @@ describe("POST /api/terminal/session", () => {
   it("falls back to the personal org when the Clerk-active org has no membership", async () => {
     signIn("org_team_1");
     membershipRows = []; // no membership row for org_team_1
-    const res = await POST();
+    const res = await POST(sessionRequest());
     expect(res.status).toBe(200);
     expect(vi.mocked(requireEntitled)).toHaveBeenCalledWith("personal_user_1", "user_1");
     expect(vi.mocked(mintTerminalTicket)).toHaveBeenCalledWith("user_1", "personal_user_1");
@@ -120,7 +123,7 @@ describe("POST /api/terminal/session", () => {
   it("uses the Clerk-active org when a membership exists", async () => {
     signIn("org_team_1");
     membershipRows = [{ id: "mem_1" }];
-    const res = await POST();
+    const res = await POST(sessionRequest());
     expect(res.status).toBe(200);
     expect(vi.mocked(mintTerminalTicket)).toHaveBeenCalledWith("user_1", "org_team_1");
   });

@@ -3,53 +3,83 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
 import type { TerminalPhase } from "./TerminalPanel";
-import type { TerminalTabInfo } from "./tabs";
-import { CrossOutlineIcon, PanelRightIcon, PencilIcon, PlusIcon } from "../ui/icons";
+import { PanelRightIcon, PencilIcon, PlusIcon } from "../ui/icons";
+
+export interface WorkspaceSessionInfo {
+  id: string;
+  name: string;
+  state: string;
+}
 
 /**
- * The session controller: every terminal session by name, its live state, and
- * the controls to open, rename, focus and close them. Collapses to a slim
- * rail so the terminal keeps the width when you don't need it.
+ * The session controller: each session is a project on its own machine —
+ * sleeping costs nothing; selecting one swaps the entire workspace pane.
+ * Collapses to a slim rail so the terminal keeps the width.
  */
 export default function SessionPanel({
   sessions,
-  phases,
   activeId,
+  activePhase,
   canAdd,
   collapsed,
   onSelect,
   onRename,
-  onNew,
-  onClose,
+  onCreate,
   onToggleCollapsed,
 }: {
-  sessions: TerminalTabInfo[];
-  phases: Record<string, TerminalPhase>;
-  activeId: string;
+  sessions: WorkspaceSessionInfo[];
+  activeId?: string;
+  activePhase: TerminalPhase;
   canAdd: boolean;
   collapsed: boolean;
   onSelect: (id: string) => void;
-  onRename: (id: string, label: string) => void;
-  onNew: () => void;
-  onClose: (id: string) => void;
+  onRename: (id: string, name: string) => void;
+  onCreate: (name: string) => Promise<void>;
   onToggleCollapsed: () => void;
 }) {
   const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
+  const [creating, setCreating] = useState<string | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const createRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (editing) inputRef.current?.select();
   }, [editing?.id]); // eslint-disable-line react-hooks/exhaustive-deps -- select once per edit target
+  useEffect(() => {
+    if (creating !== null) createRef.current?.focus();
+  }, [creating !== null]); // eslint-disable-line react-hooks/exhaustive-deps -- focus once per open
 
-  const commit = () => {
+  const commitRename = () => {
     if (!editing) return;
-    const label = editing.draft.trim();
-    if (label) onRename(editing.id, label.slice(0, 40));
+    const name = editing.draft.trim();
+    if (name) onRename(editing.id, name.slice(0, 40));
     setEditing(null);
   };
-  const onKey = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") commit();
+  const commitCreate = async () => {
+    const name = creating?.trim();
+    if (!name) {
+      setCreating(null);
+      return;
+    }
+    try {
+      await onCreate(name.slice(0, 40));
+      setCreating(null);
+      setCreateError(null);
+    } catch (e) {
+      setCreateError(e instanceof Error ? e.message : "Could not create the session");
+    }
+  };
+  const onRenameKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") commitRename();
     else if (e.key === "Escape") setEditing(null);
+  };
+  const onCreateKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") void commitCreate();
+    else if (e.key === "Escape") {
+      setCreating(null);
+      setCreateError(null);
+    }
   };
 
   if (collapsed) {
@@ -69,6 +99,15 @@ export default function SessionPanel({
     );
   }
 
+  const dotFor = (id: string): CSSProperties => {
+    if (id !== activeId) return s.dot; // other machines may be asleep — quiet
+    if (activePhase.tag === "live") return { ...s.dot, ...s.dotLive };
+    if (activePhase.tag === "connecting" || activePhase.tag === "reconnecting") {
+      return { ...s.dot, ...s.dotConnecting };
+    }
+    return s.dot;
+  };
+
   return (
     <aside style={s.pane}>
       <div style={s.header}>
@@ -85,27 +124,19 @@ export default function SessionPanel({
       </div>
 
       <div style={s.list}>
-        {sessions.map((t) => {
-          const phase = phases[t.id];
-          const live = phase?.tag === "live";
-          const connecting =
-            phase?.tag === "connecting" || phase?.tag === "reconnecting";
-          const isActive = t.id === activeId;
-          const isEditing = editing?.id === t.id;
+        {sessions.map((row) => {
+          const isActive = row.id === activeId;
+          const isEditing = editing?.id === row.id;
           return (
             <div
-              key={t.id}
+              key={row.id}
               style={{ ...s.row, ...(isActive ? s.rowActive : null) }}
-              onClick={() => !isEditing && onSelect(t.id)}
-              onDoubleClick={() => setEditing({ id: t.id, draft: t.label })}
+              onClick={() => !isEditing && onSelect(row.id)}
+              onDoubleClick={() => setEditing({ id: row.id, draft: row.name })}
             >
               <span
-                style={{
-                  ...s.dot,
-                  ...(live ? s.dotLive : null),
-                  ...(connecting ? s.dotConnecting : null),
-                }}
-                title={live ? "live" : connecting ? "connecting" : "offline"}
+                style={dotFor(row.id)}
+                title={isActive ? activePhase.tag : "session"}
               />
               {isEditing ? (
                 <input
@@ -113,61 +144,61 @@ export default function SessionPanel({
                   style={s.input}
                   value={editing.draft}
                   maxLength={40}
-                  onChange={(e) => setEditing({ id: t.id, draft: e.target.value })}
-                  onBlur={commit}
-                  onKeyDown={onKey}
+                  onChange={(e) => setEditing({ id: row.id, draft: e.target.value })}
+                  onBlur={commitRename}
+                  onKeyDown={onRenameKey}
                   onClick={(e) => e.stopPropagation()}
                 />
               ) : (
-                <span style={s.label} title={t.label}>
-                  {t.label}
+                <span style={s.label} title={row.name}>
+                  {row.name}
                 </span>
               )}
               {!isEditing && (
-                <span style={s.rowActions}>
-                  <button
-                    type="button"
-                    style={s.iconButton}
-                    title="Rename session"
-                    aria-label={`Rename ${t.label}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setEditing({ id: t.id, draft: t.label });
-                    }}
-                  >
-                    <PencilIcon size={13} />
-                  </button>
-                  {sessions.length > 1 && (
-                    <button
-                      type="button"
-                      style={s.iconButton}
-                      title="Close session"
-                      aria-label={`Close ${t.label}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onClose(t.id);
-                      }}
-                    >
-                      <CrossOutlineIcon size={13} />
-                    </button>
-                  )}
-                </span>
+                <button
+                  type="button"
+                  style={s.iconButton}
+                  title="Rename session"
+                  aria-label={`Rename ${row.name}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setEditing({ id: row.id, draft: row.name });
+                  }}
+                >
+                  <PencilIcon size={13} />
+                </button>
               )}
             </div>
           );
         })}
       </div>
 
-      <button
-        type="button"
-        style={{ ...s.newButton, ...(canAdd ? null : s.newDisabled) }}
-        onClick={onNew}
-        disabled={!canAdd}
-        title={canAdd ? "New session" : "Session limit reached"}
-      >
-        <PlusIcon size={14} />
-        New session
-      </button>
+      {creating !== null ? (
+        <div style={s.createRow}>
+          <input
+            ref={createRef}
+            style={s.input}
+            placeholder="Session name"
+            value={creating}
+            maxLength={40}
+            onChange={(e) => setCreating(e.target.value)}
+            onKeyDown={onCreateKey}
+            onBlur={() => void commitCreate()}
+          />
+          {createError && <span style={s.createError}>{createError}</span>}
+        </div>
+      ) : (
+        <button
+          type="button"
+          style={{ ...s.newButton, ...(canAdd ? null : s.newDisabled) }}
+          onClick={() => setCreating("")}
+          disabled={!canAdd}
+          title={canAdd ? "New session — its own machine and files" : "Session limit reached"}
+        >
+          <PlusIcon size={14} />
+          New session
+        </button>
+      )}
     </aside>
   );
 }
@@ -268,11 +299,6 @@ const s: Record<string, CSSProperties> = {
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
-  rowActions: {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: "2px",
-  },
   iconButton: {
     display: "inline-flex",
     alignItems: "center",
@@ -297,6 +323,16 @@ const s: Record<string, CSSProperties> = {
     borderRadius: "var(--radius-sm)",
     padding: "0.15rem 0.35rem",
     outline: "none",
+  },
+  createRow: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.3rem",
+    margin: "0.45rem",
+  },
+  createError: {
+    fontSize: "0.72rem",
+    color: "var(--ink-muted)",
   },
   newButton: {
     display: "flex",

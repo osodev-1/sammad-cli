@@ -156,6 +156,32 @@ export const workspaceTasks = pgTable("workspace_tasks", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+/**
+ * A workspace session = a project: its own directory on EFS, its own Fargate
+ * task (slept when idle — zero compute cost), its own agent history, and —
+ * later — its own shipped app. The user's original single workspace becomes
+ * the "main" session via migration 0003.
+ */
+export const workspaceSessions = pgTable("workspace_sessions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id),
+  name: text("name").notNull(),
+  // Per-session routing label; the migrated main session keeps the legacy
+  // per-user hash so existing routes/APs survive unchanged.
+  hash12: text("hash12").notNull().unique(),
+  efsAccessPointId: text("efs_access_point_id").notNull(),
+  taskArn: text("task_arn"),
+  taskIp: text("task_ip"),
+  runNonce: text("run_nonce"),
+  imageRef: text("image_ref").notNull(),
+  state: text("state").notNull(), // "provisioning" | "ready" | "error"
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
 export const ships = pgTable("ships", {
   id: text("id").primaryKey(),
   userId: text("user_id")

@@ -1,8 +1,10 @@
+import { NextRequest } from "next/server";
 import { authenticateWorkspace, relayJson, workspaceFetch } from "@/lib/workspace/proxy";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const gate = await authenticateWorkspace();
   if (!gate.ok) return gate.response;
-  const upstream = await workspaceFetch(gate.userId, "/internal/workspace/snapshot");
+  const sessionId = req.nextUrl.searchParams.get("session") ?? undefined;
+  const upstream = await workspaceFetch(gate.userId, "/internal/workspace/snapshot", { sessionId });
   return relayJson(upstream);
 }

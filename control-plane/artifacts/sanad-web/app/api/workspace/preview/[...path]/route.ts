@@ -26,9 +26,11 @@ export async function GET(
   const relPath = (segments ?? []).join("/");
   if (!relPath) return err(400, "invalid_request", "Missing path");
 
+  const sessionId = req.nextUrl.searchParams.get("session") ?? undefined;
   const upstream = await workspaceFetch(
     gate.userId,
-    `/internal/workspace/file?path=${encodeURIComponent(relPath)}`
+    `/internal/workspace/file?path=${encodeURIComponent(relPath)}`,
+    { sessionId }
   );
   if (!upstream.ok || !upstream.body) {
     return err(

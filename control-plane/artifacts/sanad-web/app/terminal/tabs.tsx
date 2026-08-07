@@ -9,6 +9,7 @@ import {
   previewKind,
   formatBytes,
 } from "@/lib/terminal/workspace-model";
+import { withSession } from "@/lib/terminal/workspace-model";
 
 /* ------------------------------------------------------------- tabs bar --- */
 
@@ -142,7 +143,7 @@ type LoadState =
   | { tag: "blob"; url: string; sizeLabel: string }
   | { tag: "error"; message: string };
 
-export function FilePreview({ path }: { path: string }) {
+export function FilePreview({ path, sessionId }: { path: string; sessionId?: string }) {
   const name = path.split("/").pop() ?? path;
   const kind = previewKind(name);
   const editable = isTextEditable(name);
@@ -153,7 +154,7 @@ export function FilePreview({ path }: { path: string }) {
   const [saving, setSaving] = useState(false);
   const [rendered, setRendered] = useState<string | null>(null); // markdown HTML
 
-  const fileUrl = `/api/workspace/file?path=${encodeURIComponent(path)}`;
+  const fileUrl = withSession(`/api/workspace/file?path=${encodeURIComponent(path)}`, sessionId);
 
   useEffect(() => {
     let cancelled = false;

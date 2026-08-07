@@ -45,15 +45,15 @@ export async function authenticateWorkspace(): Promise<WorkspaceAuth> {
 export async function workspaceFetch(
   userId: string,
   path: string,
-  init: RequestInit & { duplex?: "half" } = {}
+  init: RequestInit & { duplex?: "half"; sessionId?: string } = {}
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   let base: string;
 
   const { computeMode } = await import("../compute/mode");
   if (computeMode() === "aws") {
-    const { workspaceTaskAuth } = await import("../compute/workspace");
-    const target = await workspaceTaskAuth(userId);
+    const { sessionTaskAuth } = await import("../compute/sessions");
+    const target = await sessionTaskAuth(userId, init.sessionId);
     if (!target) {
       // No machine yet — the workspace page's session POST provisions it.
       return new Response(

@@ -23,8 +23,10 @@ import {
   type FileKind,
   type TreeNode,
 } from "@/lib/terminal/workspace-model";
+import { withSession } from "@/lib/terminal/workspace-model";
 
 interface Props {
+  sessionId?: string;
   tree: TreeNode[];
   busy: boolean;
   onOpenFile: (path: string) => void;
@@ -71,6 +73,7 @@ async function api(path: string, init?: RequestInit): Promise<void> {
 }
 
 export default function FileTree({
+  sessionId,
   tree,
   busy,
   onOpenFile,
@@ -117,7 +120,7 @@ export default function FileTree({
       const form = new FormData();
       for (const f of list) form.append("files", f);
       void run(
-        api(`/api/workspace/upload?dir=${encodeURIComponent(dir)}`, {
+        api(withSession(`/api/workspace/upload?dir=${encodeURIComponent(dir)}`, sessionId), {
           method: "POST",
           body: form,
         })
@@ -149,7 +152,7 @@ export default function FileTree({
     const path = dir ? `${dir}/${name}` : name;
     if (kind === "dir") {
       void run(
-        api("/api/workspace/mkdir", {
+        api(withSession("/api/workspace/mkdir", sessionId), {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ path }),
@@ -157,7 +160,7 @@ export default function FileTree({
       );
     } else {
       void run(
-        api(`/api/workspace/file?path=${encodeURIComponent(path)}`, {
+        api(withSession(`/api/workspace/file?path=${encodeURIComponent(path)}`, sessionId), {
           method: "PUT",
           body: "",
         })
@@ -174,7 +177,7 @@ export default function FileTree({
       : "";
     const to = parent ? `${parent}/${trimmed}` : trimmed;
     void run(
-      api("/api/workspace/move", {
+      api(withSession("/api/workspace/move", sessionId), {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ from: node.path, to }),
@@ -186,7 +189,7 @@ export default function FileTree({
     const to = window.prompt("Move to (new path)", node.path);
     if (!to || to === node.path) return;
     void run(
-      api("/api/workspace/move", {
+      api(withSession("/api/workspace/move", sessionId), {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ from: node.path, to }),
@@ -197,7 +200,7 @@ export default function FileTree({
   const doDelete = (node: TreeNode) => {
     if (!window.confirm(`Delete ${node.name}? This cannot be undone.`)) return;
     void run(
-      api(`/api/workspace/file?path=${encodeURIComponent(node.path)}`, {
+      api(withSession(`/api/workspace/file?path=${encodeURIComponent(node.path)}`, sessionId), {
         method: "DELETE",
       })
     );
@@ -207,14 +210,14 @@ export default function FileTree({
     const url =
       node.kind === "dir"
         ? null
-        : `/api/workspace/file?path=${encodeURIComponent(node.path)}&download=1`;
+        : withSession(`/api/workspace/file?path=${encodeURIComponent(node.path)}&download=1`, sessionId);
     if (url) {
       window.open(url, "_blank");
       return;
     }
     // Folder → server-built ZIP.
     void (async () => {
-      const res = await fetch("/api/workspace/archive", {
+      const res = await fetch(withSession("/api/workspace/archive", sessionId), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ path: node.path }),

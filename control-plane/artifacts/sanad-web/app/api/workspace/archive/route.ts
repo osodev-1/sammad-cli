@@ -4,8 +4,10 @@ import { authenticateWorkspace, relayStream, workspaceFetch } from "@/lib/worksp
 export async function POST(req: NextRequest) {
   const gate = await authenticateWorkspace();
   if (!gate.ok) return gate.response;
+  const sessionId = req.nextUrl.searchParams.get("session") ?? undefined;
   const body = await req.text();
   const upstream = await workspaceFetch(gate.userId, "/internal/workspace/archive", {
+    sessionId,
     method: "POST",
     body: body || "{}",
     headers: { "content-type": "application/json" },

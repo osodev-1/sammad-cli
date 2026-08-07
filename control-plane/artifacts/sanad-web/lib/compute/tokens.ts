@@ -37,3 +37,12 @@ export function machineTokenMatches(
 export function workspaceHash(userId: string): string {
   return createHash("sha256").update(userId).digest("hex").slice(0, 12);
 }
+
+/**
+ * Per-session routing label. The migrated "main" session keeps the legacy
+ * per-user hash (stored, never recomputed) — this formula only names sessions
+ * created after the session-manager epic.
+ */
+export function sessionHash(userId: string, sessionId: string): string {
+  return createHash("sha256").update(`${userId}:${sessionId}`).digest("hex").slice(0, 12);
+}

@@ -1,5 +1,6 @@
 "use client";
 
+import { withSession } from "@/lib/terminal/workspace-model";
 import type { CSSProperties } from "react";
 import { DownloadIcon } from "../ui/icons";
 import { button, type } from "../ui/theme";
@@ -13,9 +14,11 @@ import { formatBytes, type WsEntry } from "@/lib/terminal/workspace-model";
 export default function ArtifactsStrip({
   artifacts,
   onOpen,
+  sessionId,
 }: {
   artifacts: WsEntry[];
   onOpen: (path: string) => void;
+  sessionId?: string;
 }) {
   if (!artifacts.length) return null;
   return (
@@ -33,7 +36,7 @@ export default function ArtifactsStrip({
                 Open
               </button>
               <a
-                href={`/api/workspace/file?path=${encodeURIComponent(a.path)}&download=1`}
+                href={withSession(`/api/workspace/file?path=${encodeURIComponent(a.path)}&download=1`, sessionId)}
                 style={s.download}
                 title="Download"
               >

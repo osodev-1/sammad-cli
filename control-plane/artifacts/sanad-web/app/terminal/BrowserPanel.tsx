@@ -7,6 +7,7 @@ import { input, type } from "../ui/theme";
 import { previewUrl } from "@/lib/terminal/workspace-model";
 
 interface Props {
+  sessionId?: string;
   /** Workspace-relative path (e.g. "site/index.html") or absolute http(s) URL. */
   url: string;
   onNavigate: (nextUrl: string) => void;
@@ -18,7 +19,7 @@ interface Props {
  * the sandbox attribute here — deliberately WITHOUT allow-same-origin — is the
  * second, independent layer. Never weaken either.
  */
-export default function BrowserPanel({ url, onNavigate }: Props) {
+export default function BrowserPanel({ url, onNavigate, sessionId }: Props) {
   const [address, setAddress] = useState(url);
   const [reloadKey, setReloadKey] = useState(0);
 
@@ -26,7 +27,7 @@ export default function BrowserPanel({ url, onNavigate }: Props) {
     setAddress(url);
   }, [url]);
 
-  const src = previewUrl(url);
+  const src = previewUrl(url, sessionId);
 
   const commit = () => {
     const next = address.trim();

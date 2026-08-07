@@ -59,10 +59,12 @@ interface Props {
   visible: boolean;
   /** Workspace theme — swaps the xterm palette live, never remounts. */
   themeMode: ThemeMode;
+  /** The workspace session whose machine this terminal dials (fixed per mount). */
+  sessionId?: string;
   onPhaseChange?: (phase: TerminalPhase) => void;
 }
 
-export default function TerminalPanel({ visible, themeMode, onPhaseChange }: Props) {
+export default function TerminalPanel({ visible, themeMode, sessionId, onPhaseChange }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -243,7 +245,12 @@ export default function TerminalPanel({ visible, themeMode, onPhaseChange }: Pro
     (async () => {
       let res: Response;
       try {
-        res = await fetch("/api/terminal/session", { method: "POST", signal: ac.signal });
+        res = await fetch("/api/terminal/session", {
+          method: "POST",
+          signal: ac.signal,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessionId }),
+        });
       } catch {
         if (!cancelled && !scheduleRetry()) {
           setPhase({ tag: "error", message: "Network error — check your connection." });

@@ -29,6 +29,11 @@ export async function GET(req: NextRequest) {
   if (!/^[a-f0-9]{12}$/.test(hash)) {
     return err(400, "invalid_request", "Malformed workspace hash");
   }
+  // Sessions own routing now; the legacy per-user table remains as fallback
+  // until it is dropped.
+  const { sessionIpByHash } = await import("@/lib/compute/sessions");
+  const sessionIp = await sessionIpByHash(hash);
+  if (sessionIp) return ok({ taskIp: sessionIp });
   const [row] = await db
     .select()
     .from(workspaceTasks)
