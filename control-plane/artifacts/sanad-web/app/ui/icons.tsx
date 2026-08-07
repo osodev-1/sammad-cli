@@ -321,3 +321,20 @@ export function MoonIcon(props: IconProps) {
     </Svg>
   );
 }
+
+export function PencilIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M17 3l4 4L8 20l-5 1l1-5Z" />
+    </Svg>
+  );
+}
+
+export function PanelRightIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M15 4v16" />
+    </Svg>
+  );
+}

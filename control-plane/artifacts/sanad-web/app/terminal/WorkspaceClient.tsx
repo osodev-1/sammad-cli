@@ -5,6 +5,7 @@ import type { CSSProperties } from "react";
 import Nav from "../ui/Nav";
 import { MoonIcon, SunIcon } from "../ui/icons";
 import ArtifactsStrip from "./ArtifactsStrip";
+import SessionPanel from "./SessionPanel";
 import BrowserPanel from "./BrowserPanel";
 import FileTree from "./FileTree";
 import StatusBar from "./StatusBar";
@@ -60,6 +61,31 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
       persistThemeMode(next);
       return next;
     });
+  }, []);
+
+  /* Session controller pane — collapse state survives reloads. */
+  const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
+  useEffect(() => {
+    try {
+      setSessionsCollapsed(window.localStorage.getItem("sanad-ws-sessions") === "collapsed");
+    } catch {
+      /* storage blocked — default open */
+    }
+  }, []);
+  const toggleSessions = useCallback(() => {
+    setSessionsCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem("sanad-ws-sessions", next ? "collapsed" : "open");
+      } catch {
+        /* storage blocked */
+      }
+      return next;
+    });
+  }, []);
+
+  const renameTerminal = useCallback((id: string, label: string) => {
+    setTerminals((prev) => prev.map((t) => (t.id === id ? { ...t, label } : t)));
   }, []);
   const sessionStart = useRef<number>(Date.now() / 1000);
   const termCounter = useRef(1);
@@ -333,6 +359,20 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
             onOpen={(p) => (isBrowserViewable(p) ? openInBrowser(p) : openFile(p))}
           />
         </main>
+        <div className="nav-hide-sm" style={s.rightPane}>
+          <SessionPanel
+            sessions={terminals}
+            phases={phases}
+            activeId={active}
+            canAdd={terminals.length < MAX_TERMINALS}
+            collapsed={sessionsCollapsed}
+            onSelect={setActive}
+            onRename={renameTerminal}
+            onNew={addTerminal}
+            onClose={closeTerminal}
+            onToggleCollapsed={toggleSessions}
+          />
+        </div>
       </div>
       <StatusBar phase={statusPhase} />
       {notice && <div style={s.notice}>{notice}</div>}
@@ -356,6 +396,10 @@ const s: Record<string, CSSProperties> = {
   sidebar: {
     width: "250px",
     minWidth: "250px",
+    minHeight: 0,
+  },
+  rightPane: {
+    display: "flex",
     minHeight: 0,
   },
   main: {
