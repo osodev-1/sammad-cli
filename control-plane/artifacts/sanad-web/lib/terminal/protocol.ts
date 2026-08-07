@@ -8,7 +8,7 @@
  */
 
 export type ClientControl =
-  | { type: "auth"; ticket: string; cols: number; rows: number }
+  | { type: "auth"; ticket: string; cols: number; rows: number; mode?: "agent" | "shell" }
   | { type: "resize"; cols: number; rows: number }
   | { type: "ping" };
 

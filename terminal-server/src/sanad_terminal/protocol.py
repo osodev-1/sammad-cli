@@ -25,6 +25,8 @@ class AuthFrame(BaseModel):
     ticket: str = Field(min_length=1, max_length=256)
     cols: int = Field(default=80, ge=1, le=10_000)
     rows: int = Field(default=24, ge=1, le=10_000)
+    # "agent" runs the sanad CLI; "shell" is the drawer's plain login shell.
+    mode: Literal["agent", "shell"] = "agent"
 
 
 class ResizeFrame(BaseModel):

@@ -37,6 +37,9 @@ class ActiveSession:
     user_id: str
     pty: PtySession
     websocket: _WebSocketLike | None
+    # "agent" (the sanad CLI) or "shell" (the drawer). Kinds never mix:
+    # adoption, caps and the resume decision are all kind-scoped.
+    kind: str = "agent"
     started_at: float = field(default_factory=time.monotonic)
     last_input_at: float = field(default_factory=time.monotonic)
     # A working agent is NOT idle: output counts as activity, so long tasks
@@ -93,8 +96,12 @@ class SessionManager:
     def count(self) -> int:
         return len(self._sessions)
 
-    def count_for(self, user_id: str) -> int:
-        return sum(1 for s in self._sessions.values() if s.user_id == user_id)
+    def count_for(self, user_id: str, kind: str | None = None) -> int:
+        return sum(
+            1
+            for s in self._sessions.values()
+            if s.user_id == user_id and (kind is None or s.kind == kind)
+        )
 
     @property
     def detached_count(self) -> int:
@@ -102,12 +109,21 @@ class SessionManager:
 
     # -- claim / register ------------------------------------------------------
 
-    async def claim(self, user_id: str) -> None:
-        """Make room for one more session for user_id (evict oldest at cap)."""
+    # Drawer shells are capped separately from agents so opening the drawer
+    # can never evict a working agent (and vice versa).
+    SHELL_CAP = 2
+
+    async def claim(self, user_id: str, kind: str = "agent") -> None:
+        """Make room for one more session of this kind (evict oldest at cap)."""
+        cap = self.SHELL_CAP if kind == "shell" else self._max_per_user
         async with self._lock:
-            while self.count_for(user_id) >= self._max_per_user:
+            while self.count_for(user_id, kind) >= cap:
                 oldest = min(
-                    (s for s in self._sessions.values() if s.user_id == user_id),
+                    (
+                        s
+                        for s in self._sessions.values()
+                        if s.user_id == user_id and s.kind == kind
+                    ),
                     key=lambda s: s.started_at,
                 )
                 del self._sessions[oldest.conn_id]
@@ -150,14 +166,16 @@ class SessionManager:
             int(self._detach_grace),
         )
 
-    async def pop_detached(self, user_id: str) -> ActiveSession | None:
-        """Adopt the most recently detached, still-running session for user_id."""
+    async def pop_detached(self, user_id: str, kind: str = "agent") -> ActiveSession | None:
+        """Adopt the most recently detached, still-running session of this kind."""
         async with self._lock:
             candidates = sorted(
                 (
                     s
                     for s in self._sessions.values()
-                    if s.user_id == user_id and s.detached_at is not None
+                    if s.user_id == user_id
+                    and s.kind == kind
+                    and s.detached_at is not None
                 ),
                 key=lambda s: s.detached_at or 0.0,
                 reverse=True,

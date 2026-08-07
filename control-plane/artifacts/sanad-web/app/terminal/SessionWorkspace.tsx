@@ -50,6 +50,14 @@ export default function SessionWorkspace({
   const [active, setActive] = useState<string>("term-1");
   const [phases, setPhases] = useState<Record<string, TerminalPhase>>({});
   const [notice, setNotice] = useState<string | null>(null);
+  /* Bottom drawer: a plain shell in this session's directory. Mounted on
+     first open, then kept alive (hidden) so the shell survives the drawer. */
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerMounted, setDrawerMounted] = useState(false);
+  const toggleDrawer = useCallback(() => {
+    setDrawerMounted(true);
+    setDrawerOpen((prev) => !prev);
+  }, []);
   const sessionStart = useRef<number>(Date.now() / 1000);
   const termCounter = useRef(1);
   const viewCounter = useRef(0);
@@ -310,6 +318,22 @@ export default function SessionWorkspace({
             <FilePreview key={active} path={active} sessionId={sessionId} />
           )}
         </div>
+        <div style={s.drawer}>
+          <button type="button" style={s.drawerBar} onClick={toggleDrawer}>
+            <span style={s.drawerTitle}>Terminal</span>
+            <span style={s.drawerChevron}>{drawerOpen ? "▾" : "▴"}</span>
+          </button>
+          {drawerMounted && (
+            <div style={{ ...s.drawerBody, ...(drawerOpen ? null : s.drawerClosed) }}>
+              <TerminalPanel
+                visible={drawerOpen}
+                themeMode={themeMode}
+                sessionId={sessionId}
+                shell
+              />
+            </div>
+          )}
+        </div>
         <ArtifactsStrip
           artifacts={artifacts}
           sessionId={sessionId}
@@ -364,5 +388,38 @@ const s: Record<string, CSSProperties> = {
     borderRadius: "var(--radius-pill)",
     padding: "0.5rem 1.2rem",
     fontSize: "0.82rem",
+  },
+  drawer: {
+    display: "flex",
+    flexDirection: "column",
+    borderTop: "1px solid var(--rule)",
+  },
+  drawerBar: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    width: "100%",
+    padding: "0.3rem 1rem",
+    background: "var(--paper)",
+    border: "none",
+    cursor: "pointer",
+    fontFamily: "var(--font-mono)",
+    fontSize: "0.66rem",
+    fontWeight: 600,
+    letterSpacing: "0.12em",
+    textTransform: "uppercase",
+    color: "var(--ink-muted)",
+  },
+  drawerTitle: {},
+  drawerChevron: { fontSize: "0.7rem" },
+  drawerBody: {
+    height: "220px",
+    minHeight: 0,
+    display: "flex",
+    flexDirection: "column",
+  },
+  drawerClosed: {
+    height: 0,
+    overflow: "hidden",
   },
 };

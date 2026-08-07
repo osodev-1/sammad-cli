@@ -174,9 +174,11 @@ def create_app(
         if idle_stopper:
             idle_stopper.touch()
         cols, rows = clamp_size(frame.cols, frame.rows)
+        mode = frame.mode
 
         # -- reattach the most recent detached session, else spawn fresh -------
-        adopted = await manager.pop_detached(user_id)
+        # Adoption is kind-scoped: a drawer shell can never adopt an agent.
+        adopted = await manager.pop_detached(user_id, kind=mode)
         if adopted is not None:
             session = adopted
             pty = session.pty
@@ -191,8 +193,8 @@ def create_app(
                     await ws.send_bytes(replay)
             logger.info("session reattached user={} pid={}", user_id, pty.pid)
         else:
-            # Capped concurrent sessions per user (evict oldest at the cap).
-            await manager.claim(user_id)
+            # Capped concurrent sessions per user and kind (evict oldest at cap).
+            await manager.claim(user_id, kind=mode)
             try:
                 if resolved.mode == "task":
                     user_dir = prepare_single_user_dirs(resolved.data_dir)
@@ -212,17 +214,21 @@ def create_app(
 
                     pw = pwd.getpwnam(resolved.agent_user)
                     spawn_uid, spawn_gid = pw.pw_uid, pw.pw_gid
-                # First terminal after a cold start resumes the last
-                # conversation in this workspace; extra terminals start fresh
-                # (two agents must not fight over one session). --resume <id>
-                # never hard-fails: the CLI falls back to a new session.
-                argv = list(resolved.spawn_argv)
-                if manager.count_for(user_id) == 0:
-                    resume_id = find_resumable_session(
-                        user_dir / "kimi-share", user_dir / "workspace"
-                    )
-                    if resume_id:
-                        argv += ["--resume", resume_id]
+                # The drawer runs a plain login shell; agents run the CLI.
+                # First AGENT after a cold start resumes the last conversation
+                # in this workspace; extra agents start fresh (two agents must
+                # not fight over one session). --resume <id> never hard-fails:
+                # the CLI falls back to a new session.
+                if mode == "shell":
+                    argv = list(resolved.shell_argv)
+                else:
+                    argv = list(resolved.spawn_argv)
+                    if manager.count_for(user_id, kind="agent") == 0:
+                        resume_id = find_resumable_session(
+                            user_dir / "kimi-share", user_dir / "workspace"
+                        )
+                        if resume_id:
+                            argv += ["--resume", resume_id]
                 pty = PtySession(
                     argv=argv,
                     cwd=user_dir / "workspace",
@@ -240,7 +246,11 @@ def create_app(
                 return
 
             session = ActiveSession(
-                conn_id=str(uuid.uuid4()), user_id=user_id, pty=pty, websocket=ws
+                conn_id=str(uuid.uuid4()),
+                user_id=user_id,
+                pty=pty,
+                websocket=ws,
+                kind=mode,
             )
             manager.register(session)
             await _safe_send(ws, ready_frame(user_id, cols, rows))

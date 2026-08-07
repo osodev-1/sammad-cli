@@ -46,6 +46,8 @@ class TerminalSettings:
     child_api_base_url: str = ""
     # argv used to launch the agent; resolved from PATH unless overridden (tests).
     spawn_argv: tuple[str, ...] = field(default_factory=tuple)
+    # argv for the drawer's plain shell (task mode).
+    shell_argv: tuple[str, ...] = ("/bin/bash", "-l")
 
     @classmethod
     def load(cls, env: Mapping[str, str] | None = None) -> TerminalSettings:
@@ -106,4 +108,5 @@ class TerminalSettings:
             detach_grace_seconds=float(e.get("DETACH_GRACE_SECONDS", "900")),
             child_api_base_url=e.get("SANAD_API_BASE_URL", control_plane).rstrip("/"),
             spawn_argv=argv,
+            shell_argv=tuple((e.get("SHELL_ARGV") or "/bin/bash -l").split()),
         )

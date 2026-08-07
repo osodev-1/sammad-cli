@@ -61,10 +61,18 @@ interface Props {
   themeMode: ThemeMode;
   /** The workspace session whose machine this terminal dials (fixed per mount). */
   sessionId?: string;
+  /** true = the drawer's plain login shell instead of the sanad agent. */
+  shell?: boolean;
   onPhaseChange?: (phase: TerminalPhase) => void;
 }
 
-export default function TerminalPanel({ visible, themeMode, sessionId, onPhaseChange }: Props) {
+export default function TerminalPanel({
+  visible,
+  themeMode,
+  sessionId,
+  shell,
+  onPhaseChange,
+}: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -297,6 +305,7 @@ export default function TerminalPanel({ visible, themeMode, sessionId, onPhaseCh
           ticket: grant.ticket,
           cols: term.cols,
           rows: term.rows,
+          ...(shell ? { mode: "shell" as const } : null),
         });
       };
 
