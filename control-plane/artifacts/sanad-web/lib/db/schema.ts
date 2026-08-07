@@ -157,10 +157,11 @@ export const workspaceTasks = pgTable("workspace_tasks", {
 });
 
 /**
- * A workspace session = a project: its own directory on EFS, its own Fargate
- * task (slept when idle — zero compute cost), its own agent history, and —
- * later — its own shipped app. The user's original single workspace becomes
- * the "main" session via migration 0003.
+ * A workspace session = a PROJECT (PRD §7.7): its own directory on EFS, its own
+ * Fargate task (slept when idle — zero compute cost), its own agent history,
+ * and — later — its own shipped app. The table name is kept for migration
+ * stability; the product surfaces it as "Project". The user's original single
+ * workspace became the "main" project via migration 0003.
  */
 export const workspaceSessions = pgTable("workspace_sessions", {
   id: text("id").primaryKey(),
@@ -180,6 +181,33 @@ export const workspaceSessions = pgTable("workspace_sessions", {
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+/**
+ * A PRD Session (§7.8): a restorable unit of work INSIDE a project — its
+ * user-facing name plus the durable UI state needed to resume (open tabs, tab
+ * aliases, active tab, drawer/panel geometry, graph viewport). It is NOT the
+ * machine; the machine is the project row above. Personal work state lives
+ * here, never in the git-tracked workspace (PRD §10.6, SP-012). `uiState` is a
+ * versioned JSON blob so the shape can evolve without a migration per field.
+ */
+export const projectSessions = pgTable("project_sessions", {
+  id: text("id").primaryKey(),
+  // The project (machine) this session's work belongs to.
+  projectId: text("project_id")
+    .notNull()
+    .references(() => workspaceSessions.id),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id),
+  name: text("name").notNull(),
+  // { v, terminals[], fileTabs[], viewTabs[], active, drawerOpen } — see
+  // lib/sessions/state.ts for the typed shape and validator.
+  uiState: jsonb("ui_state").notNull().default({}),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  lastActiveAt: timestamp("last_active_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
 export const ships = pgTable("ships", {

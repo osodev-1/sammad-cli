@@ -12,9 +12,9 @@ export interface WorkspaceSessionInfo {
 }
 
 /**
- * The session controller: each session is a project on its own machine —
- * sleeping costs nothing; selecting one swaps the entire workspace pane.
- * Collapses to a slim rail so the terminal keeps the width.
+ * The projects controller: each project is its own machine (files, agent,
+ * shipped app). Sleeping costs nothing; selecting one swaps the entire
+ * workspace pane. Collapses to a slim rail so the terminal keeps the width.
  */
 export default function SessionPanel({
   sessions,
@@ -39,7 +39,9 @@ export default function SessionPanel({
   onRestart: (id: string) => void;
   onToggleCollapsed: () => void;
 }) {
-  const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
+  const [editing, setEditing] = useState<{ id: string; draft: string } | null>(
+    null,
+  );
   const [creating, setCreating] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -69,7 +71,9 @@ export default function SessionPanel({
       setCreating(null);
       setCreateError(null);
     } catch (e) {
-      setCreateError(e instanceof Error ? e.message : "Could not create the session");
+      setCreateError(
+        e instanceof Error ? e.message : "Could not create the project",
+      );
     }
   };
   const onRenameKey = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -91,8 +95,8 @@ export default function SessionPanel({
           type="button"
           style={s.railButton}
           onClick={onToggleCollapsed}
-          title="Show sessions"
-          aria-label="Show sessions"
+          title="Show projects"
+          aria-label="Show projects"
         >
           <PanelRightIcon size={16} />
         </button>
@@ -104,7 +108,10 @@ export default function SessionPanel({
   const dotFor = (id: string): CSSProperties => {
     if (id !== activeId) return s.dot; // other machines may be asleep — quiet
     if (activePhase.tag === "live") return { ...s.dot, ...s.dotLive };
-    if (activePhase.tag === "connecting" || activePhase.tag === "reconnecting") {
+    if (
+      activePhase.tag === "connecting" ||
+      activePhase.tag === "reconnecting"
+    ) {
       return { ...s.dot, ...s.dotConnecting };
     }
     return s.dot;
@@ -113,13 +120,13 @@ export default function SessionPanel({
   return (
     <aside style={s.pane}>
       <div style={s.header}>
-        <span style={s.title}>Sessions</span>
+        <span style={s.title}>Projects</span>
         <button
           type="button"
           style={s.iconButton}
           onClick={onToggleCollapsed}
-          title="Hide sessions"
-          aria-label="Hide sessions"
+          title="Hide projects"
+          aria-label="Hide projects"
         >
           <PanelRightIcon size={15} />
         </button>
@@ -146,7 +153,9 @@ export default function SessionPanel({
                   style={s.input}
                   value={editing.draft}
                   maxLength={40}
-                  onChange={(e) => setEditing({ id: row.id, draft: e.target.value })}
+                  onChange={(e) =>
+                    setEditing({ id: row.id, draft: e.target.value })
+                  }
                   onBlur={commitRename}
                   onKeyDown={onRenameKey}
                   onClick={(e) => e.stopPropagation()}
@@ -161,7 +170,7 @@ export default function SessionPanel({
                   <button
                     type="button"
                     style={s.iconButton}
-                    title="Rename session"
+                    title="Rename project"
                     aria-label={`Rename ${row.name}`}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -194,7 +203,7 @@ export default function SessionPanel({
           <input
             ref={createRef}
             style={s.input}
-            placeholder="Session name"
+            placeholder="Project name"
             value={creating}
             maxLength={40}
             onChange={(e) => setCreating(e.target.value)}
@@ -209,10 +218,14 @@ export default function SessionPanel({
           style={{ ...s.newButton, ...(canAdd ? null : s.newDisabled) }}
           onClick={() => setCreating("")}
           disabled={!canAdd}
-          title={canAdd ? "New session — its own machine and files" : "Session limit reached"}
+          title={
+            canAdd
+              ? "New project — its own machine and files"
+              : "Project limit reached"
+          }
         >
           <PlusIcon size={14} />
-          New session
+          New project
         </button>
       )}
     </aside>

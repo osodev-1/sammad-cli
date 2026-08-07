@@ -155,6 +155,7 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
     <div style={s.root} data-ws-theme={themeMode}>
       <Nav
         links={[
+          { href: "/projects", label: "Projects" },
           { href: "/dashboard", label: "Dashboard" },
           { href: "/pricing", label: "Pricing", compactHidden: true },
         ]}

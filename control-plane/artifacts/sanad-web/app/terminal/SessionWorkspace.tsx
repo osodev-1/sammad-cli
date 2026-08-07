@@ -21,6 +21,8 @@ import {
   type WsEntry,
 } from "@/lib/terminal/workspace-model";
 import type { ThemeMode } from "@/lib/terminal/xtermTheme";
+import { loadDefaultSession, persistSessionState } from "@/lib/sessions/client";
+import { SESSION_STATE_VERSION } from "@/lib/sessions/state";
 
 const POLL_MS = 4000;
 const MAX_TERMINALS = 3;
@@ -62,6 +64,62 @@ export default function SessionWorkspace({
   const termCounter = useRef(1);
   const viewCounter = useRef(0);
 
+  /* PRD Session persistence: restore this project's open tabs/drawer on mount,
+     then save them (debounced) as they change. sessionId here is the project
+     (machine) id; prdSessionId is the restorable work-state record. */
+  const prdSessionId = useRef<string | null>(null);
+  const hydrated = useRef(false);
+  useEffect(() => {
+    if (!sessionId) return;
+    let cancelled = false;
+    (async () => {
+      const loaded = await loadDefaultSession(sessionId);
+      if (cancelled || !loaded) {
+        hydrated.current = true; // nothing to restore; allow saves
+        return;
+      }
+      prdSessionId.current = loaded.id;
+      const s = loaded.uiState;
+      if (s.terminals.length > 0) {
+        setTerminals(s.terminals);
+        const maxN = Math.max(
+          1,
+          ...s.terminals.map((t) => Number(t.id.replace("term-", "")) || 0),
+        );
+        termCounter.current = maxN;
+      }
+      if (s.fileTabs.length > 0) {
+        setFileTabs(
+          s.fileTabs.map((t) => ({
+            path: t.path,
+            name: t.path.split("/").pop() ?? t.path,
+          })),
+        );
+      }
+      if (s.viewTabs.length > 0) {
+        setViewTabs(
+          s.viewTabs.map((t, i) => ({
+            id: `view-${i + 1}`,
+            url: t.url,
+            title: t.alias ?? (t.url.split("/").pop() || t.url),
+          })),
+        );
+        viewCounter.current = s.viewTabs.length;
+      }
+      if (s.drawerOpen) {
+        setDrawerMounted(true);
+        setDrawerOpen(true);
+      }
+      if (s.active) setActive(s.active);
+      hydrated.current = true;
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // sessionId (the project) is fixed for this mount — restore runs once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
   /* While the session machine is waking (snapshot 503s), back off instead
      of hammering every tick — the first success resets to normal cadence. */
   const snapshotFails = useRef(0);
@@ -72,7 +130,9 @@ export default function SessionWorkspace({
       if (!force && Date.now() < snapshotNextAt.current) return;
       setPolling(true);
       try {
-        const res = await fetch(withSession("/api/workspace/snapshot", sessionId));
+        const res = await fetch(
+          withSession("/api/workspace/snapshot", sessionId),
+        );
         if (res.ok) {
           snapshotFails.current = 0;
           snapshotNextAt.current = 0;
@@ -81,7 +141,10 @@ export default function SessionWorkspace({
           if (Array.isArray(next)) setEntries(next);
         } else {
           snapshotFails.current += 1;
-          const backoff = Math.min(POLL_MS * 2 ** snapshotFails.current, 30_000);
+          const backoff = Math.min(
+            POLL_MS * 2 ** snapshotFails.current,
+            30_000,
+          );
           snapshotNextAt.current = Date.now() + backoff;
         }
       } catch {
@@ -90,7 +153,7 @@ export default function SessionWorkspace({
         setPolling(false);
       }
     },
-    [sessionId]
+    [sessionId],
   );
 
   /* Poll while the page is visible; the Page Visibility API pauses it. */
@@ -122,10 +185,27 @@ export default function SessionWorkspace({
     return () => window.clearTimeout(t);
   }, [notice]);
 
+  /* Persist restorable state (debounced) once hydrated — never before, so the
+     initial empty render can't clobber a saved session before it loads. */
+  useEffect(() => {
+    if (!hydrated.current || !prdSessionId.current || !sessionId) return;
+    const timer = window.setTimeout(() => {
+      void persistSessionState(sessionId, prdSessionId.current!, {
+        v: SESSION_STATE_VERSION,
+        terminals,
+        fileTabs: fileTabs.map((t) => ({ path: t.path })),
+        viewTabs: viewTabs.map((t) => ({ url: t.url, alias: t.title })),
+        active,
+        drawerOpen,
+      });
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [terminals, fileTabs, viewTabs, active, drawerOpen, sessionId]);
+
   const tree = useMemo(() => buildTree(entries), [entries]);
   const artifacts = useMemo(
     () => detectArtifacts(entries, sessionStart.current),
-    [entries]
+    [entries],
   );
 
   const isTerminalActive = terminals.some((t) => t.id === active);
@@ -134,7 +214,7 @@ export default function SessionWorkspace({
   const openFile = useCallback((path: string) => {
     const name = path.split("/").pop() ?? path;
     setFileTabs((prev) =>
-      prev.some((t) => t.path === path) ? prev : [...prev, { path, name }]
+      prev.some((t) => t.path === path) ? prev : [...prev, { path, name }],
     );
     setActive(path);
   }, []);
@@ -165,11 +245,11 @@ export default function SessionWorkspace({
         title: viewTitle(pathOrUrl),
       };
       setViewTabs((prev) =>
-        prev.some((v) => v.url === pathOrUrl) ? prev : [...prev, tab]
+        prev.some((v) => v.url === pathOrUrl) ? prev : [...prev, tab],
       );
       setActive(tab.id);
     },
-    [viewTabs]
+    [viewTabs],
   );
 
   const closeView = useCallback(
@@ -177,12 +257,14 @@ export default function SessionWorkspace({
       setViewTabs((prev) => prev.filter((v) => v.id !== id));
       setActive((current) => (current === id ? terminals[0].id : current));
     },
-    [terminals]
+    [terminals],
   );
 
   const navigateView = useCallback((id: string, nextUrl: string) => {
     setViewTabs((prev) =>
-      prev.map((v) => (v.id === id ? { ...v, url: nextUrl, title: viewTitle(nextUrl) } : v))
+      prev.map((v) =>
+        v.id === id ? { ...v, url: nextUrl, title: viewTitle(nextUrl) } : v,
+      ),
     );
   }, []);
 
@@ -191,7 +273,7 @@ export default function SessionWorkspace({
       setFileTabs((prev) => prev.filter((t) => t.path !== path));
       setActive((current) => (current === path ? terminals[0].id : current));
     },
-    [terminals]
+    [terminals],
   );
 
   /* State updaters stay PURE — companion state changes happen alongside,
@@ -203,7 +285,7 @@ export default function SessionWorkspace({
     setTerminals((prev) =>
       prev.length >= MAX_TERMINALS
         ? prev
-        : [...prev, { id, label: `Terminal ${termCounter.current}` }]
+        : [...prev, { id, label: `Terminal ${termCounter.current}` }],
     );
     setActive(id);
   }, [terminals.length]);
@@ -217,9 +299,11 @@ export default function SessionWorkspace({
         const { [id]: _dropped, ...rest } = p;
         return rest;
       });
-      setActive((current) => (current === id ? next[next.length - 1].id : current));
+      setActive((current) =>
+        current === id ? next[next.length - 1].id : current,
+      );
     },
-    [terminals]
+    [terminals],
   );
 
   /* Identity-stable phase sink; skips no-op updates so a panel re-reporting
@@ -227,7 +311,11 @@ export default function SessionWorkspace({
   const reportPhase = useCallback((id: string, p: TerminalPhase) => {
     setPhases((prev) => {
       const existing = prev[id];
-      if (existing && existing.tag === p.tag && JSON.stringify(existing) === JSON.stringify(p)) {
+      if (
+        existing &&
+        existing.tag === p.tag &&
+        JSON.stringify(existing) === JSON.stringify(p)
+      ) {
         return prev;
       }
       return { ...prev, [id]: p };
@@ -247,13 +335,14 @@ export default function SessionWorkspace({
       viewTabs.some((v) => v.id === current) ||
       known.has(current)
         ? current
-        : terminals[0].id
+        : terminals[0].id,
     );
   }, [entries, terminals, viewTabs]);
 
   /* The active terminal's state, lifted for the status bar + session dot. */
-  const statusPhase: TerminalPhase =
-    phases[isTerminalActive ? active : terminals[0].id] ?? { tag: "connecting" };
+  const statusPhase: TerminalPhase = phases[
+    isTerminalActive ? active : terminals[0].id
+  ] ?? { tag: "connecting" };
   const onStatusPhaseRef = useRef(onStatusPhase);
   onStatusPhaseRef.current = onStatusPhase;
   useEffect(() => {
@@ -324,7 +413,12 @@ export default function SessionWorkspace({
             <span style={s.drawerChevron}>{drawerOpen ? "▾" : "▴"}</span>
           </button>
           {drawerMounted && (
-            <div style={{ ...s.drawerBody, ...(drawerOpen ? null : s.drawerClosed) }}>
+            <div
+              style={{
+                ...s.drawerBody,
+                ...(drawerOpen ? null : s.drawerClosed),
+              }}
+            >
               <TerminalPanel
                 visible={drawerOpen}
                 themeMode={themeMode}
@@ -337,7 +431,9 @@ export default function SessionWorkspace({
         <ArtifactsStrip
           artifacts={artifacts}
           sessionId={sessionId}
-          onOpen={(p) => (isBrowserViewable(p) ? openInBrowser(p) : openFile(p))}
+          onOpen={(p) =>
+            isBrowserViewable(p) ? openInBrowser(p) : openFile(p)
+          }
         />
       </main>
       {notice && <div style={s.notice}>{notice}</div>}
