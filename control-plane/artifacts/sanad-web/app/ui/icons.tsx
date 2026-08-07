@@ -122,7 +122,11 @@ export function CheckIcon(props: IconProps) {
 }
 
 /** Danger / denial: outlined ring with a hard X — the inverse of success. */
-export function CrossOutlineIcon({ size = 18, strokeWidth = 2, style }: IconProps) {
+export function CrossOutlineIcon({
+  size = 18,
+  strokeWidth = 2,
+  style,
+}: IconProps) {
   return (
     <Svg size={size} strokeWidth={strokeWidth} style={style}>
       <circle cx="12" cy="12" r="10" />
@@ -132,7 +136,11 @@ export function CrossOutlineIcon({ size = 18, strokeWidth = 2, style }: IconProp
 }
 
 /** Warning: heavy triangle, carries weight instead of amber. */
-export function AlertTriangleIcon({ size = 18, strokeWidth = 2, style }: IconProps) {
+export function AlertTriangleIcon({
+  size = 18,
+  strokeWidth = 2,
+  style,
+}: IconProps) {
   return (
     <Svg size={size} strokeWidth={strokeWidth} style={style}>
       <path d="M12 3.5 1.8 20.5h20.4L12 3.5Z" />
@@ -335,6 +343,17 @@ export function PanelRightIcon(props: IconProps) {
     <Svg {...props}>
       <rect x="3" y="4" width="18" height="16" rx="2" />
       <path d="M15 4v16" />
+    </Svg>
+  );
+}
+
+export function GraphIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="6" cy="6" r="2.5" />
+      <circle cx="18" cy="7" r="2.5" />
+      <circle cx="12" cy="18" r="2.5" />
+      <path d="M8 7.5l3 8M16 9l-3 6.5" />
     </Svg>
   );
 }

@@ -8,11 +8,13 @@ import FileTree from "./FileTree";
 import TerminalPanel, { type TerminalPhase } from "./TerminalPanel";
 import {
   FilePreview,
+  GRAPH_TAB_ID,
   TabsBar,
   type BrowserTab,
   type TerminalTabInfo,
   type WorkspaceTab,
 } from "./tabs";
+import GraphPanel from "./graph/GraphPanel";
 import {
   buildTree,
   detectArtifacts,
@@ -210,6 +212,13 @@ export default function SessionWorkspace({
 
   const isTerminalActive = terminals.some((t) => t.id === active);
   const activeView = viewTabs.find((v) => v.id === active) ?? null;
+  const graphActive = active === GRAPH_TAB_ID;
+
+  /* Cross-focus: selecting a .sanad manifest file in the tree highlights its
+     node when the graph is open. The id convention mirrors the kernel's:
+     folder name under a kind dir → "<prefix>:<slug>". */
+  const [graphFocus, setGraphFocus] = useState<string | null>(null);
+  const openGraph = useCallback(() => setActive(GRAPH_TAB_ID), []);
 
   const openFile = useCallback((path: string) => {
     const name = path.split("/").pop() ?? path;
@@ -217,6 +226,8 @@ export default function SessionWorkspace({
       prev.some((t) => t.path === path) ? prev : [...prev, { path, name }],
     );
     setActive(path);
+    // Opening a .sanad manifest also cross-focuses its graph node (GR-005).
+    if (path.startsWith(".sanad/")) setGraphFocus(path);
   }, []);
 
   const viewTitle = (url: string): string => {
@@ -331,6 +342,7 @@ export default function SessionWorkspace({
       return next.length === prev.length ? prev : next;
     });
     setActive((current) =>
+      current === GRAPH_TAB_ID ||
       terminals.some((t) => t.id === current) ||
       viewTabs.some((v) => v.id === current) ||
       known.has(current)
@@ -375,6 +387,7 @@ export default function SessionWorkspace({
           onCloseTerminal={closeTerminal}
           onCloseView={closeView}
           onNewTerminal={addTerminal}
+          onOpenGraph={openGraph}
         />
         <div style={s.panelArea}>
           {/* Terminals stay MOUNTED across tab switches — hidden, never unmounted.
@@ -403,7 +416,16 @@ export default function SessionWorkspace({
               onNavigate={(u) => navigateView(activeView.id, u)}
             />
           )}
-          {!isTerminalActive && !activeView && active && (
+          {/* Kept mounted while hidden so its poll + layout survive tab switches. */}
+          <div style={graphActive ? s.graphPane : s.paneHidden}>
+            <GraphPanel
+              sessionId={sessionId}
+              visible={graphActive}
+              onOpenFile={openFile}
+              focusResourceId={graphFocus}
+            />
+          </div>
+          {!isTerminalActive && !activeView && !graphActive && active && (
             <FilePreview key={active} path={active} sessionId={sessionId} />
           )}
         </div>
@@ -460,6 +482,12 @@ const s: Record<string, CSSProperties> = {
     display: "flex",
     flexDirection: "column",
     position: "relative",
+  },
+  graphPane: {
+    position: "absolute",
+    inset: 0,
+    display: "flex",
+    flexDirection: "column",
   },
   terminalPane: {
     flex: 1,

@@ -2,7 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { CrossOutlineIcon, DownloadIcon, GlobeIcon } from "../ui/icons";
+import {
+  CrossOutlineIcon,
+  DownloadIcon,
+  GlobeIcon,
+  GraphIcon,
+} from "../ui/icons";
 import { button, size, type } from "../ui/theme";
 import {
   isTextEditable,
@@ -10,6 +15,9 @@ import {
   formatBytes,
 } from "@/lib/terminal/workspace-model";
 import { withSession } from "@/lib/terminal/workspace-model";
+
+/** The Blueprint graph is a singleton tab with a fixed active id. */
+export const GRAPH_TAB_ID = "graph";
 
 /* ------------------------------------------------------------- tabs bar --- */
 
@@ -40,6 +48,7 @@ export function TabsBar({
   onCloseTerminal,
   onCloseView,
   onNewTerminal,
+  onOpenGraph,
 }: {
   terminals: TerminalTabInfo[];
   viewTabs: BrowserTab[];
@@ -51,6 +60,7 @@ export function TabsBar({
   onCloseTerminal: (id: string) => void;
   onCloseView: (id: string) => void;
   onNewTerminal: () => void;
+  onOpenGraph: () => void;
 }) {
   return (
     <div style={s.tabsBar}>
@@ -60,9 +70,17 @@ export function TabsBar({
           label={t.label}
           active={active === t.id}
           onSelect={() => onSelect(t.id)}
-          onClose={terminals.length > 1 ? () => onCloseTerminal(t.id) : undefined}
+          onClose={
+            terminals.length > 1 ? () => onCloseTerminal(t.id) : undefined
+          }
         />
       ))}
+      <Tab
+        label="Blueprint"
+        icon={<GraphIcon size={12} strokeWidth={1.8} />}
+        active={active === GRAPH_TAB_ID}
+        onSelect={onOpenGraph}
+      />
       {canAddTerminal && (
         <button
           style={s.addTerminal}
@@ -143,7 +161,13 @@ type LoadState =
   | { tag: "blob"; url: string; sizeLabel: string }
   | { tag: "error"; message: string };
 
-export function FilePreview({ path, sessionId }: { path: string; sessionId?: string }) {
+export function FilePreview({
+  path,
+  sessionId,
+}: {
+  path: string;
+  sessionId?: string;
+}) {
   const name = path.split("/").pop() ?? path;
   const kind = previewKind(name);
   const editable = isTextEditable(name);
@@ -154,7 +178,10 @@ export function FilePreview({ path, sessionId }: { path: string; sessionId?: str
   const [saving, setSaving] = useState(false);
   const [rendered, setRendered] = useState<string | null>(null); // markdown HTML
 
-  const fileUrl = withSession(`/api/workspace/file?path=${encodeURIComponent(path)}`, sessionId);
+  const fileUrl = withSession(
+    `/api/workspace/file?path=${encodeURIComponent(path)}`,
+    sessionId,
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -175,7 +202,11 @@ export function FilePreview({ path, sessionId }: { path: string; sessionId?: str
         const blob = await res.blob();
         if (cancelled) return;
         objectUrl = URL.createObjectURL(blob);
-        setState({ tag: "blob", url: objectUrl, sizeLabel: formatBytes(blob.size) });
+        setState({
+          tag: "blob",
+          url: objectUrl,
+          sizeLabel: formatBytes(blob.size),
+        });
       } else {
         const text = await res.text();
         if (cancelled) return;
@@ -192,7 +223,8 @@ export function FilePreview({ path, sessionId }: { path: string; sessionId?: str
         }
       }
     })().catch(() => {
-      if (!cancelled) setState({ tag: "error", message: "Could not open this file." });
+      if (!cancelled)
+        setState({ tag: "error", message: "Could not open this file." });
     });
 
     return () => {
@@ -315,7 +347,10 @@ export function FilePreview({ path, sessionId }: { path: string; sessionId?: str
                 Cancel
               </button>
               <button
-                style={{ ...button.primary(size.sm), opacity: saving ? 0.6 : 1 }}
+                style={{
+                  ...button.primary(size.sm),
+                  opacity: saving ? 0.6 : 1,
+                }}
                 disabled={saving || !dirty}
                 onClick={() => void save()}
               >
@@ -323,7 +358,11 @@ export function FilePreview({ path, sessionId }: { path: string; sessionId?: str
               </button>
             </>
           )}
-          <a href={`${fileUrl}&download=1`} style={s.downloadLink} title="Download">
+          <a
+            href={`${fileUrl}&download=1`}
+            style={s.downloadLink}
+            title="Download"
+          >
             <DownloadIcon size={14} strokeWidth={2} />
           </a>
         </span>
@@ -341,7 +380,7 @@ function CsvTable({ content }: { content: string }) {
         .filter((l) => l.length)
         .slice(0, 500)
         .map((line) => line.split(",")),
-    [content]
+    [content],
   );
   if (!rows.length) return <p style={s.meta}>Empty file.</p>;
   return (
@@ -447,9 +486,18 @@ const s: Record<string, CSSProperties> = {
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
-  previewActions: { display: "inline-flex", alignItems: "center", gap: "0.75rem" },
+  previewActions: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "0.75rem",
+  },
   downloadLink: { display: "inline-flex", color: "var(--ink-muted)" },
-  previewBody: { flex: 1, minHeight: 0, overflow: "auto", padding: "1.25rem 1.5rem" },
+  previewBody: {
+    flex: 1,
+    minHeight: 0,
+    overflow: "auto",
+    padding: "1.25rem 1.5rem",
+  },
   meta: { ...type.small },
   image: { maxWidth: "100%", borderRadius: "var(--radius-sm)" },
   pdf: { width: "100%", height: "100%", minHeight: "480px", border: "none" },
