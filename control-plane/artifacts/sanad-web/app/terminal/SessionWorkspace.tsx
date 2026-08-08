@@ -5,6 +5,7 @@ import type { CSSProperties } from "react";
 import ArtifactsStrip from "./ArtifactsStrip";
 import BrowserPanel from "./BrowserPanel";
 import FileTree from "./FileTree";
+import UsageDock from "./UsageDock";
 import TerminalPanel, { type TerminalPhase } from "./TerminalPanel";
 import {
   FilePreview,
@@ -405,6 +406,9 @@ export default function SessionWorkspace({
             revealPaths={revealPaths}
           />
         </div>
+        {/* Month-to-date allowance, docked at the foot of the sidebar where the
+            agent is actively spending it (US-001..006). */}
+        <UsageDock />
       </aside>
       <main style={s.main}>
         <TabsBar
