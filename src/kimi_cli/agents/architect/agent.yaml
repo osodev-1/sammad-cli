@@ -1,0 +1,15 @@
+version: 1
+agent:
+  name: "Sanad Architect"
+  system_prompt_path: ./system.md
+  # A deliberately narrow toolset. The architect can read the workspace and the
+  # blueprint and DRAFT changes, but has no tool that writes or applies — every
+  # proposal is reviewed and applied by the user. Governance is structural.
+  tools:
+    - "kimi_cli.tools.file:ReadFile"
+    - "kimi_cli.tools.file:Glob"
+    - "kimi_cli.tools.file:Grep"
+    - "kimi_cli.tools.ask_user:AskUserQuestion"
+    - "kimi_cli.sanad.architect_tools:BlueprintGraph"
+    - "kimi_cli.sanad.architect_tools:BlueprintValidate"
+    - "kimi_cli.sanad.architect_tools:DraftBlueprintChange"

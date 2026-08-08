@@ -282,7 +282,7 @@ def kimi(
     ] = False,
     # Customization
     agent: Annotated[
-        Literal["default", "okabe"] | None,
+        Literal["default", "okabe", "architect"] | None,
         typer.Option(
             "--agent",
             help="Builtin agent specification to use. Default: builtin default agent.",
@@ -380,7 +380,7 @@ def kimi(
 
     from kaos.path import KaosPath
 
-    from kimi_cli.agentspec import DEFAULT_AGENT_FILE, OKABE_AGENT_FILE
+    from kimi_cli.agentspec import ARCHITECT_AGENT_FILE, DEFAULT_AGENT_FILE, OKABE_AGENT_FILE
     from kimi_cli.app import KimiCLI, enable_logging
     from kimi_cli.config import Config, load_config_from_string
     from kimi_cli.exception import ConfigError
@@ -466,6 +466,8 @@ def kimi(
                 agent_file = DEFAULT_AGENT_FILE
             case "okabe":
                 agent_file = OKABE_AGENT_FILE
+            case "architect":
+                agent_file = ARCHITECT_AGENT_FILE
 
     ui: UIMode = "shell"
     if print_mode:
