@@ -108,7 +108,8 @@ describe("POST /api/terminal/session", () => {
       coldStart: false,
     });
     expect(vi.mocked(provisionPersonalOrg)).toHaveBeenCalled();
-    expect(vi.mocked(mintTerminalTicket)).toHaveBeenCalledWith("user_1", "personal_user_1");
+    // 3rd arg is the project id; undefined in railway mode (no per-project machine).
+    expect(vi.mocked(mintTerminalTicket)).toHaveBeenCalledWith("user_1", "personal_user_1", undefined);
   });
 
   it("falls back to the personal org when the Clerk-active org has no membership", async () => {
@@ -117,7 +118,8 @@ describe("POST /api/terminal/session", () => {
     const res = await POST(sessionRequest());
     expect(res.status).toBe(200);
     expect(vi.mocked(requireEntitled)).toHaveBeenCalledWith("personal_user_1", "user_1");
-    expect(vi.mocked(mintTerminalTicket)).toHaveBeenCalledWith("user_1", "personal_user_1");
+    // 3rd arg is the project id; undefined in railway mode (no per-project machine).
+    expect(vi.mocked(mintTerminalTicket)).toHaveBeenCalledWith("user_1", "personal_user_1", undefined);
   });
 
   it("uses the Clerk-active org when a membership exists", async () => {
@@ -125,6 +127,6 @@ describe("POST /api/terminal/session", () => {
     membershipRows = [{ id: "mem_1" }];
     const res = await POST(sessionRequest());
     expect(res.status).toBe(200);
-    expect(vi.mocked(mintTerminalTicket)).toHaveBeenCalledWith("user_1", "org_team_1");
+    expect(vi.mocked(mintTerminalTicket)).toHaveBeenCalledWith("user_1", "org_team_1", undefined);
   });
 });

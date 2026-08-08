@@ -98,6 +98,12 @@ export const cliSessions = pgTable("cli_sessions", {
     () => deviceAuthRequests.id
   ),
   deviceLabel: text("device_label"),
+  // The workspace project (workspace_sessions.id) a web-terminal CLI session was
+  // born in, if any. Soft reference (no FK): usage attribution flows from here
+  // through the runtime-token → cli-session join, and deleting a project must
+  // never be blocked by, or cascade into, its historical sessions. Null for
+  // device-flow logins, which have no project.
+  projectId: text("project_id"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .defaultNow()
     .notNull(),
@@ -127,6 +133,11 @@ export const usageEvents = pgTable("usage_events", {
   orgId: text("org_id").notNull(),
   userId: text("user_id").notNull(),
   cliSessionId: text("cli_session_id"),
+  // Attribution: the workspace project this consumption belongs to, resolved
+  // from the runtime token's owning cli-session. Null for non-workspace usage
+  // (e.g. a locally installed CLI logged in via the device flow). Indexed for
+  // per-project usage rollups (see migration 0005).
+  projectId: text("project_id"),
   modelAlias: text("model_alias").notNull(),
   tokensIn: integer("tokens_in").notNull().default(0),
   tokensOut: integer("tokens_out").notNull().default(0),

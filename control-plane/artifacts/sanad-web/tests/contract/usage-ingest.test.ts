@@ -27,6 +27,7 @@ const RUNTIME = {
   cliSessionId: "sess_1",
   userId: "user_a",
   orgId: "org_a",
+  projectId: "project:hh",
 };
 
 const statusFor = (requestsUsed: number, tokensUsed: number) =>
@@ -121,6 +122,20 @@ describe("POST /api/v1/usage — attribution", () => {
     );
     expect(inserted().orgId).toBe("org_a");
     expect(inserted().userId).toBe("user_a");
+  });
+
+  it("attributes the event to the token's workspace project", async () => {
+    await POST(makeReq(VALID));
+    expect(inserted().projectId).toBe("project:hh");
+  });
+
+  it("leaves projectId null for a non-workspace (device-flow) token", async () => {
+    vi.mocked(verifyRuntimeBearer).mockResolvedValue({
+      ...RUNTIME,
+      projectId: null,
+    });
+    await POST(makeReq(VALID));
+    expect(inserted().projectId).toBeNull();
   });
 
   it("defaults cost to zero when the gateway does not price the call", async () => {

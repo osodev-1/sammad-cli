@@ -99,6 +99,7 @@ export async function POST(req: NextRequest) {
         orgId: runtime.orgId,
         userId: runtime.userId,
         cliSessionId: runtime.cliSessionId,
+        projectId: runtime.projectId,
         modelAlias,
         tokensIn,
         tokensOut,

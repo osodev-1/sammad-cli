@@ -18,9 +18,16 @@ const TICKET_TTL_MS = 60_000;
 
 export async function mintTerminalTicket(
   userId: string,
-  orgId: string
+  orgId: string,
+  projectId?: string
 ): Promise<{ ticket: string; expiresIn: number }> {
-  const sessionToken = await mintSession(userId, orgId, undefined, "Web terminal");
+  const sessionToken = await mintSession(
+    userId,
+    orgId,
+    undefined,
+    "Web terminal",
+    projectId
+  );
   const ticket = newToken("tt");
   await db.insert(terminalTickets).values({
     id: crypto.randomUUID(),

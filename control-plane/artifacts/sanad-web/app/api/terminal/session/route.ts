@@ -100,6 +100,13 @@ export async function POST(req: Request) {
     wsUrl = configured;
   }
 
-  const { ticket, expiresIn } = await mintTerminalTicket(userId, activeOrgId);
+  // `sessionId` (aws mode) is the workspace project the CLI session is born in;
+  // it stamps usage attribution onto the session. Undefined in railway/legacy
+  // mode, where there is no project — attribution stays null there.
+  const { ticket, expiresIn } = await mintTerminalTicket(
+    userId,
+    activeOrgId,
+    sessionId
+  );
   return ok({ ticket, wsUrl, expiresIn, coldStart, sessionId });
 }

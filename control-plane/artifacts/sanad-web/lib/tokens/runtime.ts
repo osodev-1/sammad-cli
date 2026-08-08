@@ -113,6 +113,8 @@ export type RuntimeTokenInfo = {
   cliSessionId: string;
   userId: string;
   orgId: string;
+  /** The workspace project the owning session was born in, or null. */
+  projectId: string | null;
 };
 
 /**
@@ -143,6 +145,7 @@ export async function verifyRuntimeBearer(
       absoluteExpiresAt: runtimeTokens.absoluteExpiresAt,
       userId: cliSessions.userId,
       orgId: cliSessions.orgId,
+      projectId: cliSessions.projectId,
       sessionRevokedAt: cliSessions.revokedAt,
     })
     .from(runtimeTokens)
@@ -165,6 +168,7 @@ export async function verifyRuntimeBearer(
     cliSessionId: row.cliSessionId,
     userId: row.userId,
     orgId: row.orgId,
+    projectId: row.projectId,
   };
 }
 

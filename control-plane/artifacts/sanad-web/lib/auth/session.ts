@@ -12,7 +12,8 @@ export async function mintSession(
   userId: string,
   orgId: string,
   deviceRequestId?: string,
-  deviceLabel?: string
+  deviceLabel?: string,
+  projectId?: string
 ): Promise<string> {
   const plainToken = newToken("sess");
   const tokenHash = hashToken(plainToken);
@@ -24,6 +25,9 @@ export async function mintSession(
     orgId,
     deviceRequestId: deviceRequestId ?? null,
     deviceLabel: deviceLabel ?? null,
+    // Stamped when a session is born inside a workspace project — carries
+    // usage attribution to that project for every runtime token minted here.
+    projectId: projectId ?? null,
   });
 
   return plainToken;
