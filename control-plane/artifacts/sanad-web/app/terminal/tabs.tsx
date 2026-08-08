@@ -11,6 +11,7 @@ import {
 import { button, size, type } from "../ui/theme";
 import NotebookView from "./NotebookView";
 import ArchiveView from "./ArchiveView";
+import { parseCsv } from "@/lib/terminal/csv";
 import {
   isTextEditable,
   previewKind,
@@ -397,18 +398,10 @@ export function FilePreview({
 }
 
 function CsvTable({ content }: { content: string }) {
-  const rows = useMemo(
-    () =>
-      content
-        .split(/\r?\n/)
-        .filter((l) => l.length)
-        .slice(0, 500)
-        .map((line) => line.split(",")),
-    [content],
-  );
+  const { rows, truncated } = useMemo(() => parseCsv(content), [content]);
   if (!rows.length) return <p style={s.meta}>Empty file.</p>;
   return (
-    <div style={{ overflow: "auto" }}>
+    <div style={{ overflow: "auto", flex: 1, minHeight: 0 }}>
       <table style={s.table}>
         <thead>
           <tr>
@@ -431,6 +424,7 @@ function CsvTable({ content }: { content: string }) {
           ))}
         </tbody>
       </table>
+      {truncated && <p style={s.meta}>Showing the first 1000 rows.</p>}
     </div>
   );
 }
