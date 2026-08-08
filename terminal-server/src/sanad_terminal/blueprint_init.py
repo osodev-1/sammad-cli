@@ -25,15 +25,22 @@ spec:
 
 
 def ensure_blueprint(workspace_root: Path) -> bool:
-    """Create ``.sanad/sanad.yaml`` if the blueprint is uninitialized.
+    """Scaffold ``.sanad`` in the layout the Kimi CLI understands.
+
+    Writes ``.sanad/sanad.yaml`` (the Project) only if absent, and ensures a
+    ``.sanad/skills`` directory — which is exactly where the CLI's skill loader
+    looks for a project's skills (``<workspace>/.sanad/skills/<slug>/SKILL.md``),
+    so a skill authored in the blueprint is a real CLI skill at runtime. No
+    ``.gitkeep`` (a stray file there would index as an unclassified node).
 
     Returns True if it created the manifest, False if one already existed.
     Idempotent — never overwrites an existing blueprint.
     """
     sanad = workspace_root / ".sanad"
     manifest = sanad / "sanad.yaml"
-    if manifest.exists():
-        return False
+    created = not manifest.exists()
     sanad.mkdir(parents=True, exist_ok=True)
-    manifest.write_text(_PROJECT_MANIFEST, encoding="utf-8")
-    return True
+    (sanad / "skills").mkdir(exist_ok=True)  # the CLI's project skills brand dir
+    if created:
+        manifest.write_text(_PROJECT_MANIFEST, encoding="utf-8")
+    return created

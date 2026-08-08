@@ -13,6 +13,8 @@ def test_creates_a_valid_project_blueprint(tmp_path: Path):
     assert created is True
     manifest = root / ".sanad" / "sanad.yaml"
     assert manifest.is_file()
+    # The CLI's project skills brand dir must exist so skills authored here load.
+    assert (root / ".sanad" / "skills").is_dir()
 
     # The seed must be a VALID blueprint: the kernel indexes it to a Project
     # node with no blocking diagnostics.

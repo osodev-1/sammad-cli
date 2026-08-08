@@ -47,9 +47,22 @@ def render(kind: ResourceKind, rid: str, name: str) -> list[TemplateFile]:
             TemplateFile("prompt.md", f"# {name}\n\nDescribe this agent's role and behavior.\n"),
         ]
     if kind == ResourceKind.SKILL:
+        # SKILL.md carries frontmatter so the Kimi CLI loads it as a real skill
+        # at runtime (it reads <workspace>/.sanad/skills/<slug>/SKILL.md, keying
+        # on the frontmatter name/description). `skill.yaml` is the blueprint's
+        # view of the same skill; the two live side by side.
+        slug = rid.split(":", 1)[1]
+        skill_md = (
+            f"---\n"
+            f"name: {slug}\n"
+            f"description: What this skill does and when the agent should use it.\n"
+            f"---\n\n"
+            f"# {name}\n\n"
+            f"Operational instructions for this skill.\n"
+        )
         return [
             TemplateFile("skill.yaml", _manifest(kind, rid, name, "  instructions: SKILL.md\n")),
-            TemplateFile("SKILL.md", f"# {name}\n\nOperational instructions for this skill.\n"),
+            TemplateFile("SKILL.md", skill_md),
         ]
     if kind == ResourceKind.TOOL:
         return [
