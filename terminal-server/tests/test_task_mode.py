@@ -166,7 +166,8 @@ def test_internal_routes_use_bearer_not_headers(tmp_path: Path):
             "/internal/workspace/tree", headers={"authorization": "Bearer derived-token"}
         )
         assert ok.status_code == 200
-        assert ok.json() == {"entries": []}
+        # Boot seeds an empty .sanad blueprint, so the tree is not empty.
+        assert any(e["name"] == ".sanad" for e in ok.json()["entries"])
 
         # keepalive is authenticated the same way
         assert client.post("/internal/workspace/keepalive").status_code == 401

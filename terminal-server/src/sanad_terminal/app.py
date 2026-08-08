@@ -95,6 +95,11 @@ def create_app(
                     pw = pwd.getpwnam(resolved.agent_user)
                     uid, gid = pw.pw_uid, pw.pw_gid
                 await GitRepo(root, uid=uid, gid=gid, home=root.parent / "home").ensure_repo()
+                # Seed an empty .sanad so the graph + Architect have a blueprint
+                # from the first boot (idempotent; never overwrites).
+                from sanad_terminal.blueprint_init import ensure_blueprint
+
+                ensure_blueprint(root)
         yield
         if idle_stopper:
             await idle_stopper.stop()
