@@ -9,6 +9,7 @@ import {
   GraphIcon,
 } from "../ui/icons";
 import { button, size, type } from "../ui/theme";
+import NotebookView from "./NotebookView";
 import {
   isTextEditable,
   previewKind,
@@ -318,6 +319,9 @@ export function FilePreview({
         }
         if (kind === "csv") {
           return <CsvTable content={state.content} />;
+        }
+        if (kind === "notebook") {
+          return <NotebookView content={state.content} />;
         }
         return <pre style={s.code}>{state.content}</pre>;
       }

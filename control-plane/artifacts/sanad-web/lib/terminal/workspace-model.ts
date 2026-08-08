@@ -12,25 +12,53 @@ export interface WsEntry {
 }
 
 export type FileKind =
-  | "folder"
-  | "image"
-  | "pdf"
-  | "zip"
-  | "code"
-  | "doc"
-  | "data"
-  | "file";
+  "folder" | "image" | "pdf" | "zip" | "code" | "doc" | "data" | "file";
 
 const EXT_KINDS: Record<string, FileKind> = {
-  png: "image", jpg: "image", jpeg: "image", gif: "image", webp: "image", svg: "image",
+  png: "image",
+  jpg: "image",
+  jpeg: "image",
+  gif: "image",
+  webp: "image",
+  svg: "image",
   pdf: "pdf",
-  zip: "zip", tar: "zip", gz: "zip", tgz: "zip",
-  md: "doc", mdx: "doc", txt: "doc", rst: "doc",
-  doc: "doc", docx: "doc", xls: "data", xlsx: "data", ppt: "doc", pptx: "doc",
-  json: "data", yaml: "data", yml: "data", csv: "data", toml: "data",
-  js: "code", jsx: "code", ts: "code", tsx: "code", py: "code", rs: "code",
-  go: "code", rb: "code", java: "code", c: "code", h: "code", cpp: "code",
-  sh: "code", bash: "code", zsh: "code", css: "code", html: "code", htm: "code",
+  zip: "zip",
+  tar: "zip",
+  gz: "zip",
+  tgz: "zip",
+  md: "doc",
+  mdx: "doc",
+  txt: "doc",
+  rst: "doc",
+  doc: "doc",
+  docx: "doc",
+  xls: "data",
+  xlsx: "data",
+  ppt: "doc",
+  pptx: "doc",
+  json: "data",
+  yaml: "data",
+  yml: "data",
+  csv: "data",
+  toml: "data",
+  js: "code",
+  jsx: "code",
+  ts: "code",
+  tsx: "code",
+  py: "code",
+  rs: "code",
+  go: "code",
+  rb: "code",
+  java: "code",
+  c: "code",
+  h: "code",
+  cpp: "code",
+  sh: "code",
+  bash: "code",
+  zsh: "code",
+  css: "code",
+  html: "code",
+  htm: "code",
   sql: "code",
 };
 
@@ -49,22 +77,51 @@ export type PreviewKind =
   | "code"
   | "json"
   | "csv"
+  | "notebook"
   | "image"
   | "pdf"
   | "binary";
 
 const CODE_EXTS = new Set([
-  "js", "jsx", "ts", "tsx", "py", "rs", "go", "rb", "java", "c", "h", "cpp",
-  "sh", "bash", "zsh", "css", "html", "htm", "sql", "toml", "yaml", "yml", "txt",
-  "env", "ini", "cfg", "log", "xml", "rst",
+  "js",
+  "jsx",
+  "ts",
+  "tsx",
+  "py",
+  "rs",
+  "go",
+  "rb",
+  "java",
+  "c",
+  "h",
+  "cpp",
+  "sh",
+  "bash",
+  "zsh",
+  "css",
+  "html",
+  "htm",
+  "sql",
+  "toml",
+  "yaml",
+  "yml",
+  "txt",
+  "env",
+  "ini",
+  "cfg",
+  "log",
+  "xml",
+  "rst",
 ]);
 
 export function previewKind(name: string): PreviewKind {
   const ext = extension(name);
   if (ext === "md" || ext === "mdx") return "markdown";
+  if (ext === "ipynb") return "notebook";
   if (ext === "json") return "json";
   if (ext === "csv") return "csv";
-  if (["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext)) return "image";
+  if (["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext))
+    return "image";
   if (ext === "pdf") return "pdf";
   if (CODE_EXTS.has(ext) || ext === "") return "code";
   return "binary";
@@ -125,7 +182,11 @@ export function buildTree(entries: WsEntry[]): TreeNode[] {
   }
   const sortLevel = (nodes: TreeNode[]): TreeNode[] => {
     nodes.sort((a, b) =>
-      a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "dir" ? -1 : 1
+      a.kind === b.kind
+        ? a.name.localeCompare(b.name)
+        : a.kind === "dir"
+          ? -1
+          : 1,
     );
     nodes.forEach((n) => sortLevel(n.children));
     return nodes;
@@ -141,14 +202,14 @@ export function buildTree(entries: WsEntry[]): TreeNode[] {
 export function detectArtifacts(
   entries: WsEntry[],
   sinceEpochSeconds: number,
-  limit = 12
+  limit = 12,
 ): WsEntry[] {
   return entries
     .filter(
       (e) =>
         e.kind === "file" &&
         e.mtime >= sinceEpochSeconds &&
-        !e.path.split("/").some((part) => part.startsWith("."))
+        !e.path.split("/").some((part) => part.startsWith(".")),
     )
     .sort((a, b) => b.mtime - a.mtime)
     .slice(0, limit);
