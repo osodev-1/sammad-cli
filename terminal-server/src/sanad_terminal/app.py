@@ -101,6 +101,9 @@ def create_app(
         from sanad_terminal.blueprint_events import shutdown_buses
 
         await shutdown_buses()
+        from sanad_terminal.architect_runner import shutdown_runners
+
+        await shutdown_runners()
         await manager.shutdown()
         await cp.aclose()
 
@@ -119,6 +122,9 @@ def create_app(
     from sanad_terminal.routes_git import router as git_router
 
     app.include_router(git_router)
+    from sanad_terminal.routes_architect import router as architect_router
+
+    app.include_router(architect_router)
     register_error_handlers(app)
 
     if idle_stopper is not None:
