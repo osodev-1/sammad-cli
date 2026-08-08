@@ -174,6 +174,19 @@ export interface TreeNode extends WsEntry {
   children: TreeNode[];
 }
 
+/**
+ * Every ancestor directory of a workspace path, outermost first. Used to reveal
+ * a just-written file in the tree — expanding these makes a freshly applied
+ * `.sanad/skills/<slug>/skill.yaml` visible without the user clicking down three
+ * collapsed levels. The file's own path is not an ancestor and is excluded.
+ */
+export function ancestorDirs(path: string): string[] {
+  const parts = path.split("/").filter(Boolean);
+  const out: string[] = [];
+  for (let i = 1; i < parts.length; i++) out.push(parts.slice(0, i).join("/"));
+  return out;
+}
+
 /** Shape the flat snapshot into a nested tree (dirs first, name-sorted). */
 export function buildTree(entries: WsEntry[]): TreeNode[] {
   const byPath = new Map<string, TreeNode>();

@@ -18,6 +18,7 @@ import {
 } from "../ui/icons";
 import { input, type } from "../ui/theme";
 import {
+  ancestorDirs,
   fileKind,
   isBrowserViewable,
   type FileKind,
@@ -35,6 +36,12 @@ interface Props {
   onRefresh: () => void;
   /** Perform a workspace mutation then refresh; errors surface as alerts. */
   onError: (message: string) => void;
+  /**
+   * Paths to reveal (expand their ancestor dirs) — a fresh array each time so a
+   * repeated reveal still fires. After an apply writes e.g. a new skill's
+   * manifests, this drills the tree open to them so they are visible at once.
+   */
+  revealPaths?: string[];
 }
 
 interface MenuState {
@@ -80,6 +87,7 @@ export default function FileTree({
   onOpenInBrowser,
   onRefresh,
   onError,
+  revealPaths,
 }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<string | null>(null);
@@ -89,6 +97,22 @@ export default function FileTree({
   const [dragOver, setDragOver] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const uploadDir = useRef<string>("");
+
+  /* Reveal just-written paths: expand each one's ancestor dirs so the files
+     show even when they land inside collapsed folders (e.g. `.sanad/skills`).
+     Keyed on the array's identity — the parent passes a fresh array per apply,
+     so re-revealing the same path fires again. */
+  useEffect(() => {
+    if (!revealPaths || revealPaths.length === 0) return;
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      for (const p of revealPaths) {
+        for (const dir of ancestorDirs(p)) next.add(dir);
+      }
+      return next;
+    });
+    setSelected(revealPaths[revealPaths.length - 1]);
+  }, [revealPaths]);
 
   useEffect(() => {
     if (!menu) return;

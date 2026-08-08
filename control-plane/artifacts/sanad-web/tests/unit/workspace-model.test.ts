@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  ancestorDirs,
   buildTree,
   detectArtifacts,
   fileKind,
@@ -70,6 +71,16 @@ describe("workspace model", () => {
     const tree = buildTree([entry("deep/child.txt", "file")]);
     expect(tree).toHaveLength(1);
     expect(tree[0].path).toBe("deep/child.txt");
+  });
+
+  it("lists a path's ancestor dirs outermost-first, excluding the file", () => {
+    expect(ancestorDirs(".sanad/skills/code-review/skill.yaml")).toEqual([
+      ".sanad",
+      ".sanad/skills",
+      ".sanad/skills/code-review",
+    ]);
+    expect(ancestorDirs("top.txt")).toEqual([]); // no ancestors
+    expect(ancestorDirs("a/b")).toEqual(["a"]);
   });
 
   it("detects session artifacts: recent files, newest first, no dotfiles", () => {

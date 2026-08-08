@@ -65,7 +65,8 @@ export default function ArchitectPanel({
 }: {
   sessionId?: string;
   visible: boolean;
-  onApplied?: () => void;
+  /** Called after a plan is applied, with the paths it wrote (to reveal them). */
+  onApplied?: (writtenPaths: string[]) => void;
 }) {
   const [phase, setPhase] = useState<
     "idle" | "starting" | "ready" | "streaming" | "error"
@@ -159,7 +160,7 @@ export default function ArchitectPanel({
         return next;
       });
       setReview(null);
-      onApplied?.();
+      onApplied?.(block.plan.operations.map((o) => o.path));
     } else {
       setApplyError(
         outcome.error?.message ?? "Apply failed — nothing was written.",

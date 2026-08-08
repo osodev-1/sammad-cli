@@ -227,6 +227,10 @@ export default function SessionWorkspace({
   const [graphFocus, setGraphFocus] = useState<string | null>(null);
   const openGraph = useCallback(() => setActive(GRAPH_TAB_ID), []);
 
+  /* Paths the file tree should reveal — set to a fresh array after each apply
+     so the FileTree re-runs its expand effect even for a repeated path. */
+  const [revealPaths, setRevealPaths] = useState<string[]>([]);
+
   const openFile = useCallback((path: string) => {
     const name = path.split("/").pop() ?? path;
     setFileTabs((prev) =>
@@ -236,6 +240,18 @@ export default function SessionWorkspace({
     // Opening a .sanad manifest also cross-focuses its graph node (GR-005).
     if (path.startsWith(".sanad/")) setGraphFocus(path);
   }, []);
+
+  /* A blueprint apply (from the graph's authoring menu or the Architect) just
+     wrote files to the machine — so the machine is definitely up. Force the
+     snapshot past any wake-backoff, and reveal the written paths in the tree so
+     they surface immediately instead of hiding in collapsed `.sanad` folders. */
+  const onBlueprintApplied = useCallback(
+    (writtenPaths: string[]) => {
+      void refresh(true);
+      setRevealPaths([...writtenPaths]);
+    },
+    [refresh],
+  );
 
   const viewTitle = (url: string): string => {
     if (/^https?:\/\//i.test(url)) {
@@ -375,7 +391,7 @@ export default function SessionWorkspace({
         <WorkspaceContextHeader
           projectName={projectName ?? "Workspace"}
           sessionId={sessionId}
-          onChanged={() => void refresh()}
+          onChanged={() => void refresh(true)}
         />
         <div style={s.treeScroll}>
           <FileTree
@@ -384,8 +400,9 @@ export default function SessionWorkspace({
             busy={polling}
             onOpenFile={openFile}
             onOpenInBrowser={openInBrowser}
-            onRefresh={() => void refresh()}
+            onRefresh={() => void refresh(true)}
             onError={setNotice}
+            revealPaths={revealPaths}
           />
         </div>
       </aside>
@@ -442,6 +459,7 @@ export default function SessionWorkspace({
                   sessionId={sessionId}
                   visible={graphActive}
                   onOpenFile={openFile}
+                  onApplied={onBlueprintApplied}
                   focusResourceId={graphFocus}
                   architectOpen={architectOpen}
                   onToggleArchitect={() => setArchitectOpen((v) => !v)}
@@ -453,7 +471,7 @@ export default function SessionWorkspace({
                 <ArchitectPanel
                   sessionId={sessionId}
                   visible={graphActive && architectOpen}
-                  onApplied={() => void refresh()}
+                  onApplied={onBlueprintApplied}
                 />
               </div>
             </div>

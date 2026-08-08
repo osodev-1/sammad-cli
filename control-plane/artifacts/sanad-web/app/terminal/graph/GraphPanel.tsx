@@ -45,6 +45,7 @@ export default function GraphPanel({
   sessionId,
   visible,
   onOpenFile,
+  onApplied,
   focusResourceId,
   architectOpen,
   onToggleArchitect,
@@ -52,6 +53,8 @@ export default function GraphPanel({
   sessionId?: string;
   visible: boolean;
   onOpenFile: (path: string) => void;
+  /** Called after a plan is applied, with the paths it wrote (to reveal them). */
+  onApplied?: (writtenPaths: string[]) => void;
   /** A resource id OR a .sanad manifest path to highlight (GR-005). */
   focusResourceId?: string | null;
   /** The Architect chat lives beside the graph — this toggles it (M3c). */
@@ -256,17 +259,19 @@ export default function GraphPanel({
     if (!pendingPlan) return;
     setApplyBusy(true);
     setApplyError(null);
+    const paths = pendingPlan.operations.map((o) => o.path);
     const outcome = await applyPlan(pendingPlan, sessionId);
     setApplyBusy(false);
     if (outcome.graph) {
       setGraph(outcome.graph);
       setPendingPlan(null);
+      onApplied?.(paths);
     } else {
       setApplyError(
         outcome.error?.message ?? "Apply failed — nothing was written.",
       );
     }
-  }, [pendingPlan, sessionId]);
+  }, [pendingPlan, sessionId, onApplied]);
 
   const cancelPending = useCallback(() => {
     setPendingPlan(null);
