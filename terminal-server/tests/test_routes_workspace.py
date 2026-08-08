@@ -137,3 +137,29 @@ def test_error_mapping(client: TestClient):
 
     res = client.delete("/internal/workspace/file", params={"path": ""}, headers=HEADERS)
     assert res.status_code == 400
+
+
+def test_archive_list_endpoint(client: TestClient):
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("a.txt", "hi")
+        zf.writestr("sub/b.txt", "there")
+    client.put("/internal/workspace/file?path=bundle.zip", headers=HEADERS, content=buf.getvalue())
+
+    res = client.get("/internal/workspace/archive-list?path=bundle.zip", headers=HEADERS)
+    assert res.status_code == 200, res.text
+    names = {e["name"] for e in res.json()["entries"]}
+    assert {"a.txt", "sub/b.txt"} <= names
+
+    # A non-archive file is refused with 415, not a 500.
+    client.put("/internal/workspace/file?path=plain.txt", headers=HEADERS, content=b"nope")
+    bad = client.get("/internal/workspace/archive-list?path=plain.txt", headers=HEADERS)
+    assert bad.status_code == 415
+    assert bad.json()["error"]["code"] == "unsupported_archive"
+
+
+def test_archive_list_requires_credentials(client: TestClient):
+    assert client.get("/internal/workspace/archive-list?path=x.zip").status_code == 401

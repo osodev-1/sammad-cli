@@ -78,9 +78,19 @@ export type PreviewKind =
   | "json"
   | "csv"
   | "notebook"
+  | "archive"
   | "image"
   | "pdf"
   | "binary";
+
+/** zip/tar family — .gz/.bz2/.xz only count when they wrap a tar. */
+export function isArchiveName(name: string): boolean {
+  const ext = extension(name);
+  if (["zip", "tar", "tgz", "tbz", "tbz2", "txz"].includes(ext)) return true;
+  if (["gz", "bz2", "xz"].includes(ext))
+    return name.toLowerCase().includes(".tar.");
+  return false;
+}
 
 const CODE_EXTS = new Set([
   "js",
@@ -123,6 +133,7 @@ export function previewKind(name: string): PreviewKind {
   if (["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext))
     return "image";
   if (ext === "pdf") return "pdf";
+  if (isArchiveName(name)) return "archive";
   if (CODE_EXTS.has(ext) || ext === "") return "code";
   return "binary";
 }

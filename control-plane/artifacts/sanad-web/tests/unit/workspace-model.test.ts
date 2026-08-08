@@ -9,7 +9,12 @@ import {
   type WsEntry,
 } from "@/lib/terminal/workspace-model";
 
-const entry = (path: string, kind: "dir" | "file", mtime = 0, size = 10): WsEntry => ({
+const entry = (
+  path: string,
+  kind: "dir" | "file",
+  mtime = 0,
+  size = 10,
+): WsEntry => ({
   name: path.split("/").pop() ?? path,
   path,
   kind,
@@ -36,10 +41,16 @@ describe("workspace model", () => {
     expect(previewKind("pic.jpeg")).toBe("image");
     expect(previewKind("doc.pdf")).toBe("pdf");
     expect(previewKind("main.py")).toBe("code");
-    expect(previewKind("archive.zip")).toBe("binary");
+    expect(previewKind("notes.ipynb")).toBe("notebook");
+    expect(previewKind("archive.zip")).toBe("archive");
+    expect(previewKind("bundle.tar.gz")).toBe("archive");
+    expect(previewKind("data.tgz")).toBe("archive");
+    expect(previewKind("solo.gz")).toBe("binary"); // a bare .gz is not a tar
     expect(previewKind("Makefile")).toBe("code"); // no extension → text
     expect(isTextEditable("notes.md")).toBe(true);
     expect(isTextEditable("photo.png")).toBe(false);
+    expect(isTextEditable("archive.zip")).toBe(false);
+    expect(isTextEditable("notes.ipynb")).toBe(false); // structured, read-only
   });
 
   it("builds a nested tree, dirs first, name-sorted", () => {
@@ -70,9 +81,12 @@ describe("workspace model", () => {
         entry(".hidden/secret.txt", "file", 500),
         entry("dir-recent", "dir", 500),
       ],
-      200
+      200,
     );
-    expect(artifacts.map((a) => a.path)).toEqual(["newer.pdf", "new-report.md"]);
+    expect(artifacts.map((a) => a.path)).toEqual([
+      "newer.pdf",
+      "new-report.md",
+    ]);
   });
 
   it("formats byte counts", () => {
@@ -84,7 +98,8 @@ describe("workspace model", () => {
 
 describe("browser view helpers", () => {
   it("identifies browser-viewable files", async () => {
-    const { isBrowserViewable } = await import("@/lib/terminal/workspace-model");
+    const { isBrowserViewable } =
+      await import("@/lib/terminal/workspace-model");
     expect(isBrowserViewable("index.html")).toBe(true);
     expect(isBrowserViewable("legacy.htm")).toBe(true);
     expect(isBrowserViewable("logo.svg")).toBe(true);
@@ -94,9 +109,17 @@ describe("browser view helpers", () => {
 
   it("builds preview URLs with per-segment encoding; passes absolute URLs through", async () => {
     const { previewUrl } = await import("@/lib/terminal/workspace-model");
-    expect(previewUrl("site/index.html")).toBe("/api/workspace/preview/site/index.html");
-    expect(previewUrl("my site/a b.html")).toBe("/api/workspace/preview/my%20site/a%20b.html");
-    expect(previewUrl("/leading/slash.html")).toBe("/api/workspace/preview/leading/slash.html");
-    expect(previewUrl("https://x.example:3000/app")).toBe("https://x.example:3000/app");
+    expect(previewUrl("site/index.html")).toBe(
+      "/api/workspace/preview/site/index.html",
+    );
+    expect(previewUrl("my site/a b.html")).toBe(
+      "/api/workspace/preview/my%20site/a%20b.html",
+    );
+    expect(previewUrl("/leading/slash.html")).toBe(
+      "/api/workspace/preview/leading/slash.html",
+    );
+    expect(previewUrl("https://x.example:3000/app")).toBe(
+      "https://x.example:3000/app",
+    );
   });
 });

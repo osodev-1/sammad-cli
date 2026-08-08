@@ -115,6 +115,21 @@ async def read_file(root: Root, path: str) -> Response:
     )
 
 
+@router.get("/archive-list")
+async def archive_list(root: Root, path: str) -> JSONResponse:
+    """List a zip/tar archive's members without extracting (read-only viewer)."""
+    try:
+        entries, truncated = wfs.archive_list(root, path)
+    except wfs.UnsupportedArchive:
+        return _error(415, "unsupported_archive", "This file could not be read as an archive.")
+    return JSONResponse(
+        {
+            "entries": [{"name": e.name, "size": e.size, "isDir": e.is_dir} for e in entries],
+            "truncated": truncated,
+        }
+    )
+
+
 @router.put("/file")
 async def write_file(root: Root, path: str, request: Request) -> JSONResponse:
     settings = _settings(request)

@@ -10,6 +10,7 @@ import {
 } from "../ui/icons";
 import { button, size, type } from "../ui/theme";
 import NotebookView from "./NotebookView";
+import ArchiveView from "./ArchiveView";
 import {
   isTextEditable,
   previewKind,
@@ -160,6 +161,7 @@ type LoadState =
   | { tag: "loading" }
   | { tag: "text"; content: string }
   | { tag: "blob"; url: string; sizeLabel: string }
+  | { tag: "archive" }
   | { tag: "error"; message: string };
 
 export function FilePreview({
@@ -193,6 +195,11 @@ export function FilePreview({
     setRendered(null);
 
     (async () => {
+      // Archives are listed, not downloaded — ArchiveView fetches its members.
+      if (kind === "archive") {
+        setState({ tag: "archive" });
+        return;
+      }
       const res = await fetch(fileUrl);
       if (cancelled) return;
       if (!res.ok) {
@@ -261,6 +268,8 @@ export function FilePreview({
         return <p style={s.meta}>Opening…</p>;
       case "error":
         return <p style={s.meta}>{state.message}</p>;
+      case "archive":
+        return <ArchiveView path={path} sessionId={sessionId} />;
       case "blob":
         if (kind === "image") {
           return <img src={state.url} alt={name} style={s.image} />;
@@ -326,7 +335,18 @@ export function FilePreview({
         return <pre style={s.code}>{state.content}</pre>;
       }
     }
-  }, [state, editing, draft, rendered, kind, name, fileUrl, save]);
+  }, [
+    state,
+    editing,
+    draft,
+    rendered,
+    kind,
+    name,
+    fileUrl,
+    save,
+    path,
+    sessionId,
+  ]);
 
   return (
     <div style={s.previewWrap}>

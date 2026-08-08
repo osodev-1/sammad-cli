@@ -157,3 +157,44 @@ def test_zip_skips_symlinks(root: Path, tmp_path: Path):
     with zipfile.ZipFile(io.BytesIO(spool.read())) as zf:
         assert zf.namelist() == ["docs/readme.md"]
     spool.close()
+
+
+# -- archive_list: list zip/tar members without extracting ---------------------
+
+
+def test_archive_list_zip(root: Path):
+    p = root / "bundle.zip"
+    with zipfile.ZipFile(p, "w") as zf:
+        zf.writestr("a.txt", "hello")
+        zf.writestr("dir/b.txt", "world!")
+    entries, truncated = wfs.archive_list(root, "bundle.zip")
+    assert not truncated
+    by_name = {e.name: e for e in entries}
+    assert "a.txt" in by_name and by_name["a.txt"].size == 5 and not by_name["a.txt"].is_dir
+    assert "dir/b.txt" in by_name and by_name["dir/b.txt"].size == 6
+
+
+def test_archive_list_targz(root: Path):
+    import io
+    import tarfile
+
+    data = b"hello world"
+    with tarfile.open(root / "bundle.tar.gz", "w:gz") as tf:
+        info = tarfile.TarInfo("x.txt")
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+    entries, _ = wfs.archive_list(root, "bundle.tar.gz")
+    assert any(e.name == "x.txt" and e.size == len(data) for e in entries)
+
+
+def test_archive_list_truncates(root: Path):
+    with zipfile.ZipFile(root / "many.zip", "w") as zf:
+        for i in range(5):
+            zf.writestr(f"f{i}.txt", "x")
+    entries, truncated = wfs.archive_list(root, "many.zip", max_entries=3)
+    assert truncated and len(entries) == 3
+
+
+def test_archive_list_rejects_non_archive(root: Path):
+    with pytest.raises(wfs.UnsupportedArchive):
+        wfs.archive_list(root, "main.py")

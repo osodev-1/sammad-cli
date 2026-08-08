@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
+import tarfile
 import tempfile
 import zipfile
 from dataclasses import dataclass
@@ -37,6 +38,10 @@ class NotFound(Exception):
 
 class AlreadyExists(Exception):
     pass
+
+
+class UnsupportedArchive(Exception):
+    """The file is not a zip or tar archive we can list."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +117,62 @@ def file_for_read(root: Path, rel: str) -> Path:
     if not target.is_file():
         raise NotFound(rel)
     return target
+
+
+ARCHIVE_MAX_ENTRIES = 2000
+
+
+@dataclass(frozen=True, slots=True)
+class ArchiveEntry:
+    name: str  # path inside the archive (POSIX, as stored)
+    size: int
+    is_dir: bool
+
+
+def archive_list(
+    root: Path, rel: str, *, max_entries: int = ARCHIVE_MAX_ENTRIES
+) -> tuple[list[ArchiveEntry], bool]:
+    """List a zip/tar archive's members WITHOUT extracting. Returns
+    (entries, truncated). Listing is read-only, so zip-slip/tar traversal in
+    member names is harmless — names are surfaced as strings, never as paths."""
+    target = file_for_read(root, rel)
+    try:
+        if zipfile.is_zipfile(target):
+            with zipfile.ZipFile(target) as zf:
+                infos = zf.infolist()
+                truncated = len(infos) > max_entries
+                entries = [
+                    ArchiveEntry(name=i.filename, size=i.file_size, is_dir=i.is_dir())
+                    for i in infos[:max_entries]
+                ]
+            return _sorted_archive(entries), truncated
+
+        if tarfile.is_tarfile(target):
+            entries = []
+            truncated = False
+            # Stream members (never getmembers() — a crafted tar could be huge).
+            with tarfile.open(target, "r:*") as tf:
+                for member in tf:
+                    if len(entries) >= max_entries:
+                        truncated = True
+                        break
+                    entries.append(
+                        ArchiveEntry(
+                            name=member.name,
+                            size=member.size if member.isreg() else 0,
+                            is_dir=member.isdir(),
+                        )
+                    )
+            return _sorted_archive(entries), truncated
+    except (zipfile.BadZipFile, tarfile.TarError, OSError, EOFError) as exc:
+        # Passed the magic check but is truncated/corrupt — unlistable either way.
+        raise UnsupportedArchive(rel) from exc
+
+    raise UnsupportedArchive(rel)
+
+
+def _sorted_archive(entries: list[ArchiveEntry]) -> list[ArchiveEntry]:
+    return sorted(entries, key=lambda e: e.name.lower())
 
 
 def write_file(root: Path, rel: str, content: bytes) -> Entry:
