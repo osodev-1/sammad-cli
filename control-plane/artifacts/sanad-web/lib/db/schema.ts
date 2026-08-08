@@ -135,8 +135,10 @@ export const usageEvents = pgTable("usage_events", {
   cliSessionId: text("cli_session_id"),
   // Attribution: the workspace project this consumption belongs to, resolved
   // from the runtime token's owning cli-session. Null for non-workspace usage
-  // (e.g. a locally installed CLI logged in via the device flow). Indexed for
-  // per-project usage rollups (see migration 0005).
+  // (e.g. a locally installed CLI logged in via the device flow). A supporting
+  // index is deferred until a per-project usage view needs it — it must then be
+  // built CREATE INDEX CONCURRENTLY (out of a migration txn) so it never locks
+  // this hot, continuously-written table.
   projectId: text("project_id"),
   modelAlias: text("model_alias").notNull(),
   tokensIn: integer("tokens_in").notNull().default(0),
