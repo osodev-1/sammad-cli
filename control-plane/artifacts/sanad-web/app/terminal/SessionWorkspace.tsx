@@ -7,7 +7,6 @@ import BrowserPanel from "./BrowserPanel";
 import FileTree from "./FileTree";
 import TerminalPanel, { type TerminalPhase } from "./TerminalPanel";
 import {
-  ARCHITECT_TAB_ID,
   FilePreview,
   GRAPH_TAB_ID,
   TabsBar,
@@ -218,8 +217,9 @@ export default function SessionWorkspace({
   const isTerminalActive = terminals.some((t) => t.id === active);
   const activeView = viewTabs.find((v) => v.id === active) ?? null;
   const graphActive = active === GRAPH_TAB_ID;
-  const architectActive = active === ARCHITECT_TAB_ID;
-  const openArchitect = useCallback(() => setActive(ARCHITECT_TAB_ID), []);
+  /* The Architect chat is a pane WITHIN the Blueprint tab (it edits the graph,
+     so the graph stays in view), toggled open/closed rather than a tab. */
+  const [architectOpen, setArchitectOpen] = useState(false);
 
   /* Cross-focus: selecting a .sanad manifest file in the tree highlights its
      node when the graph is open. The id convention mirrors the kernel's:
@@ -350,7 +350,6 @@ export default function SessionWorkspace({
     });
     setActive((current) =>
       current === GRAPH_TAB_ID ||
-      current === ARCHITECT_TAB_ID ||
       terminals.some((t) => t.id === current) ||
       viewTabs.some((v) => v.id === current) ||
       known.has(current)
@@ -403,7 +402,6 @@ export default function SessionWorkspace({
           onCloseView={closeView}
           onNewTerminal={addTerminal}
           onOpenGraph={openGraph}
-          onOpenArchitect={openArchitect}
         />
         <div style={s.panelArea}>
           {/* Terminals stay MOUNTED across tab switches — hidden, never unmounted.
@@ -432,30 +430,37 @@ export default function SessionWorkspace({
               onNavigate={(u) => navigateView(activeView.id, u)}
             />
           )}
-          {/* Kept mounted while hidden so its poll + layout survive tab switches. */}
+          {/* Blueprint pane: the graph and the Architect chat side by side.
+              The architect edits the blueprint, so the graph stays in view;
+              the chat is a collapsible pane, not a separate tab (M3c). Kept
+              mounted while hidden so both survive tab switches, and the
+              architect keeps its conversation when collapsed. */}
           <div style={graphActive ? s.graphPane : s.paneHidden}>
-            <GraphPanel
-              sessionId={sessionId}
-              visible={graphActive}
-              onOpenFile={openFile}
-              focusResourceId={graphFocus}
-            />
+            <div style={s.blueprintSplit}>
+              <div style={s.blueprintGraph}>
+                <GraphPanel
+                  sessionId={sessionId}
+                  visible={graphActive}
+                  onOpenFile={openFile}
+                  focusResourceId={graphFocus}
+                  architectOpen={architectOpen}
+                  onToggleArchitect={() => setArchitectOpen((v) => !v)}
+                />
+              </div>
+              <div
+                style={architectOpen ? s.blueprintArchitect : s.architectHidden}
+              >
+                <ArchitectPanel
+                  sessionId={sessionId}
+                  visible={graphActive && architectOpen}
+                  onApplied={() => void refresh()}
+                />
+              </div>
+            </div>
           </div>
-          {/* Kept mounted so the conversation survives tab switches. */}
-          <div style={architectActive ? s.graphPane : s.paneHidden}>
-            <ArchitectPanel
-              sessionId={sessionId}
-              visible={architectActive}
-              onApplied={() => void refresh()}
-            />
-          </div>
-          {!isTerminalActive &&
-            !activeView &&
-            !graphActive &&
-            !architectActive &&
-            active && (
-              <FilePreview key={active} path={active} sessionId={sessionId} />
-            )}
+          {!isTerminalActive && !activeView && !graphActive && active && (
+            <FilePreview key={active} path={active} sessionId={sessionId} />
+          )}
         </div>
         <div style={s.drawer}>
           <button type="button" style={s.drawerBar} onClick={toggleDrawer}>
@@ -525,6 +530,15 @@ const s: Record<string, CSSProperties> = {
     display: "flex",
     flexDirection: "column",
   },
+  blueprintSplit: { flex: 1, minHeight: 0, display: "flex" },
+  blueprintGraph: { flex: 1, minWidth: 0, display: "flex" },
+  blueprintArchitect: {
+    width: "400px",
+    minWidth: "320px",
+    display: "flex",
+    borderLeft: "1px solid var(--rule-strong)",
+  },
+  architectHidden: { display: "none" },
   terminalPane: {
     flex: 1,
     minHeight: 0,

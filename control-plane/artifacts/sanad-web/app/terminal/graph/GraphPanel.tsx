@@ -46,12 +46,17 @@ export default function GraphPanel({
   visible,
   onOpenFile,
   focusResourceId,
+  architectOpen,
+  onToggleArchitect,
 }: {
   sessionId?: string;
   visible: boolean;
   onOpenFile: (path: string) => void;
   /** A resource id OR a .sanad manifest path to highlight (GR-005). */
   focusResourceId?: string | null;
+  /** The Architect chat lives beside the graph — this toggles it (M3c). */
+  architectOpen?: boolean;
+  onToggleArchitect?: () => void;
 }) {
   const [graph, setGraph] = useState<BlueprintGraph | null>(null);
   const [loading, setLoading] = useState(true);
@@ -302,6 +307,18 @@ export default function GraphPanel({
                 }
               >
                 + New
+              </button>
+            )}
+            {onToggleArchitect && (
+              <button
+                style={{
+                  ...s.newBtn,
+                  ...(architectOpen ? s.newBtnActive : null),
+                }}
+                onClick={onToggleArchitect}
+                title="Ask the Architect to propose changes to this blueprint"
+              >
+                Architect
               </button>
             )}
           </div>
