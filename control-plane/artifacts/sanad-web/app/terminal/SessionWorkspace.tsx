@@ -7,6 +7,7 @@ import BrowserPanel from "./BrowserPanel";
 import FileTree from "./FileTree";
 import TerminalPanel, { type TerminalPhase } from "./TerminalPanel";
 import {
+  ARCHITECT_TAB_ID,
   FilePreview,
   GRAPH_TAB_ID,
   TabsBar,
@@ -15,6 +16,7 @@ import {
   type WorkspaceTab,
 } from "./tabs";
 import GraphPanel from "./graph/GraphPanel";
+import ArchitectPanel from "./architect/ArchitectPanel";
 import WorkspaceContextHeader from "./WorkspaceContextHeader";
 import {
   buildTree,
@@ -216,6 +218,8 @@ export default function SessionWorkspace({
   const isTerminalActive = terminals.some((t) => t.id === active);
   const activeView = viewTabs.find((v) => v.id === active) ?? null;
   const graphActive = active === GRAPH_TAB_ID;
+  const architectActive = active === ARCHITECT_TAB_ID;
+  const openArchitect = useCallback(() => setActive(ARCHITECT_TAB_ID), []);
 
   /* Cross-focus: selecting a .sanad manifest file in the tree highlights its
      node when the graph is open. The id convention mirrors the kernel's:
@@ -346,6 +350,7 @@ export default function SessionWorkspace({
     });
     setActive((current) =>
       current === GRAPH_TAB_ID ||
+      current === ARCHITECT_TAB_ID ||
       terminals.some((t) => t.id === current) ||
       viewTabs.some((v) => v.id === current) ||
       known.has(current)
@@ -398,6 +403,7 @@ export default function SessionWorkspace({
           onCloseView={closeView}
           onNewTerminal={addTerminal}
           onOpenGraph={openGraph}
+          onOpenArchitect={openArchitect}
         />
         <div style={s.panelArea}>
           {/* Terminals stay MOUNTED across tab switches — hidden, never unmounted.
@@ -435,9 +441,21 @@ export default function SessionWorkspace({
               focusResourceId={graphFocus}
             />
           </div>
-          {!isTerminalActive && !activeView && !graphActive && active && (
-            <FilePreview key={active} path={active} sessionId={sessionId} />
-          )}
+          {/* Kept mounted so the conversation survives tab switches. */}
+          <div style={architectActive ? s.graphPane : s.paneHidden}>
+            <ArchitectPanel
+              sessionId={sessionId}
+              visible={architectActive}
+              onApplied={() => void refresh()}
+            />
+          </div>
+          {!isTerminalActive &&
+            !activeView &&
+            !graphActive &&
+            !architectActive &&
+            active && (
+              <FilePreview key={active} path={active} sessionId={sessionId} />
+            )}
         </div>
         <div style={s.drawer}>
           <button type="button" style={s.drawerBar} onClick={toggleDrawer}>

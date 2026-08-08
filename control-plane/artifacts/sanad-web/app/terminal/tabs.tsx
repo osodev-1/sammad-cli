@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import {
+  BoltIcon,
   CrossOutlineIcon,
   DownloadIcon,
   GlobeIcon,
@@ -18,6 +19,8 @@ import { withSession } from "@/lib/terminal/workspace-model";
 
 /** The Blueprint graph is a singleton tab with a fixed active id. */
 export const GRAPH_TAB_ID = "graph";
+/** The Architect chat is likewise a singleton tab. */
+export const ARCHITECT_TAB_ID = "architect";
 
 /* ------------------------------------------------------------- tabs bar --- */
 
@@ -49,6 +52,7 @@ export function TabsBar({
   onCloseView,
   onNewTerminal,
   onOpenGraph,
+  onOpenArchitect,
 }: {
   terminals: TerminalTabInfo[];
   viewTabs: BrowserTab[];
@@ -61,6 +65,7 @@ export function TabsBar({
   onCloseView: (id: string) => void;
   onNewTerminal: () => void;
   onOpenGraph: () => void;
+  onOpenArchitect: () => void;
 }) {
   return (
     <div style={s.tabsBar}>
@@ -80,6 +85,12 @@ export function TabsBar({
         icon={<GraphIcon size={12} strokeWidth={1.8} />}
         active={active === GRAPH_TAB_ID}
         onSelect={onOpenGraph}
+      />
+      <Tab
+        label="Architect"
+        icon={<BoltIcon size={12} strokeWidth={1.8} />}
+        active={active === ARCHITECT_TAB_ID}
+        onSelect={onOpenArchitect}
       />
       {canAddTerminal && (
         <button
