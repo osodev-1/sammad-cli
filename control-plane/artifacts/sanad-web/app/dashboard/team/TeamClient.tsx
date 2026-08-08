@@ -78,8 +78,8 @@ export default function TeamClient({
         prev.map((m) =>
           m.membershipId === member.membershipId
             ? { ...m, seatAssigned: data.seatAssigned }
-            : m
-        )
+            : m,
+        ),
       );
     } catch {
       setError("Network error. Please try again.");
@@ -131,6 +131,7 @@ export default function TeamClient({
         links={[
           { href: "/terminal", label: "Workspace", badge: "beta" },
           { href: "/dashboard", label: "Dashboard", compactHidden: true },
+          { href: "/usage", label: "Usage", compactHidden: true },
         ]}
         planBadge={plan}
       />
@@ -300,7 +301,11 @@ const s: Record<string, CSSProperties> = {
   },
   inviteForm: { display: "flex", gap: "0.75rem", alignItems: "center" },
   input: { ...input, flex: 1, minWidth: 0 },
-  hint: { margin: "0.75rem 0 0", color: "var(--ink-muted)", fontSize: "0.8rem" },
+  hint: {
+    margin: "0.75rem 0 0",
+    color: "var(--ink-muted)",
+    fontSize: "0.8rem",
+  },
   list: { borderTop: "1px solid var(--rule)" },
   row: {
     display: "flex",

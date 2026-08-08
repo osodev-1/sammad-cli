@@ -19,6 +19,7 @@ export default function HomePage() {
           { href: "/terminal", label: "Workspace", badge: "beta" },
           { href: "/pricing", label: "Pricing" },
           { href: "/dashboard", label: "Dashboard" },
+          { href: "/usage", label: "Usage" },
         ]}
       />
 

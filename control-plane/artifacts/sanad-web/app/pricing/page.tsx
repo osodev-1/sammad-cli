@@ -78,7 +78,9 @@ export default async function PricingPage() {
     const [sub] = await db
       .select()
       .from(subscriptions)
-      .where(and(eq(subscriptions.orgId, orgId), eq(subscriptions.status, "active")))
+      .where(
+        and(eq(subscriptions.orgId, orgId), eq(subscriptions.status, "active")),
+      )
       .limit(1);
     currentPlan = sub?.plan;
   }
@@ -89,6 +91,7 @@ export default async function PricingPage() {
         links={[
           { href: "/terminal", label: "Workspace", badge: "beta" },
           { href: "/dashboard", label: "Dashboard" },
+          { href: "/usage", label: "Usage" },
         ]}
       />
 
@@ -163,7 +166,11 @@ const styles: Record<string, CSSProperties> = {
     width: "100%",
   },
   eyebrow: { ...type.eyebrow, marginBottom: "1.5rem" },
-  h1: { ...type.display, fontSize: "clamp(1.9rem, 4.2vw, 3rem)", marginBottom: "1rem" },
+  h1: {
+    ...type.display,
+    fontSize: "clamp(1.9rem, 4.2vw, 3rem)",
+    marginBottom: "1rem",
+  },
   sub: {
     ...type.lead,
     margin: "0 auto 4rem",

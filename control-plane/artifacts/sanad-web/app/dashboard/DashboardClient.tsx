@@ -171,6 +171,7 @@ export default function DashboardClient({
       <Nav
         links={[
           { href: "/terminal", label: "Workspace", badge: "beta" },
+          { href: "/usage", label: "Usage", compactHidden: true },
           { href: "/pricing", label: "Pricing", compactHidden: true },
         ]}
         planBadge={plan}
@@ -289,7 +290,8 @@ export default function DashboardClient({
           {usageByModel.length === 0 ? (
             <p style={s.empty}>
               No usage yet — run{" "}
-              <code style={s.inlineCode}>sanad run &quot;…&quot;</code> to start.
+              <code style={s.inlineCode}>sanad run &quot;…&quot;</code> to
+              start.
             </p>
           ) : (
             <table style={s.table}>
@@ -384,7 +386,11 @@ export default function DashboardClient({
           ) : (
             <div style={s.sessionList}>
               {sessions.map((session) => (
-                <div key={session.id} className="row-stack" style={s.sessionRow}>
+                <div
+                  key={session.id}
+                  className="row-stack"
+                  style={s.sessionRow}
+                >
                   <div style={s.sessionInfo}>
                     <span style={s.sessionLabel}>{session.deviceLabel}</span>
                     <span style={s.sessionMeta}>
@@ -627,7 +633,11 @@ const s: Record<string, CSSProperties> = {
     color: "var(--ink-soft)",
     borderBottom: "1px solid var(--rule)",
   },
-  model: { fontFamily: "var(--font-mono)", fontSize: "0.8rem", color: "var(--ink)" },
+  model: {
+    fontFamily: "var(--font-mono)",
+    fontSize: "0.8rem",
+    color: "var(--ink)",
+  },
   sessionList: { borderTop: "1px solid var(--rule)" },
   sessionRow: {
     display: "flex",
@@ -647,5 +657,9 @@ const s: Record<string, CSSProperties> = {
     padding: "2.5rem",
     textAlign: "center",
   },
-  hint: { margin: "0.4rem 0 0", color: "var(--ink-muted)", fontSize: "0.85rem" },
+  hint: {
+    margin: "0.4rem 0 0",
+    color: "var(--ink-muted)",
+    fontSize: "0.85rem",
+  },
 };
