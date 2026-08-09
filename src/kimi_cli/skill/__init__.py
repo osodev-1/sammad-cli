@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import sys
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -424,6 +427,43 @@ class Skill(BaseModel):
     model can tell user-scope from project-scope skills."""
 
 
+def _sanad_trust_gate(skills_dir: KaosPath) -> frozenset[str] | None:
+    """The S9 trust gate for `.sanad` skill roots; ``None`` when it doesn't apply.
+
+    Governed workspaces (sanadcode.com machines) set ``SANAD_BLUEPRINT_TRUST``
+    to the machine's trust store — a JSON file recording the sha256 of every
+    human-reviewed executable definition (reviewed either in the apply modal or
+    via the one-time UI trust review). With the env set, skills under any
+    ``.sanad`` root load only when their SKILL.md's raw bytes hash to a trusted
+    digest; unreviewed content (agent-written, git-pulled) stays out of the
+    system prompt until someone reads it.
+
+    Local CLIs never set the env, so their discovery is unchanged. An unreadable
+    store fails CLOSED (empty set → nothing gated loads) rather than open.
+    """
+    trust_path = os.environ.get("SANAD_BLUEPRINT_TRUST")
+    if not trust_path:
+        return None
+    if ".sanad" not in Path(str(skills_dir)).parts:
+        return None
+    try:
+        data: object = json.loads(Path(trust_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return frozenset()
+    if not isinstance(data, dict):
+        return frozenset()
+    entries: object = cast("dict[str, object]", data).get("entries")
+    if not isinstance(entries, dict):
+        return frozenset()
+    hashes: set[str] = set()
+    for value in cast("dict[str, object]", entries).values():
+        if isinstance(value, dict):
+            digest: object = cast("dict[str, object]", value).get("sha256")
+            if isinstance(digest, str):
+                hashes.add(digest)
+    return frozenset(hashes)
+
+
 async def discover_skills(
     skills_dir: KaosPath,
     *,
@@ -458,6 +498,8 @@ async def discover_skills(
         return []
 
     skills_by_name: dict[str, Skill] = {}
+    # S9: trusted content hashes when this root is gated; None = gate off.
+    trusted = _sanad_trust_gate(skills_dir)
 
     # Pass 1: subdirectory form (canonical).
     try:
@@ -468,12 +510,21 @@ async def discover_skills(
                 skill_md = entry / "SKILL.md"
                 if not await skill_md.is_file():
                     continue
-                content = await skill_md.read_text(encoding="utf-8")
-            except OSError as exc:
+                # Raw bytes so the trust hash matches the store's file hash
+                # byte-for-byte (read_text would translate newlines).
+                raw = await skill_md.read_bytes()
+                content = raw.decode("utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
                 logger.info(
                     "Skipping unreadable skill entry {path}: {error}",
                     path=entry,
                     error=exc,
+                )
+                continue
+            if trusted is not None and hashlib.sha256(raw).hexdigest() not in trusted:
+                logger.info(
+                    "Skipping untrusted .sanad skill at {path} (not yet reviewed)",
+                    path=skill_md,
                 )
                 continue
             try:
@@ -513,7 +564,8 @@ async def discover_skills(
                 continue
 
             try:
-                content = await entry.read_text(encoding="utf-8")
+                raw = await entry.read_bytes()
+                content = raw.decode("utf-8")
                 skill = parse_skill_text(
                     content,
                     dir_path=skills_dir,
@@ -523,6 +575,12 @@ async def discover_skills(
                 )
             except Exception as exc:
                 logger.info("Skipping invalid flat skill at {}: {}", entry, exc)
+                continue
+            if trusted is not None and hashlib.sha256(raw).hexdigest() not in trusted:
+                logger.info(
+                    "Skipping untrusted .sanad skill at {path} (not yet reviewed)",
+                    path=entry,
+                )
                 continue
 
             key = normalize_skill_name(skill.name)

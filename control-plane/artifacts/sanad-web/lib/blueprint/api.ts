@@ -79,6 +79,33 @@ export interface ApplyOutcome {
   error?: { code?: string; message?: string };
 }
 
+/**
+ * S9 manual trust review: approve an executable definition at its current
+ * content so new agent sessions load it. Returns ok or an error message.
+ */
+export async function reviewTrust(
+  path: string,
+  sessionId?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(withSession("/api/blueprint/trust", sessionId), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      return {
+        ok: false,
+        error: body?.error?.message ?? "Could not record the review",
+      };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "Network error" };
+  }
+}
+
 /** Apply an approved plan; returns the fresh graph. */
 export async function applyPlan(
   plan: ChangePlan,

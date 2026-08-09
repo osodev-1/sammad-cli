@@ -57,6 +57,8 @@ def test_child_env_exact_and_leak_free(tmp_path: Path, monkeypatch):
         "KIMI_CLI_NO_AUTO_UPDATE": "1",
         "SANAD_API_BASE_URL": "https://cp.test",
         "SANAD_SESSION_TOKEN": "sess_abc",
+        # S9: points the CLI's skill gate at the machine's trust store.
+        "SANAD_BLUEPRINT_TRUST": str(user_dir / "blueprint-trust.json"),
     }
 
 

@@ -16,7 +16,7 @@ import asyncio
 import json
 import uuid
 from dataclasses import asdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
@@ -37,6 +37,12 @@ from sanad_blueprint.transaction import (
 )
 from sanad_blueprint.validate import validate_index
 
+from sanad_terminal.blueprint_trust import (
+    file_sha256,
+    is_executable_path,
+    record_trust,
+    trust_statuses,
+)
 from sanad_terminal.routes_workspace import workspace_root
 
 router = APIRouter(prefix="/internal/blueprint")
@@ -72,12 +78,31 @@ def _plan_error(exc: PlanError) -> JSONResponse:
     )
 
 
+def _annotate_trust(payload: dict, root: Path) -> dict:
+    """Stamp each skill node with its executable definition's trust state.
+
+    A skill node's manifest path is ``.sanad/skills/<slug>/skill.yaml``; its
+    gated instructions sit beside it as ``SKILL.md``. Nodes without a gated
+    file (no SKILL.md yet) carry no ``trust`` key at all.
+    """
+    statuses = trust_statuses(root)
+    if not statuses:
+        return payload
+    for node in payload.get("nodes", []):
+        p = node.get("path") or ""
+        if p.startswith(".sanad/skills/"):
+            key = str(PurePosixPath(p).parent / "SKILL.md")
+            if key in statuses:
+                node["trust"] = statuses[key]["status"]
+    return payload
+
+
 @router.get("/graph")
 async def graph(root: Root) -> JSONResponse:
     """The compiled graph (nodes, edges, diagnostics) for the workspace."""
     index = index_blueprint(_sanad_dir(root))
     compiled = compile_graph(index)
-    payload = compiled.to_dict()
+    payload = _annotate_trust(compiled.to_dict(), root)
     payload["initialized"] = _sanad_dir(root).is_dir()
     return JSONResponse(payload)
 
@@ -217,7 +242,19 @@ async def apply(root: Root, body: ApplyBody) -> JSONResponse:
         }
         (_tx_dir(root) / f"{tx_id}.json").write_text(json.dumps(record), encoding="utf-8")
 
-        graph = compile_graph(index_blueprint(_sanad_dir(root))).to_dict()
+        # Apply IS the trust review (S9): the user just read these exact files
+        # in the review modal, so executable definitions the plan wrote are
+        # recorded as trusted at their as-written hash. Content arriving any
+        # other way stays untrusted until reviewed in the UI.
+        applied_executables = {
+            op.path: file_sha256(root / op.path)
+            for op in parsed.operations
+            if is_executable_path(op.path) and (root / op.path).is_file()
+        }
+        if applied_executables:
+            record_trust(root, applied_executables, "apply")
+
+        graph = _annotate_trust(compile_graph(index_blueprint(_sanad_dir(root))).to_dict(), root)
 
     return JSONResponse({"ok": True, "txId": tx_id, "graph": graph})
 
@@ -245,3 +282,42 @@ async def rollback_tx(root: Root, body: RollbackBody) -> JSONResponse:
         record_path.unlink(missing_ok=True)
         graph = compile_graph(index_blueprint(_sanad_dir(root))).to_dict()
     return JSONResponse({"ok": True, "graph": graph})
+
+
+@router.get("/trust")
+async def trust_list(root: Root) -> JSONResponse:
+    """Per-file trust state for every gated executable definition on disk."""
+    entries = await asyncio.to_thread(trust_statuses, root)
+    return JSONResponse({"entries": entries})
+
+
+class TrustBody(BaseModel):
+    path: str = Field(min_length=1, max_length=512)
+
+
+@router.post("/trust")
+async def trust_review(root: Root, body: TrustBody) -> JSONResponse:
+    """The one-time manual review: trust a file at its CURRENT content.
+
+    This is the UI action for definitions that arrived outside the governed
+    apply path (terminal-agent writes, git pulls, direct edits). Recording is
+    under the workspace lock so the hash written is the hash reviewed — not a
+    file that changed mid-request.
+    """
+    rel = body.path
+    if not is_executable_path(rel):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "not_executable", "message": "not a gated definition path"}},
+        )
+    async with _lock_for(root):
+        target = root / rel
+        if not target.is_file():
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"code": "not_found", "message": "no such file"}},
+            )
+        digest = await asyncio.to_thread(file_sha256, target)
+        await asyncio.to_thread(record_trust, root, {rel: digest}, "manual")
+        entries = await asyncio.to_thread(trust_statuses, root)
+    return JSONResponse({"ok": True, "entries": entries})

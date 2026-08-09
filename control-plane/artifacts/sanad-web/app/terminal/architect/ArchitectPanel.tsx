@@ -250,7 +250,14 @@ export default function ArchitectPanel({
                         ` · ${b.plan.graphDelta.edgesAdded.length} edge`}
                     </div>
                     {b.state === "applied" ? (
-                      <span style={s.applied}>✓ Applied</span>
+                      <span style={s.applied}>
+                        ✓ Applied
+                        {/* S9 activation is next-session: say so here, so
+                            "is the workspace ingesting it?" never recurs. */}
+                        {b.plan.operations.some((o) =>
+                          o.path.endsWith("/SKILL.md"),
+                        ) && " · active in new terminals"}
+                      </span>
                     ) : (
                       <button
                         style={s.reviewBtn}

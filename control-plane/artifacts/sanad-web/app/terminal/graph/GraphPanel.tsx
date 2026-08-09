@@ -18,6 +18,7 @@ import {
   draftPlan,
   fetchBlueprintGraph,
   fetchCreatableKinds,
+  reviewTrust,
   type ChangePlan,
   type CreatableKind,
 } from "@/lib/blueprint/api";
@@ -71,6 +72,14 @@ export default function GraphPanel({
   const [pendingPlan, setPendingPlan] = useState<ChangePlan | null>(null);
   const [applyBusy, setApplyBusy] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
+  /* S9: transient post-apply nudge + manual trust review in-flight flag. */
+  const [notice, setNotice] = useState<string | null>(null);
+  const [trustBusy, setTrustBusy] = useState(false);
+  useEffect(() => {
+    if (!notice) return;
+    const t = window.setTimeout(() => setNotice(null), 6000);
+    return () => window.clearTimeout(t);
+  }, [notice]);
   const [newMenu, setNewMenu] = useState(false);
   const [kinds, setKinds] = useState<CreatableKind[]>([]);
   const [newKind, setNewKind] = useState<string>("");
@@ -144,6 +153,7 @@ export default function GraphPanel({
         name: n.name,
         status: n.status,
         severity: worstSeverity(graph.diagnostics, n.id),
+        trust: n.trust,
         focused: n.id === focused,
       },
     }));
@@ -266,6 +276,10 @@ export default function GraphPanel({
       setGraph(outcome.graph);
       setPendingPlan(null);
       onApplied?.(paths);
+      // Activation is next-session (S9): say so, so it's never a mystery.
+      if (paths.some((p) => p.endsWith("/SKILL.md"))) {
+        setNotice("Applied — the skill is active in new terminals.");
+      }
     } else {
       setApplyError(
         outcome.error?.message ?? "Apply failed — nothing was written.",
@@ -277,6 +291,25 @@ export default function GraphPanel({
     setPendingPlan(null);
     setApplyError(null);
   }, []);
+
+  /* S9 manual review: trust the node's SKILL.md at its current content. The
+     agentd endpoint hashes under the workspace lock, so what gets recorded is
+     exactly what is on disk at review time. */
+  const doTrust = useCallback(
+    async (node: BlueprintNode) => {
+      const dir = node.path.slice(0, node.path.lastIndexOf("/"));
+      setTrustBusy(true);
+      const res = await reviewTrust(`${dir}/SKILL.md`, sessionId);
+      setTrustBusy(false);
+      if (res.ok) {
+        setNotice("Trusted — the skill loads in new terminals.");
+        void load();
+      } else {
+        setApplyError(res.error ?? "Could not record the review.");
+      }
+    },
+    [sessionId, load],
+  );
 
   if (!visible) return null;
 
@@ -372,6 +405,15 @@ export default function GraphPanel({
           </div>
         )}
 
+        {notice && !applyError && (
+          <div style={s.banner}>
+            {notice}
+            <button style={s.bannerClose} onClick={() => setNotice(null)}>
+              ✕
+            </button>
+          </div>
+        )}
+
         {loading ? (
           <div style={s.empty}>Reading your blueprint…</div>
         ) : !graph?.initialized ? (
@@ -414,6 +456,8 @@ export default function GraphPanel({
           graph={graph}
           onOpenFile={onOpenFile}
           onClose={() => setSelectedId(null)}
+          onTrust={(n) => void doTrust(n)}
+          trustBusy={trustBusy}
         />
       )}
 

@@ -219,3 +219,81 @@ def test_stale_apply_is_rejected(client: TestClient):
 
 def test_apply_requires_credential(client: TestClient):
     assert client.post("/internal/blueprint/apply", json={"plan": {}}).status_code == 401
+
+
+# ---- S9 trust: apply-auto-trust, manual review, graph annotation ----
+
+
+def test_apply_records_trust_for_skill_instructions(client: TestClient):
+    """Apply IS the review: a skill written via apply is trusted at once."""
+    _seed(client)
+    plan = client.post(
+        "/internal/blueprint/plan",
+        headers=HEADERS,
+        json={"action": "createResource", "kind": "Skill", "name": "Review Helper"},
+    ).json()["plan"]
+    body = client.post("/internal/blueprint/apply", headers=HEADERS, json={"plan": plan}).json()
+
+    entries = client.get("/internal/blueprint/trust", headers=HEADERS).json()["entries"]
+    entry = entries[".sanad/skills/review-helper/SKILL.md"]
+    assert entry["status"] == "trusted"
+    assert entry["source"] == "apply"
+
+    node = next(n for n in body["graph"]["nodes"] if n["id"] == "skill:review-helper")
+    assert node["trust"] == "trusted"
+
+
+def test_external_skill_untrusted_until_reviewed_then_changed(client: TestClient):
+    """Content arriving OUTSIDE apply needs the one-time review; edits re-gate."""
+    _seed(client)  # seeds skill:code-review with a manifest but no SKILL.md
+    rel = ".sanad/skills/code-review/SKILL.md"
+    res = client.put(
+        f"/internal/workspace/file?path={rel}",
+        headers=HEADERS,
+        content=b"---\nname: code-review\n---\nReview the diff.\n",
+    )
+    assert res.status_code == 200
+
+    entries = client.get("/internal/blueprint/trust", headers=HEADERS).json()["entries"]
+    assert entries[rel]["status"] == "untrusted"
+    graph = client.get("/internal/blueprint/graph", headers=HEADERS).json()
+    node = next(n for n in graph["nodes"] if n["id"] == "skill:code-review")
+    assert node["trust"] == "untrusted"
+
+    reviewed = client.post("/internal/blueprint/trust", headers=HEADERS, json={"path": rel})
+    assert reviewed.status_code == 200
+    assert reviewed.json()["entries"][rel]["status"] == "trusted"
+    assert reviewed.json()["entries"][rel]["source"] == "manual"
+
+    # An edit after review reverts the state to "changed" (re-review required).
+    client.put(
+        f"/internal/workspace/file?path={rel}",
+        headers=HEADERS,
+        content=b"---\nname: code-review\n---\nEDITED.\n",
+    )
+    entries = client.get("/internal/blueprint/trust", headers=HEADERS).json()["entries"]
+    assert entries[rel]["status"] == "changed"
+    graph = client.get("/internal/blueprint/graph", headers=HEADERS).json()
+    node = next(n for n in graph["nodes"] if n["id"] == "skill:code-review")
+    assert node["trust"] == "changed"
+
+
+def test_trust_review_rejects_bad_paths_and_requires_auth(client: TestClient):
+    _seed(client)
+    assert (
+        client.post(
+            "/internal/blueprint/trust",
+            headers=HEADERS,
+            json={"path": ".sanad/skills/code-review/skill.yaml"},  # declarative
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/internal/blueprint/trust",
+            headers=HEADERS,
+            json={"path": ".sanad/skills/ghost/SKILL.md"},  # no such file
+        ).status_code
+        == 404
+    )
+    assert client.get("/internal/blueprint/trust").status_code == 401

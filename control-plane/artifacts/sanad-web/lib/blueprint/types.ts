@@ -15,6 +15,9 @@ export interface Diagnostic {
   path: string | null;
 }
 
+/** S9 trust state of a node's executable definition (e.g. a skill's SKILL.md). */
+export type TrustState = "trusted" | "untrusted" | "changed";
+
 export interface BlueprintNode {
   id: string;
   kind: string; // ResourceKind value or "UnclassifiedFile"
@@ -22,6 +25,11 @@ export interface BlueprintNode {
   path: string;
   status: "ok" | "invalid" | "unclassified";
   supporting_paths: string[];
+  /**
+   * Present only when the node has a gated executable definition. "untrusted"
+   * and "changed" content is excluded from new agent sessions until reviewed.
+   */
+  trust?: TrustState;
 }
 
 export interface BlueprintEdge {

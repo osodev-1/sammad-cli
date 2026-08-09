@@ -113,4 +113,8 @@ def build_child_env(
         "KIMI_CLI_NO_AUTO_UPDATE": "1",
         "SANAD_API_BASE_URL": api_base_url,
         "SANAD_SESSION_TOKEN": session_token,
+        # S9 trust gate: with this set, the CLI loads `.sanad` skills only when
+        # their SKILL.md hash is recorded here (apply-reviewed or UI-reviewed).
+        # Local dev CLIs never set it, so their behavior is unchanged.
+        "SANAD_BLUEPRINT_TRUST": str(user_dir / "blueprint-trust.json"),
     }

@@ -8,11 +8,16 @@ export default function Inspector({
   graph,
   onOpenFile,
   onClose,
+  onTrust,
+  trustBusy,
 }: {
   node: BlueprintNode;
   graph: BlueprintGraph;
   onOpenFile: (path: string) => void;
   onClose: () => void;
+  /** S9 manual review: trust this node's executable definition as-is. */
+  onTrust?: (node: BlueprintNode) => void;
+  trustBusy?: boolean;
 }) {
   const diagnostics = graph.diagnostics.filter(
     (d) => d.resource_id === node.id,
@@ -33,6 +38,32 @@ export default function Inspector({
       </div>
 
       <div style={s.body}>
+        {/* S9: unreviewed executable content — explain the gate and offer the
+            one-time review. Open the file first; trusting is approving it. */}
+        {(node.trust === "untrusted" || node.trust === "changed") && (
+          <Section title="Trust">
+            <p style={s.trustNote}>
+              {node.trust === "changed"
+                ? "This skill's instructions were edited since they were last reviewed. New agent sessions will not load them until re-reviewed."
+                : "This skill's instructions arrived outside a reviewed change. New agent sessions will not load them until reviewed."}
+            </p>
+            {onTrust && (
+              <button
+                style={s.trustBtn}
+                onClick={() => onTrust(node)}
+                disabled={trustBusy}
+              >
+                {trustBusy ? "Trusting…" : "Trust this content"}
+              </button>
+            )}
+          </Section>
+        )}
+        {node.trust === "trusted" && (
+          <Section title="Trust">
+            <p style={s.trustNote}>Reviewed — loads in new agent sessions.</p>
+          </Section>
+        )}
+
         <Section title="Files">
           <button style={s.fileLink} onClick={() => onOpenFile(node.path)}>
             {node.path}
@@ -180,6 +211,25 @@ const s: Record<string, CSSProperties> = {
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
+  },
+  trustNote: {
+    margin: 0,
+    fontSize: "0.78rem",
+    lineHeight: 1.55,
+    color: "var(--ink-soft)",
+  },
+  trustBtn: {
+    alignSelf: "flex-start",
+    marginTop: "0.35rem",
+    font: "inherit",
+    fontSize: "0.76rem",
+    fontWeight: 600,
+    color: "var(--paper)",
+    background: "var(--ink)",
+    border: "none",
+    borderRadius: "var(--radius-pill)",
+    padding: "0.25rem 0.8rem",
+    cursor: "pointer",
   },
   rel: {
     display: "flex",
