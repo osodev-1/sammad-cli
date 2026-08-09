@@ -232,6 +232,28 @@ export default function SessionWorkspace({
      so the FileTree re-runs its expand effect even for a repeated path. */
   const [revealPaths, setRevealPaths] = useState<string[]>([]);
 
+  /* Epoch for the agent terminals — bumped after a server-side restart so the
+     panels remount and reconnect (the fresh spawn resumes the conversation). */
+  const [termEpoch, setTermEpoch] = useState(0);
+
+  /* S9 activation: the CLI discovers skills at construction, so applying a new
+     definition needs a fresh agent process to take effect. Kill the machine's
+     agent PTYs, then remount the panels; the first respawn resumes the newest
+     conversation from disk — same chat, freshly loaded (trust-gated) skills.
+     The drawer shell is a different kind and is never touched. */
+  const restartAgents = useCallback(async () => {
+    try {
+      const res = await fetch(withSession("/api/terminal/restart", sessionId), {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error("restart failed");
+      setTermEpoch((e) => e + 1);
+      setNotice("Agent restarted — same conversation, updated blueprint.");
+    } catch {
+      setNotice("Could not restart the agent — try again in a moment.");
+    }
+  }, [sessionId]);
+
   const openFile = useCallback((path: string) => {
     const name = path.split("/").pop() ?? path;
     setFileTabs((prev) =>
@@ -429,7 +451,9 @@ export default function SessionWorkspace({
               No window chrome: the terminal is a pane of the page, not a card. */}
           {terminals.map((t) => (
             <div
-              key={t.id}
+              /* termEpoch remounts the panel after a server-side agent restart
+                 (S9): the old PTY is gone, so reconnecting spawns fresh. */
+              key={`${t.id}:${termEpoch}`}
               style={{
                 ...s.terminalPane,
                 ...(active === t.id ? null : s.paneHidden),
@@ -464,6 +488,7 @@ export default function SessionWorkspace({
                   visible={graphActive}
                   onOpenFile={openFile}
                   onApplied={onBlueprintApplied}
+                  onRestartAgents={restartAgents}
                   focusResourceId={graphFocus}
                   architectOpen={architectOpen}
                   onToggleArchitect={() => setArchitectOpen((v) => !v)}
@@ -476,6 +501,7 @@ export default function SessionWorkspace({
                   sessionId={sessionId}
                   visible={graphActive && architectOpen}
                   onApplied={onBlueprintApplied}
+                  onRestartAgents={restartAgents}
                 />
               </div>
             </div>

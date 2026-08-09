@@ -130,6 +130,9 @@ def create_app(
     from sanad_terminal.routes_architect import router as architect_router
 
     app.include_router(architect_router)
+    from sanad_terminal.routes_terminal import router as terminal_router
+
+    app.include_router(terminal_router)
     register_error_handlers(app)
 
     if idle_stopper is not None:

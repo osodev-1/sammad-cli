@@ -132,6 +132,35 @@ class SessionManager:
                         await oldest.websocket.close(code=CLOSE_REPLACED, reason="replaced")
                 await oldest.pty.terminate()
 
+    async def restart_kind(self, user_id: str, kind: str = "agent") -> int:
+        """Terminate every session of this user+kind, attached or detached.
+
+        The blueprint-activation affordance: the CLI discovers skills at
+        construction, so a running conversation only picks up a newly applied
+        definition on respawn. After this, the next attach finds no live agent
+        and spawns fresh — which, being first, resumes the newest conversation
+        from disk (app.py's --resume rule): same chat, fresh definitions.
+        """
+        async with self._lock:
+            targets = [
+                s
+                for s in self._sessions.values()
+                if s.user_id == user_id and s.kind == kind
+            ]
+            for s in targets:
+                del self._sessions[s.conn_id]
+        for s in targets:
+            self._stop_drainer(s)
+            if s.websocket is not None:
+                with contextlib.suppress(Exception):
+                    await s.websocket.send_text(error_frame("session_restarted"))
+                with contextlib.suppress(Exception):
+                    await s.websocket.close(code=CLOSE_REPLACED, reason="restarted")
+            with contextlib.suppress(Exception):
+                await s.pty.terminate()
+            logger.info("session restarted (killed) user={} conn={}", user_id, s.conn_id)
+        return len(targets)
+
     def register(self, session: ActiveSession) -> None:
         self._sessions[session.conn_id] = session
 

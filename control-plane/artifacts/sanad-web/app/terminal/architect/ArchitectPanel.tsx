@@ -62,11 +62,14 @@ export default function ArchitectPanel({
   sessionId,
   visible,
   onApplied,
+  onRestartAgents,
 }: {
   sessionId?: string;
   visible: boolean;
   /** Called after a plan is applied, with the paths it wrote (to reveal them). */
   onApplied?: (writtenPaths: string[]) => void;
+  /** Kill + respawn the agent terminals so a new definition loads now (S9). */
+  onRestartAgents?: () => void;
 }) {
   const [phase, setPhase] = useState<
     "idle" | "starting" | "ready" | "streaming" | "error"
@@ -256,7 +259,19 @@ export default function ArchitectPanel({
                             "is the workspace ingesting it?" never recurs. */}
                         {b.plan.operations.some((o) =>
                           o.path.endsWith("/SKILL.md"),
-                        ) && " · active in new terminals"}
+                        ) && (
+                          <>
+                            {" · active in new terminals"}
+                            {onRestartAgents && (
+                              <button
+                                style={s.restartBtn}
+                                onClick={onRestartAgents}
+                              >
+                                Restart agent now
+                              </button>
+                            )}
+                          </>
+                        )}
                       </span>
                     ) : (
                       <button
@@ -460,6 +475,21 @@ const s: Record<string, CSSProperties> = {
     fontSize: "0.78rem",
     fontWeight: 600,
     color: "var(--ink-soft)",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "0.5rem",
+    flexWrap: "wrap",
+  },
+  restartBtn: {
+    font: "inherit",
+    fontSize: "0.72rem",
+    fontWeight: 600,
+    color: "var(--paper)",
+    background: "var(--ink)",
+    border: "none",
+    borderRadius: "var(--radius-pill)",
+    padding: "0.15rem 0.7rem",
+    cursor: "pointer",
   },
   composer: {
     display: "flex",

@@ -47,6 +47,7 @@ export default function GraphPanel({
   visible,
   onOpenFile,
   onApplied,
+  onRestartAgents,
   focusResourceId,
   architectOpen,
   onToggleArchitect,
@@ -56,6 +57,8 @@ export default function GraphPanel({
   onOpenFile: (path: string) => void;
   /** Called after a plan is applied, with the paths it wrote (to reveal them). */
   onApplied?: (writtenPaths: string[]) => void;
+  /** Kill + respawn the agent terminals so a new definition loads now (S9). */
+  onRestartAgents?: () => void;
   /** A resource id OR a .sanad manifest path to highlight (GR-005). */
   focusResourceId?: string | null;
   /** The Architect chat lives beside the graph — this toggles it (M3c). */
@@ -72,12 +75,17 @@ export default function GraphPanel({
   const [pendingPlan, setPendingPlan] = useState<ChangePlan | null>(null);
   const [applyBusy, setApplyBusy] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
-  /* S9: transient post-apply nudge + manual trust review in-flight flag. */
+  /* S9: transient post-apply nudge + manual trust review in-flight flag.
+     `noticeRestart` marks activation nudges — those get a restart action. */
   const [notice, setNotice] = useState<string | null>(null);
+  const [noticeRestart, setNoticeRestart] = useState(false);
   const [trustBusy, setTrustBusy] = useState(false);
   useEffect(() => {
     if (!notice) return;
-    const t = window.setTimeout(() => setNotice(null), 6000);
+    const t = window.setTimeout(() => {
+      setNotice(null);
+      setNoticeRestart(false);
+    }, 12_000);
     return () => window.clearTimeout(t);
   }, [notice]);
   const [newMenu, setNewMenu] = useState(false);
@@ -276,9 +284,10 @@ export default function GraphPanel({
       setGraph(outcome.graph);
       setPendingPlan(null);
       onApplied?.(paths);
-      // Activation is next-session (S9): say so, so it's never a mystery.
+      // Activation is next-session (S9): say so, and offer the restart.
       if (paths.some((p) => p.endsWith("/SKILL.md"))) {
         setNotice("Applied — the skill is active in new terminals.");
+        setNoticeRestart(true);
       }
     } else {
       setApplyError(
@@ -303,6 +312,7 @@ export default function GraphPanel({
       setTrustBusy(false);
       if (res.ok) {
         setNotice("Trusted — the skill loads in new terminals.");
+        setNoticeRestart(true);
         void load();
       } else {
         setApplyError(res.error ?? "Could not record the review.");
@@ -407,8 +417,28 @@ export default function GraphPanel({
 
         {notice && !applyError && (
           <div style={s.banner}>
-            {notice}
-            <button style={s.bannerClose} onClick={() => setNotice(null)}>
+            <span style={s.bannerText}>
+              {notice}
+              {noticeRestart && onRestartAgents && (
+                <button
+                  style={s.bannerAction}
+                  onClick={() => {
+                    onRestartAgents();
+                    setNotice(null);
+                    setNoticeRestart(false);
+                  }}
+                >
+                  Restart agent now
+                </button>
+              )}
+            </span>
+            <button
+              style={s.bannerClose}
+              onClick={() => {
+                setNotice(null);
+                setNoticeRestart(false);
+              }}
+            >
               ✕
             </button>
           </div>
@@ -577,6 +607,23 @@ const s: Record<string, CSSProperties> = {
     background: "var(--paper-sunken)",
     color: "var(--ink)",
     fontSize: "0.8rem",
+  },
+  bannerText: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "0.75rem",
+    flexWrap: "wrap",
+  },
+  bannerAction: {
+    font: "inherit",
+    fontSize: "0.76rem",
+    fontWeight: 600,
+    color: "var(--paper)",
+    background: "var(--ink)",
+    border: "none",
+    borderRadius: "var(--radius-pill)",
+    padding: "0.2rem 0.8rem",
+    cursor: "pointer",
   },
   bannerClose: {
     background: "none",
