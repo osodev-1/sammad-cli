@@ -23,6 +23,8 @@ export interface ChangePlan {
   preconditions: { path: string; sha256: string | null }[];
   graphDelta: {
     nodesAdded: string[];
+    /** Resources whose manifests an update-plan rewrites (absent pre-S9 plans). */
+    nodesChanged?: string[];
     edgesAdded: { from: string; type: string; to: string }[];
   };
 }

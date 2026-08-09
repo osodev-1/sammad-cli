@@ -104,12 +104,44 @@ class BlueprintValidate(CallableTool2[_NoParams]):
         )
 
 
-class DraftParams(BaseModel):
-    action: Literal["createResource", "createEdge"] = Field(
+class FileDraft(BaseModel):
+    path: str = Field(
         description=(
-            "createResource to scaffold a new resource; createEdge to connect two "
-            "existing resources with a typed relationship."
+            "Workspace-relative path under .sanad/ (e.g. "
+            ".sanad/skills/code-review/SKILL.md). Plans may only touch .sanad/."
         )
+    )
+    content: str = Field(
+        description=(
+            "The COMPLETE desired content of the file — what it should contain "
+            "after apply, not a diff or a fragment."
+        )
+    )
+
+
+class DraftParams(BaseModel):
+    action: Literal["writeFiles", "createResource", "createEdge"] = Field(
+        description=(
+            "writeFiles to draft REAL file contents — new resources with "
+            "substantive definitions, or edits to existing files (preferred); "
+            "createResource to scaffold an empty template; createEdge to connect "
+            "two existing resources with a typed relationship."
+        )
+    )
+    files: list[FileDraft] | None = Field(
+        default=None,
+        description=(
+            "writeFiles only: every file to write, each with its complete "
+            "content. Read existing files first and include their full updated "
+            "content when editing."
+        ),
+    )
+    summary: str | None = Field(
+        default=None,
+        description=(
+            "writeFiles only: one reviewable sentence describing the change "
+            "(e.g. 'Define the Code Review agent and its skill instructions')."
+        ),
     )
     kind: str | None = Field(
         default=None,
@@ -143,11 +175,15 @@ class DraftParams(BaseModel):
 class DraftBlueprintChange(CallableTool2[DraftParams]):
     name: str = "DraftBlueprintChange"
     description: str = (
-        "Draft (do NOT apply) a change to the .sanad blueprint: scaffold a new "
-        "resource, or connect two existing resources with a typed edge. Returns a "
-        "reviewable change plan — the exact files that would be created or the "
-        "exact manifest edit — which the user reviews and applies themselves. This "
-        "tool never writes to disk; you cannot apply changes."
+        "Draft (do NOT apply) a change to the .sanad blueprint. Prefer "
+        "action=writeFiles: supply the complete desired content of each file — "
+        "a new resource's real manifest and instructions, or the full updated "
+        "content of existing files — so drafts carry substance, never bare "
+        "scaffolding. Read current files before editing them; after the user "
+        "applies, re-read and keep iterating. createResource exists for an "
+        "empty template; createEdge connects two existing resources. Returns a "
+        "reviewable change plan the user applies themselves. This tool never "
+        "writes to disk; you cannot apply changes."
     )
     params: type[DraftParams] = DraftParams
 
@@ -160,7 +196,12 @@ class DraftBlueprintChange(CallableTool2[DraftParams]):
         from sanad_blueprint.indexer import index_blueprint
         from sanad_blueprint.schemas import ResourceKind
         from sanad_blueprint.templates import CREATABLE_KINDS
-        from sanad_blueprint.transaction import PlanError, plan_create_edge, plan_create_resource
+        from sanad_blueprint.transaction import (
+            PlanError,
+            plan_create_edge,
+            plan_create_resource,
+            plan_write_files,
+        )
 
         sanad = _sanad_dir(self._runtime)
         if not sanad.is_dir():
@@ -171,7 +212,18 @@ class DraftBlueprintChange(CallableTool2[DraftParams]):
         index = index_blueprint(sanad)
 
         try:
-            if params.action == "createResource":
+            if params.action == "writeFiles":
+                if not params.files:
+                    return ToolError(
+                        message="writeFiles needs `files` — each with a path and its complete content.",
+                        brief="Missing files",
+                    )
+                plan = plan_write_files(
+                    index,
+                    [(f.path, f.content) for f in params.files],
+                    params.summary or "Update the blueprint",
+                )
+            elif params.action == "createResource":
                 if not params.kind or not params.name:
                     return ToolError(
                         message="createResource needs both `kind` and `name`.",

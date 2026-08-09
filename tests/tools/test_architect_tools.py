@@ -19,6 +19,7 @@ from kimi_cli.sanad.architect_tools import (
     BlueprintValidate,
     DraftBlueprintChange,
     DraftParams,
+    FileDraft,
 )
 from kimi_cli.soul.agent import Runtime
 
@@ -154,6 +155,65 @@ async def test_draft_edge_infers_relationship(workspace: Path):
     assert plan["graphDelta"]["edgesAdded"] == [
         {"from": "agent:primary", "type": "uses", "to": "skill:review"}
     ]
+
+
+async def test_draft_write_files_carries_real_content(workspace: Path):
+    """writeFiles drafts substance — the author's exact contents, not a template
+    — and edits to an existing manifest hash its current disk state (Scenario G)."""
+    res = await DraftBlueprintChange(_rt(workspace)).__call__(
+        DraftParams(
+            action="writeFiles",
+            summary="Define the Code Review skill and describe the primary agent",
+            files=[
+                FileDraft(
+                    path=".sanad/skills/code-review/skill.yaml",
+                    content=(
+                        "apiVersion: sanad.dev/v1alpha1\nkind: Skill\n"
+                        "metadata:\n  id: skill:code-review\n  name: Code Review\n"
+                        "spec:\n  description: Reviews diffs for correctness\n"
+                    ),
+                ),
+                FileDraft(
+                    path=".sanad/skills/code-review/SKILL.md",
+                    content="# Code Review\n\nRead the diff hunk by hunk.\n",
+                ),
+                FileDraft(
+                    path=".sanad/agents/primary/agent.yaml",
+                    content=(
+                        "apiVersion: sanad.dev/v1alpha1\nkind: Agent\n"
+                        "metadata:\n  id: agent:primary\n  name: Primary\n"
+                        "spec:\n  description: The workspace's main agent\n"
+                    ),
+                ),
+            ],
+        )
+    )
+    assert not res.is_error
+    plan = _plan(res)
+    assert plan["graphDelta"]["nodesAdded"] == ["skill:code-review"]
+    assert plan["graphDelta"]["nodesChanged"] == ["agent:primary"]
+    by_path = {op["path"]: op for op in plan["operations"]}
+    assert by_path[".sanad/skills/code-review/SKILL.md"]["content"].endswith("hunk by hunk.\n")
+    assert by_path[".sanad/agents/primary/agent.yaml"]["op"] == "update"
+    # The update's precondition is the CURRENT disk hash; the creates demand absence.
+    pres = {p["path"]: p["sha256"] for p in plan["preconditions"]}
+    assert pres[".sanad/agents/primary/agent.yaml"] is not None
+    assert pres[".sanad/skills/code-review/skill.yaml"] is None
+
+
+async def test_draft_write_files_refuses_escape(workspace: Path):
+    res = await DraftBlueprintChange(_rt(workspace)).__call__(
+        DraftParams(
+            action="writeFiles",
+            files=[FileDraft(path="../blueprint-trust.json", content="{}")],
+        )
+    )
+    assert res.is_error and res.brief == "invalid_path"
+
+    missing = await DraftBlueprintChange(_rt(workspace)).__call__(
+        DraftParams(action="writeFiles")
+    )
+    assert missing.is_error
 
 
 async def test_draft_errors_are_results_not_exceptions(workspace: Path):

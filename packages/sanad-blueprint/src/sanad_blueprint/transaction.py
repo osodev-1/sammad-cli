@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
 from .edges import EDGE_RULES
-from .indexer import BlueprintIndex
+from .envelope import parse_manifest
+from .indexer import _MANIFEST_NAMES, BlueprintIndex
 from .schemas import ResourceKind
 from .templates import KIND_DIR, render, slugify
 
@@ -31,6 +33,21 @@ class PlanError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def _check_plan_path(path: str) -> None:
+    """Every plan path must stay inside `.sanad/` — no traversal, no absolutes.
+
+    Plans arrive from clients (the browser posts them back for apply), so this
+    is a security boundary, not a convenience: without it a crafted operation
+    like `../blueprint-trust.json` could write outside the blueprint — into
+    the trust store, the user's HOME, anywhere the agent uid can reach.
+    """
+    pure = PurePosixPath(path)
+    if pure.is_absolute() or path.startswith("\\") or ".." in pure.parts:
+        raise PlanError("invalid_path", f"illegal path: {path!r}")
+    if not path.startswith(".sanad/") or path == ".sanad/":
+        raise PlanError("invalid_path", f"plans may only touch .sanad/: {path!r}")
 
 
 @dataclass
@@ -52,6 +69,7 @@ class ChangePlan:
     operations: list[Operation] = field(default_factory=list)
     preconditions: list[Precondition] = field(default_factory=list)
     nodes_added: list[str] = field(default_factory=list)
+    nodes_changed: list[str] = field(default_factory=list)
     edges_added: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
@@ -59,7 +77,11 @@ class ChangePlan:
             "summary": self.summary,
             "operations": [asdict(o) for o in self.operations],
             "preconditions": [asdict(p) for p in self.preconditions],
-            "graphDelta": {"nodesAdded": self.nodes_added, "edgesAdded": self.edges_added},
+            "graphDelta": {
+                "nodesAdded": self.nodes_added,
+                "nodesChanged": self.nodes_changed,
+                "edgesAdded": self.edges_added,
+            },
         }
 
 
@@ -78,6 +100,7 @@ def plan_from_dict(raw: dict) -> ChangePlan:
         operations=ops,
         preconditions=pres,
         nodes_added=list(delta.get("nodesAdded", [])),
+        nodes_changed=list(delta.get("nodesChanged", [])),
         edges_added=list(delta.get("edgesAdded", [])),
     )
 
@@ -166,6 +189,92 @@ def plan_create_edge(
     )
 
 
+MAX_PLAN_FILES = 20
+MAX_FILE_CHARS = 200_000
+
+
+def plan_write_files(
+    index: BlueprintIndex, files: Sequence[tuple[str, str]], summary: str
+) -> ChangePlan:
+    """Plan writing author-supplied file contents (the Architect's editor).
+
+    Unlike ``plan_create_resource`` (template scaffold), the caller supplies
+    the COMPLETE desired content of each file — new or existing — so an agent
+    can draft real definitions and keep iterating on them. Manifests must
+    parse through the envelope before they can enter a plan (a proposal can
+    never make the blueprint less valid than the author intended); every
+    precondition is hashed from disk, so a file that changed since drafting
+    fails apply cleanly instead of being clobbered (Scenario G).
+    """
+    if not files:
+        raise PlanError("empty_plan", "no files to write")
+    if len(files) > MAX_PLAN_FILES:
+        raise PlanError("too_many_files", f"a plan may touch at most {MAX_PLAN_FILES} files")
+
+    workspace = Path(index.root).parent
+    seen_paths: set[str] = set()
+    planned_ids: set[str] = set()
+    ops: list[Operation] = []
+    pres: list[Precondition] = []
+    nodes_added: list[str] = []
+    nodes_changed: list[str] = []
+
+    for path, content in files:
+        _check_plan_path(path)
+        if path in seen_paths:
+            raise PlanError("duplicate_path", f"{path} appears twice in the plan")
+        seen_paths.add(path)
+        if len(content) > MAX_FILE_CHARS:
+            raise PlanError("file_too_large", f"{path} exceeds {MAX_FILE_CHARS} characters")
+
+        target = workspace / path
+        exists = target.is_file()
+
+        if PurePosixPath(path).name in _MANIFEST_NAMES:
+            parsed = parse_manifest(path, content)
+            if parsed.resource is None:
+                first = parsed.diagnostics[0].message if parsed.diagnostics else "invalid manifest"
+                raise PlanError("manifest_invalid", f"{path}: {first}")
+            rid = parsed.resource.metadata.id
+            indexed = index.resources.get(rid)
+            current = next((r for r in index.resources.values() if r.manifest_path == path), None)
+            if exists:
+                # Ids anchor every edge and trust record: an update keeps its id.
+                if current is not None and current.resource.metadata.id != rid:
+                    raise PlanError(
+                        "id_changed",
+                        f"{path} must keep id {current.resource.metadata.id!r} (got {rid!r}); "
+                        "rename by creating a new resource and removing the old one",
+                    )
+                if current is None and indexed is not None and indexed.manifest_path != path:
+                    raise PlanError("duplicate_id", f"{rid} already exists elsewhere")
+                nodes_changed.append(rid)
+            else:
+                if indexed is not None or rid in planned_ids:
+                    raise PlanError("duplicate_id", f"{rid} already exists")
+                nodes_added.append(rid)
+            planned_ids.add(rid)
+
+        if exists:
+            try:
+                current_text = target.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise PlanError("file_unreadable", f"{path}: {exc}") from exc
+            pres.append(Precondition(path=path, sha256=_sha256(current_text)))
+            ops.append(Operation(op="update", path=path, content=content))
+        else:
+            pres.append(Precondition(path=path, sha256=None))
+            ops.append(Operation(op="create", path=path, content=content))
+
+    return ChangePlan(
+        summary=summary.strip() or "Write blueprint files",
+        operations=ops,
+        preconditions=pres,
+        nodes_added=nodes_added,
+        nodes_changed=nodes_changed,
+    )
+
+
 def _load_manifest_doc(index: BlueprintIndex, rel_path: str) -> dict:
     abs_path = Path(index.root).parent / rel_path
     try:
@@ -196,6 +305,14 @@ def apply_plan(workspace_root: Path, plan: ChangePlan) -> ApplyResult:
     """Verify preconditions, then write every op atomically; on any failure,
     replay the rollback and re-raise. Returns rollback data for the record."""
     sanad_parent = workspace_root  # paths are ".sanad/..." relative to here
+
+    # 0. Containment. Plans round-trip through clients, so apply re-checks
+    #    every path even though planners already did — without this, a crafted
+    #    plan could write ../blueprint-trust.json or escape the workspace.
+    for pre in plan.preconditions:
+        _check_plan_path(pre.path)
+    for op in plan.operations:
+        _check_plan_path(op.path)
 
     # 1. Verify all preconditions before touching anything.
     for pre in plan.preconditions:

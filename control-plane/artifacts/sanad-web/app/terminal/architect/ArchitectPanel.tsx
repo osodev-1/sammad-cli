@@ -249,6 +249,8 @@ export default function ArchitectPanel({
                     <div style={s.planMeta}>
                       {b.plan.operations.length} file
                       {b.plan.operations.length === 1 ? "" : "s"}
+                      {(b.plan.graphDelta.nodesChanged?.length ?? 0) > 0 &&
+                        ` · ${b.plan.graphDelta.nodesChanged!.length} updated`}
                       {b.plan.graphDelta.edgesAdded.length > 0 &&
                         ` · ${b.plan.graphDelta.edgesAdded.length} edge`}
                     </div>
