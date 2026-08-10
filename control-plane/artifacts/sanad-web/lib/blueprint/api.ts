@@ -80,6 +80,39 @@ export async function draftPlan(
   }
 }
 
+/**
+ * Current on-disk content for a plan's UPDATE targets — what the review
+ * modal diffs against. Bounded and best-effort: a file that cannot be read
+ * (machine waking, deleted meanwhile) is simply absent, and the modal falls
+ * back to full-content rendering for it.
+ */
+export async function fetchCurrentContents(
+  plan: ChangePlan,
+  sessionId?: string,
+): Promise<Record<string, string>> {
+  const targets = plan.operations
+    .filter((o) => o.op === "update")
+    .slice(0, 20)
+    .map((o) => o.path);
+  const out: Record<string, string> = {};
+  await Promise.all(
+    targets.map(async (path) => {
+      try {
+        const res = await fetch(
+          withSession(
+            `/api/workspace/file?path=${encodeURIComponent(path)}`,
+            sessionId,
+          ),
+        );
+        if (res.ok) out[path] = await res.text();
+      } catch {
+        /* absent → full-content fallback */
+      }
+    }),
+  );
+  return out;
+}
+
 export interface ApplyOutcome {
   graph?: BlueprintGraph;
   txId?: string;

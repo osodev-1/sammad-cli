@@ -18,7 +18,7 @@ import {
   type Block,
   type Message,
 } from "@/lib/architect/transcript";
-import { applyPlan } from "@/lib/blueprint/api";
+import { applyPlan, fetchCurrentContents } from "@/lib/blueprint/api";
 import type { StoredArchitectMessage } from "@/lib/sessions/state";
 import PlanPreview from "../graph/PlanPreview";
 
@@ -126,6 +126,10 @@ export default function ArchitectPanel({
   /* Clicking "Architecting…" reveals the live steps (reasoning + tools). */
   const [showSteps, setShowSteps] = useState(false);
   const [review, setReview] = useState<{ mi: number; bi: number } | null>(null);
+  /* Current on-disk text for the reviewed plan's update targets (R2 diffs). */
+  const [reviewContents, setReviewContents] = useState<
+    Record<string, string> | undefined
+  >(undefined);
   const [applyBusy, setApplyBusy] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
 
@@ -133,6 +137,28 @@ export default function ArchitectPanel({
   const drainingRef = useRef(false);
   const lastItemAtRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  /* When a review opens, fetch the current on-disk text of its update targets
+     so the modal can diff instead of dumping full files (R2). */
+  useEffect(() => {
+    if (!review) {
+      setReviewContents(undefined);
+      return;
+    }
+    const msg = messages[review.mi];
+    const block =
+      msg && msg.role === "assistant" ? msg.blocks[review.bi] : undefined;
+    if (!block || block.kind !== "plan" || !block.plan) return;
+    let live = true;
+    void fetchCurrentContents(block.plan, sessionId).then((c) => {
+      if (live) setReviewContents(c);
+    });
+    return () => {
+      live = false;
+    };
+    // messages deliberately unwatched: the block is fixed once review opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [review, sessionId]);
 
   /* If the persisted transcript arrives after mount (hydration race), adopt it
      — but never over a conversation that already started. */
@@ -543,6 +569,7 @@ export default function ArchitectPanel({
             setReview(null);
             setApplyError(null);
           }}
+          currentContents={reviewContents}
         />
       )}
     </div>

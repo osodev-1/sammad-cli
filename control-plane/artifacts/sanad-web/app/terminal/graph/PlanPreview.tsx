@@ -1,9 +1,14 @@
+import { useState } from "react";
 import type { CSSProperties } from "react";
 import type { ChangePlan } from "@/lib/blueprint/api";
+import { diffHunks } from "@/lib/blueprint/diff";
 
 /**
  * The change-plan review card (PRD MA-005 / GR-007): every write is previewed
  * as the exact files it creates or patches before the user applies it.
+ * Updates render as DIFFS against the current on-disk content (R2) — full
+ * content stays one toggle away, and is the automatic fallback whenever the
+ * current content is unavailable or the file is too large to diff exactly.
  */
 export default function PlanPreview({
   plan,
@@ -11,13 +16,17 @@ export default function PlanPreview({
   error,
   onApply,
   onCancel,
+  currentContents,
 }: {
   plan: ChangePlan;
   busy: boolean;
   error: string | null;
   onApply: () => void;
   onCancel: () => void;
+  /** path → current on-disk text for the plan's update targets. */
+  currentContents?: Record<string, string>;
 }) {
+  const [showFull, setShowFull] = useState<Record<string, boolean>>({});
   return (
     <div style={s.overlay} onClick={onCancel}>
       <div style={s.card} onClick={(e) => e.stopPropagation()}>
@@ -47,7 +56,20 @@ export default function PlanPreview({
                   {op.path}
                 </span>
               </div>
-              {op.content != null && <pre style={s.content}>{op.content}</pre>}
+              {op.op === "update" &&
+              op.content != null &&
+              currentContents?.[op.path] != null &&
+              !showFull[op.path] ? (
+                <DiffView
+                  before={currentContents[op.path]}
+                  after={op.content}
+                  onShowFull={() =>
+                    setShowFull((prev) => ({ ...prev, [op.path]: true }))
+                  }
+                />
+              ) : (
+                op.content != null && <pre style={s.content}>{op.content}</pre>
+              )}
               {op.op === "delete" && (
                 <span style={s.deleteNote}>This file will be removed.</span>
               )}
@@ -86,6 +108,54 @@ export default function PlanPreview({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Hunked line diff — additions bold with "+", removals muted with "−"; a
+ * too-large or unchanged file falls back to sensible text. Achromatic. */
+function DiffView({
+  before,
+  after,
+  onShowFull,
+}: {
+  before: string;
+  after: string;
+  onShowFull: () => void;
+}) {
+  const hunks = diffHunks(before, after);
+  if (hunks === null) {
+    return <pre style={s.content}>{after}</pre>; // too large to diff exactly
+  }
+  if (hunks.length === 0) {
+    return <span style={s.deleteNote}>No changes to this file.</span>;
+  }
+  return (
+    <div style={s.diffWrap}>
+      {hunks.map((h, hi) => (
+        <div key={hi}>
+          {hi > 0 && <div style={s.hunkGap}>···</div>}
+          <div style={s.hunkHeader}>@ line {h.beforeLine}</div>
+          {h.lines.map((l, li) => (
+            <div
+              key={li}
+              style={{
+                ...s.diffLine,
+                ...(l.kind === "add" ? s.diffAdd : null),
+                ...(l.kind === "del" ? s.diffDel : null),
+              }}
+            >
+              <span style={s.diffSign}>
+                {l.kind === "add" ? "+" : l.kind === "del" ? "−" : " "}
+              </span>
+              {l.text || " "}
+            </div>
+          ))}
+        </div>
+      ))}
+      <button style={s.fullToggle} onClick={onShowFull}>
+        Show full file
+      </button>
     </div>
   );
 }
@@ -164,6 +234,55 @@ const s: Record<string, CSSProperties> = {
     color: "var(--ink-muted)",
   },
   edgeRemoved: { textDecoration: "line-through" },
+  diffWrap: {
+    display: "flex",
+    flexDirection: "column",
+    background: "var(--paper-sunken)",
+    border: "1px solid var(--rule)",
+    borderRadius: "var(--radius-sm)",
+    padding: "0.45rem 0.6rem",
+    maxHeight: "260px",
+    overflowY: "auto",
+  },
+  diffLine: {
+    display: "flex",
+    gap: "0.45rem",
+    fontFamily: "var(--font-mono)",
+    fontSize: "0.72rem",
+    lineHeight: 1.5,
+    color: "var(--ink-muted)",
+    whiteSpace: "pre-wrap",
+  },
+  /* Weight, not hue: additions read heavy, removals read struck + faint. */
+  diffAdd: { color: "var(--ink)", fontWeight: 650 },
+  diffDel: { textDecoration: "line-through", opacity: 0.55 },
+  diffSign: { width: "1ch", flexShrink: 0, userSelect: "none" },
+  hunkHeader: {
+    fontFamily: "var(--font-mono)",
+    fontSize: "0.62rem",
+    letterSpacing: "0.06em",
+    color: "var(--ink-muted)",
+    margin: "0.2rem 0",
+  },
+  hunkGap: {
+    textAlign: "center",
+    color: "var(--ink-muted)",
+    fontSize: "0.7rem",
+    margin: "0.15rem 0",
+  },
+  fullToggle: {
+    alignSelf: "flex-start",
+    marginTop: "0.4rem",
+    font: "inherit",
+    fontSize: "0.7rem",
+    color: "var(--ink-muted)",
+    background: "none",
+    border: "none",
+    textDecoration: "underline",
+    textUnderlineOffset: "2px",
+    cursor: "pointer",
+    padding: 0,
+  },
   content: {
     margin: 0,
     padding: "0.6rem 0.75rem",
