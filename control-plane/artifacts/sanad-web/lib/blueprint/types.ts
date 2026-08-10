@@ -30,6 +30,11 @@ export interface BlueprintNode {
    * and "changed" content is excluded from new agent sessions until reviewed.
    */
   trust?: TrustState;
+  /**
+   * Committed-ness of the node's files: "modified" = tracked with uncommitted
+   * changes, "untracked" = never committed. Absent = clean (or no repo).
+   */
+  git?: "modified" | "untracked";
 }
 
 export interface BlueprintEdge {

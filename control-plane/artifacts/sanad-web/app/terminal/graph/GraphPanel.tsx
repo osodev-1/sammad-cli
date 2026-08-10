@@ -162,6 +162,7 @@ export default function GraphPanel({
         status: n.status,
         severity: worstSeverity(graph.diagnostics, n.id),
         trust: n.trust,
+        git: n.git,
         focused: n.id === focused,
       },
     }));

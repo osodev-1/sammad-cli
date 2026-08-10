@@ -19,7 +19,7 @@ from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sanad_blueprint.graph import compile_graph
@@ -100,12 +100,49 @@ def _annotate_trust(payload: dict, root: Path) -> dict:
     return payload
 
 
+async def _annotate_git(payload: dict, request: Request, root: Path) -> dict:
+    """Stamp each node with its committed-ness: ``modified`` (tracked files
+    with uncommitted changes) or ``untracked`` (never committed); clean nodes
+    carry nothing. Degrades to a no-op when the workspace has no repo or git
+    fails — the graph must never depend on git health.
+
+    Porcelain nuance: an entirely-new resource folder appears as ONE untracked
+    entry ``dir/`` (git does not enumerate inside untracked directories), so
+    untracked matching is prefix-aware.
+    """
+    try:
+        from sanad_terminal.routes_git import _repo
+
+        st = await _repo(request, root).status()
+    except Exception:
+        return payload
+    if not st.is_repo:
+        return payload
+    dirty = set(st.staged) | set(st.unstaged)
+    untracked_files = {p for p in st.untracked if not p.endswith("/")}
+    untracked_dirs = tuple(p for p in st.untracked if p.endswith("/"))
+
+    def _is_untracked(path: str) -> bool:
+        return path in untracked_files or path.startswith(untracked_dirs)
+
+    for node in payload.get("nodes", []):
+        paths = [node.get("path"), *node.get("supporting_paths", [])]
+        paths = [p for p in paths if isinstance(p, str)]
+        if any(p in dirty for p in paths):
+            node["git"] = "modified"
+        elif untracked_dirs or untracked_files:
+            if any(_is_untracked(p) for p in paths):
+                node["git"] = "untracked"
+    return payload
+
+
 @router.get("/graph")
-async def graph(root: Root) -> JSONResponse:
+async def graph(request: Request, root: Root) -> JSONResponse:
     """The compiled graph (nodes, edges, diagnostics) for the workspace."""
     index = index_blueprint(_sanad_dir(root))
     compiled = compile_graph(index)
     payload = _annotate_trust(compiled.to_dict(), root)
+    payload = await _annotate_git(payload, request, root)
     payload["initialized"] = _sanad_dir(root).is_dir()
     return JSONResponse(payload)
 
@@ -240,7 +277,7 @@ class ApplyBody(BaseModel):
 
 
 @router.post("/apply")
-async def apply(root: Root, body: ApplyBody) -> JSONResponse:
+async def apply(request: Request, root: Root, body: ApplyBody) -> JSONResponse:
     """Apply an approved plan atomically; record it; return the fresh graph."""
     try:
         parsed = plan_from_dict(body.plan)
@@ -287,6 +324,7 @@ async def apply(root: Root, body: ApplyBody) -> JSONResponse:
             remove_trust(root, deleted_executables)
 
         graph = _annotate_trust(compile_graph(index_blueprint(_sanad_dir(root))).to_dict(), root)
+        graph = await _annotate_git(graph, request, root)
 
     return JSONResponse({"ok": True, "txId": tx_id, "graph": graph})
 

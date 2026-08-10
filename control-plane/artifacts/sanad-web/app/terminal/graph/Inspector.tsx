@@ -67,6 +67,16 @@ export default function Inspector({
           </Section>
         )}
 
+        {node.git && (
+          <Section title="Changes">
+            <p style={s.trustNote}>
+              {node.git === "untracked"
+                ? "New — never committed. Commit from the workspace header to record it."
+                : "Has uncommitted changes. Commit from the workspace header to record them."}
+            </p>
+          </Section>
+        )}
+
         <Section title="Files">
           {/* A skill IS its instructions — surface SKILL.md first and plainly,
               so "where is the md?" never needs hunting through paths. */}

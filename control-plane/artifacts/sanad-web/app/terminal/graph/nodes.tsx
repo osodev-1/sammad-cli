@@ -10,6 +10,8 @@ export interface BlueprintNodeData extends Record<string, unknown> {
   severity: Severity | null;
   /** S9: set when the node's executable definition is not currently trusted. */
   trust?: TrustState;
+  /** Committed-ness: "modified" | "untracked"; absent = clean. */
+  git?: "modified" | "untracked";
   selected?: boolean;
   focused?: boolean;
 }
@@ -44,6 +46,17 @@ function BlueprintNodeInner({ data, selected }: NodeProps) {
         >
           {d.trust === "changed" ? "changed" : "unreviewed"}
         </span>
+      )}
+      {/* Committed-ness in words + a hollow corner dot — never hue. */}
+      {d.git && (
+        <span
+          style={s.gitDot}
+          title={
+            d.git === "untracked"
+              ? "New — never committed"
+              : "Uncommitted changes"
+          }
+        />
       )}
       {d.severity && (
         <span
@@ -123,6 +136,19 @@ const s: Record<string, CSSProperties> = {
     borderRadius: "var(--radius-pill)",
     padding: "0 0.35rem",
     lineHeight: 1.6,
+  },
+  /* Hollow ring top-left = uncommitted work on this resource (the severity
+     dot keeps top-right). Solid-vs-hollow reads in greyscale. */
+  gitDot: {
+    position: "absolute",
+    top: "6px",
+    left: "6px",
+    width: "7px",
+    height: "7px",
+    borderRadius: "999px",
+    border: "1.5px solid var(--ink)",
+    background: "var(--paper)",
+    boxSizing: "border-box",
   },
   handle: {
     width: "6px",

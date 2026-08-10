@@ -353,3 +353,35 @@ def test_plan_remove_edge_action(client: TestClient):
         e["source"] == "agent:primary" and e["target"] == "skill:code-review"
         for e in applied.json()["graph"]["edges"]
     )
+
+
+def test_graph_annotates_committedness(client: TestClient):
+    """Nodes carry git state — untracked (never committed) vs modified
+    (tracked, dirty) vs clean (no key) — and the graph degrades to no
+    annotation when the workspace has no repo at all."""
+    import subprocess
+
+    _seed(client)
+    # No repo yet → no git keys anywhere.
+    bare = client.get("/internal/blueprint/graph", headers=HEADERS).json()
+    assert all("git" not in n for n in bare["nodes"])
+
+    ws = client._users_dir / USER / "workspace"  # type: ignore[attr-defined]
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@t", "HOME": str(ws), "PATH": "/usr/bin:/bin:/usr/local/bin"}
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=ws, env=env, check=True)
+    # Commit the agent; leave the skill folder untracked.
+    subprocess.run(["git", "add", ".sanad/agents"], cwd=ws, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=ws, env=env, check=True)
+
+    g = client.get("/internal/blueprint/graph", headers=HEADERS).json()
+    by_id = {n["id"]: n for n in g["nodes"]}
+    assert "git" not in by_id["agent:primary"]  # committed = clean
+    assert by_id["skill:code-review"]["git"] == "untracked"
+
+    # Edit the committed agent manifest → modified.
+    (ws / ".sanad/agents/primary/agent.yaml").write_text(
+        (ws / ".sanad/agents/primary/agent.yaml").read_text() + "# touched\n"
+    )
+    g2 = client.get("/internal/blueprint/graph", headers=HEADERS).json()
+    assert {n["id"]: n.get("git") for n in g2["nodes"]}["agent:primary"] == "modified"
