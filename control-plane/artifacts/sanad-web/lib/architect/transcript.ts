@@ -24,6 +24,7 @@ export type Block =
       /** Display-only extras, not persisted. */
       edges?: number;
       updated?: number;
+      removed?: number;
       state: "pending" | "applied" | "expired";
       txId?: string;
       /** Present only while actionable (this session, not yet applied). */

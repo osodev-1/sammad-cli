@@ -29,6 +29,8 @@ _MANIFEST_NAMES = {
     "policy.yaml",
     "evaluation.yaml",
     "template.yaml",
+    "prompt.yaml",
+    "context.yaml",
 }
 # Any *.yaml directly under publish/ is a PublishProfile.
 _PUBLISH_DIR = "publish"

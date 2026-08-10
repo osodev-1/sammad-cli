@@ -93,6 +93,25 @@ def record_trust(root: Path, hashes: dict[str, str], source: TrustSource) -> Non
     now = datetime.now(UTC).isoformat()
     for rel, digest in hashes.items():
         entries[rel] = {"sha256": digest, "trustedAt": now, "source": source}
+    _write_store(root, entries)
+
+
+def remove_trust(root: Path, rels: list[str]) -> None:
+    """Drop entries for deleted definitions — an orphaned trust record must
+    never vouch for content that later reappears at the same path."""
+    if not rels:
+        return
+    entries = load_trust(root)
+    changed = False
+    for rel in rels:
+        if rel in entries:
+            del entries[rel]
+            changed = True
+    if changed:
+        _write_store(root, entries)
+
+
+def _write_store(root: Path, entries: dict[str, dict]) -> None:
     target = trust_file_for(root)
     payload = json.dumps({"version": 1, "entries": entries}, indent=2)
     fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".trust-")

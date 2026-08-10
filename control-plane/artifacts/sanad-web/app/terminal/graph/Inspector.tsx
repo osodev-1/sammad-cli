@@ -10,6 +10,7 @@ export default function Inspector({
   onClose,
   onTrust,
   trustBusy,
+  onDelete,
 }: {
   node: BlueprintNode;
   graph: BlueprintGraph;
@@ -18,6 +19,8 @@ export default function Inspector({
   /** S9 manual review: trust this node's executable definition as-is. */
   onTrust?: (node: BlueprintNode) => void;
   trustBusy?: boolean;
+  /** Draft this resource's deletion (review-gated — the plan is the confirm). */
+  onDelete?: (node: BlueprintNode) => void;
 }) {
   const diagnostics = graph.diagnostics.filter(
     (d) => d.resource_id === node.id,
@@ -129,6 +132,20 @@ export default function Inspector({
                 <span style={s.diagMsg}>{d.message}</span>
               </div>
             ))}
+          </Section>
+        )}
+
+        {/* Deletion drafts a plan — the review modal (every file removed,
+            every reference stripped) is the real confirmation step. */}
+        {onDelete && node.kind !== "Project" && (
+          <Section title="Danger">
+            <button style={s.deleteBtn} onClick={() => onDelete(node)}>
+              Delete {node.kind.toLowerCase()}…
+            </button>
+            <p style={s.deleteNote}>
+              Drafts a removal plan for review — its files and every reference
+              to it.
+            </p>
           </Section>
         )}
       </div>
@@ -258,6 +275,24 @@ const s: Record<string, CSSProperties> = {
     borderRadius: "var(--radius-pill)",
     padding: "0.25rem 0.8rem",
     cursor: "pointer",
+  },
+  deleteBtn: {
+    alignSelf: "flex-start",
+    font: "inherit",
+    fontSize: "0.76rem",
+    fontWeight: 700,
+    color: "var(--ink)",
+    background: "none",
+    border: "1px solid var(--ink)",
+    borderRadius: "var(--radius-pill)",
+    padding: "0.25rem 0.8rem",
+    cursor: "pointer",
+  },
+  deleteNote: {
+    margin: 0,
+    fontSize: "0.72rem",
+    lineHeight: 1.5,
+    color: "var(--ink-muted)",
   },
   rel: {
     display: "flex",

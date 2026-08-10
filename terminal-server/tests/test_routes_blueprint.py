@@ -297,3 +297,59 @@ def test_trust_review_rejects_bad_paths_and_requires_auth(client: TestClient):
         == 404
     )
     assert client.get("/internal/blueprint/trust").status_code == 401
+
+
+def test_plan_delete_resource_and_trust_cleanup(client: TestClient):
+    """deleteResource plans the removal + reference cascade; applying it also
+    drops the skill's trust entry so an orphaned record can never vouch for
+    content recreated later at the same path."""
+    _seed(client)  # the seed agent already `uses` the skill — cascade fodder
+    res = client.put(
+        "/internal/workspace/file?path=.sanad/skills/code-review/SKILL.md",
+        headers=HEADERS,
+        content=b"# Review\n",
+    )
+    assert res.status_code == 200
+    reviewed = client.post(
+        "/internal/blueprint/trust",
+        headers=HEADERS,
+        json={"path": ".sanad/skills/code-review/SKILL.md"},
+    )
+    assert reviewed.status_code == 200
+
+    plan_res = client.post(
+        "/internal/blueprint/plan",
+        headers=HEADERS,
+        json={"action": "deleteResource", "id": "skill:code-review"},
+    )
+    assert plan_res.status_code == 200, plan_res.text
+    plan = plan_res.json()["plan"]
+    assert plan["graphDelta"]["nodesRemoved"] == ["skill:code-review"]
+
+    apply_res = client.post("/internal/blueprint/apply", headers=HEADERS, json={"plan": plan})
+    assert apply_res.status_code == 200, apply_res.text
+    graph = apply_res.json()["graph"]
+    assert not any(n["id"] == "skill:code-review" for n in graph["nodes"])
+    # Trust entry is gone with the definition.
+    trust = client.get("/internal/blueprint/trust", headers=HEADERS).json()
+    assert ".sanad/skills/code-review/SKILL.md" not in trust.get("entries", trust)
+
+
+def test_plan_remove_edge_action(client: TestClient):
+    _seed(client)  # the seed already contains agent:primary uses skill:code-review
+    remove = client.post(
+        "/internal/blueprint/plan",
+        headers=HEADERS,
+        json={"action": "removeEdge", "source": "agent:primary", "target": "skill:code-review"},
+    )
+    assert remove.status_code == 200, remove.text
+    plan = remove.json()["plan"]
+    assert plan["graphDelta"]["edgesRemoved"] == [
+        {"from": "agent:primary", "type": "uses", "to": "skill:code-review"}
+    ]
+    applied = client.post("/internal/blueprint/apply", headers=HEADERS, json={"plan": plan})
+    assert applied.status_code == 200
+    assert not any(
+        e["source"] == "agent:primary" and e["target"] == "skill:code-review"
+        for e in applied.json()["graph"]["edges"]
+    )

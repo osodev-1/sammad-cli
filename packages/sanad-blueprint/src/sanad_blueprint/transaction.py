@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-from .edges import EDGE_RULES
+from .edges import EDGE_RULES, target_field_ids
 from .envelope import parse_manifest
 from .indexer import _MANIFEST_NAMES, BlueprintIndex
 from .schemas import ResourceKind
@@ -70,7 +70,9 @@ class ChangePlan:
     preconditions: list[Precondition] = field(default_factory=list)
     nodes_added: list[str] = field(default_factory=list)
     nodes_changed: list[str] = field(default_factory=list)
+    nodes_removed: list[str] = field(default_factory=list)
     edges_added: list[dict[str, str]] = field(default_factory=list)
+    edges_removed: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -80,7 +82,9 @@ class ChangePlan:
             "graphDelta": {
                 "nodesAdded": self.nodes_added,
                 "nodesChanged": self.nodes_changed,
+                "nodesRemoved": self.nodes_removed,
                 "edgesAdded": self.edges_added,
+                "edgesRemoved": self.edges_removed,
             },
         }
 
@@ -101,7 +105,9 @@ def plan_from_dict(raw: dict) -> ChangePlan:
         preconditions=pres,
         nodes_added=list(delta.get("nodesAdded", [])),
         nodes_changed=list(delta.get("nodesChanged", [])),
+        nodes_removed=list(delta.get("nodesRemoved", [])),
         edges_added=list(delta.get("edgesAdded", [])),
+        edges_removed=list(delta.get("edgesRemoved", [])),
     )
 
 
@@ -189,18 +195,144 @@ def plan_create_edge(
     )
 
 
+def _disk_hash(workspace: Path, rel: str) -> str:
+    """Sha256 of a file's current on-disk content (the delete precondition)."""
+    try:
+        return _sha256((workspace / rel).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise PlanError("file_unreadable", f"{rel}: {exc}") from exc
+
+
+def plan_remove_edge(
+    index: BlueprintIndex, source_id: str, target_id: str, edge_type: str | None = None
+) -> ChangePlan:
+    """Remove a typed edge — the mirror of plan_create_edge: load the source
+    manifest, drop the target id from the deriving field, re-dump."""
+    source = index.resources.get(source_id)
+    if source is None:
+        raise PlanError("unknown_source", f"no resource {source_id}")
+    target = index.resources.get(target_id)
+    if target is None:
+        raise PlanError("unknown_target", f"no resource {target_id}")
+
+    doc = _load_manifest_doc(index, source.manifest_path)
+    spec = doc.get("spec")
+    spec = spec if isinstance(spec, dict) else {}
+    # Find the rule whose field actually CONTAINS the target (matching the
+    # requested type when given) — the edge must exist to be removed.
+    found: str | None = None
+    for rule in EDGE_RULES:
+        if (
+            rule.source_kind == source.resource.kind
+            and target.resource.kind in rule.target_kinds
+            and (edge_type is None or rule.edge_type == edge_type)
+        ):
+            existing = spec.get(rule.source_field)
+            if isinstance(existing, list) and target_id in existing:
+                spec[rule.source_field] = [x for x in existing if x != target_id]
+                found = rule.edge_type
+                break
+    if found is None:
+        raise PlanError("edge_missing", f"{source_id} has no such edge to {target_id}")
+
+    current_hash = index.file_hashes.get(source.manifest_path)
+    if current_hash is None:
+        raise PlanError("missing_manifest", f"manifest {source.manifest_path} not indexed")
+    doc["spec"] = spec
+    new_content = yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
+
+    return ChangePlan(
+        summary=f"{source_id} no longer {found} {target_id}",
+        operations=[Operation(op="update", path=source.manifest_path, content=new_content)],
+        preconditions=[Precondition(path=source.manifest_path, sha256=current_hash)],
+        edges_removed=[{"from": source_id, "type": found, "to": target_id}],
+    )
+
+
+def plan_delete_resource(index: BlueprintIndex, resource_id: str) -> ChangePlan:
+    """Delete a resource — its manifest and supporting files — and cascade:
+    every OTHER manifest that references the id gets an update dropping the
+    reference, so a delete never leaves broken edges behind.
+
+    Every removed file carries a current-disk-hash precondition (a delete must
+    prove it is deleting what the reviewer saw — Scenario G applies to removal
+    exactly as it does to writes)."""
+    indexed = index.resources.get(resource_id)
+    if indexed is None:
+        raise PlanError("unknown_resource", f"no resource {resource_id}")
+    if indexed.resource.kind == ResourceKind.PROJECT:
+        raise PlanError("cannot_delete_project", "the project manifest anchors the blueprint")
+
+    workspace = Path(index.root).parent
+    ops: list[Operation] = []
+    pres: list[Precondition] = []
+    edges_removed: list[dict[str, str]] = []
+
+    # 1. Cascade: strip inbound references from every other manifest.
+    for other in index.resources.values():
+        if other.resource.metadata.id == resource_id:
+            continue
+        doc: dict | None = None
+        spec: dict = {}
+        changed = False
+        for rule in EDGE_RULES:
+            if rule.source_kind != other.resource.kind:
+                continue
+            if resource_id not in target_field_ids(other.resource.spec, rule.source_field):
+                continue
+            if doc is None:
+                doc = _load_manifest_doc(index, other.manifest_path)
+                raw_spec = doc.get("spec")
+                spec = raw_spec if isinstance(raw_spec, dict) else {}
+            existing = spec.get(rule.source_field)
+            if isinstance(existing, list) and resource_id in existing:
+                spec[rule.source_field] = [x for x in existing if x != resource_id]
+                changed = True
+                edges_removed.append(
+                    {"from": other.resource.metadata.id, "type": rule.edge_type, "to": resource_id}
+                )
+        if doc is not None and changed:
+            doc["spec"] = spec
+            new_content = yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
+            current = index.file_hashes.get(other.manifest_path)
+            if current is None:
+                raise PlanError("missing_manifest", f"{other.manifest_path} not indexed")
+            ops.append(Operation(op="update", path=other.manifest_path, content=new_content))
+            pres.append(Precondition(path=other.manifest_path, sha256=current))
+
+    # 2. The resource's own files — manifest last so a partial preview reads
+    #    naturally. Only files still on disk are deleted (a vanished supporting
+    #    file is not an error; it is already gone).
+    own = [*indexed.supporting_paths, indexed.manifest_path]
+    for rel in own:
+        if not (workspace / rel).is_file():
+            continue
+        pres.append(Precondition(path=rel, sha256=_disk_hash(workspace, rel)))
+        ops.append(Operation(op="delete", path=rel))
+
+    name = indexed.resource.metadata.name or resource_id
+    return ChangePlan(
+        summary=f"Delete {indexed.resource.kind.value} “{name}”",
+        operations=ops,
+        preconditions=pres,
+        nodes_removed=[resource_id],
+        edges_removed=edges_removed,
+    )
+
+
 MAX_PLAN_FILES = 20
 MAX_FILE_CHARS = 200_000
 
 
 def plan_write_files(
-    index: BlueprintIndex, files: Sequence[tuple[str, str]], summary: str
+    index: BlueprintIndex, files: Sequence[tuple[str, str | None]], summary: str
 ) -> ChangePlan:
     """Plan writing author-supplied file contents (the Architect's editor).
 
     Unlike ``plan_create_resource`` (template scaffold), the caller supplies
     the COMPLETE desired content of each file — new or existing — so an agent
-    can draft real definitions and keep iterating on them. Manifests must
+    can draft real definitions and keep iterating on them. A content of
+    ``None`` DELETES the file (the removal side of editing). Manifests must
     parse through the envelope before they can enter a plan (a proposal can
     never make the blueprint less valid than the author intended); every
     precondition is hashed from disk, so a file that changed since drafting
@@ -218,17 +350,34 @@ def plan_write_files(
     pres: list[Precondition] = []
     nodes_added: list[str] = []
     nodes_changed: list[str] = []
+    nodes_removed: list[str] = []
 
     for path, content in files:
         _check_plan_path(path)
         if path in seen_paths:
             raise PlanError("duplicate_path", f"{path} appears twice in the plan")
         seen_paths.add(path)
-        if len(content) > MAX_FILE_CHARS:
-            raise PlanError("file_too_large", f"{path} exceeds {MAX_FILE_CHARS} characters")
 
         target = workspace / path
         exists = target.is_file()
+
+        if content is None:
+            # Delete entry. The file must exist (deleting the absent is a
+            # stale-draft smell, not a no-op) and carries a hash precondition.
+            if not exists:
+                raise PlanError("delete_missing", f"{path} does not exist")
+            pres.append(Precondition(path=path, sha256=_disk_hash(workspace, path)))
+            ops.append(Operation(op="delete", path=path))
+            if PurePosixPath(path).name in _MANIFEST_NAMES:
+                gone = next(
+                    (r for r in index.resources.values() if r.manifest_path == path), None
+                )
+                if gone is not None:
+                    nodes_removed.append(gone.resource.metadata.id)
+            continue
+
+        if len(content) > MAX_FILE_CHARS:
+            raise PlanError("file_too_large", f"{path} exceeds {MAX_FILE_CHARS} characters")
 
         if PurePosixPath(path).name in _MANIFEST_NAMES:
             parsed = parse_manifest(path, content)
@@ -272,6 +421,7 @@ def plan_write_files(
         preconditions=pres,
         nodes_added=nodes_added,
         nodes_changed=nodes_changed,
+        nodes_removed=nodes_removed,
     )
 
 
@@ -311,8 +461,13 @@ def apply_plan(workspace_root: Path, plan: ChangePlan) -> ApplyResult:
     #    plan could write ../blueprint-trust.json or escape the workspace.
     for pre in plan.preconditions:
         _check_plan_path(pre.path)
+    protected = {p.path for p in plan.preconditions if p.sha256 is not None}
     for op in plan.operations:
         _check_plan_path(op.path)
+        # A delete must prove WHAT it deletes: without a content-hash
+        # precondition, a stale plan could remove a file the user never saw.
+        if op.op == "delete" and op.path not in protected:
+            raise PlanError("unprotected_delete", f"{op.path}: delete without a hash precondition")
 
     # 1. Verify all preconditions before touching anything.
     for pre in plan.preconditions:

@@ -110,11 +110,31 @@ def render(kind: ResourceKind, rid: str, name: str) -> list[TemplateFile]:
                 _manifest(kind, rid, name, "  filesystem:\n    deny:\n      - '../**'\n"),
             )
         ]
+    if kind == ResourceKind.WORKFLOW:
+        return [
+            TemplateFile(
+                "workflow.yaml",
+                _manifest(kind, rid, name, "  steps: []\n"),
+            )
+        ]
+    if kind == ResourceKind.PROMPT:
+        return [
+            TemplateFile("prompt.yaml", _manifest(kind, rid, name, "  content: PROMPT.md\n")),
+            TemplateFile("PROMPT.md", f"# {name}\n\nWrite the reusable prompt text here.\n"),
+        ]
+    if kind == ResourceKind.CONTEXT_DOCUMENT:
+        return [
+            TemplateFile("context.yaml", _manifest(kind, rid, name, "  source: CONTENT.md\n")),
+            TemplateFile(
+                "CONTENT.md", f"# {name}\n\nBackground knowledge agents should read.\n"
+            ),
+        ]
     # Fallback: a bare manifest with an empty spec.
     return [TemplateFile(f"{KIND_ID_PREFIX[kind]}.yaml", _manifest(kind, rid, name, "  {}\n"))]
 
 
-# Kinds a user can scaffold from the UI (the connectable core for M2).
+# Kinds a user can scaffold from the UI (the connectable core; Evaluation,
+# Template and PublishProfile stay read-only until their flows land — S10).
 CREATABLE_KINDS: tuple[ResourceKind, ...] = (
     ResourceKind.AGENT,
     ResourceKind.SKILL,
@@ -122,6 +142,9 @@ CREATABLE_KINDS: tuple[ResourceKind, ...] = (
     ResourceKind.MCP_SERVER,
     ResourceKind.HOOK,
     ResourceKind.POLICY,
+    ResourceKind.WORKFLOW,
+    ResourceKind.PROMPT,
+    ResourceKind.CONTEXT_DOCUMENT,
 )
 
 KIND_DIR: dict[ResourceKind, str] = {

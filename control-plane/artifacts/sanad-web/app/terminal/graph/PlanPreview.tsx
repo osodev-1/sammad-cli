@@ -30,17 +30,44 @@ export default function PlanPreview({
           {plan.operations.map((op) => (
             <div key={op.path} style={s.op}>
               <div style={s.opHead}>
-                <span style={s.opBadge}>{op.op}</span>
-                <span style={s.opPath}>{op.path}</span>
+                <span
+                  style={{
+                    ...s.opBadge,
+                    ...(op.op === "delete" ? s.opBadgeDelete : null),
+                  }}
+                >
+                  {op.op}
+                </span>
+                <span
+                  style={{
+                    ...s.opPath,
+                    ...(op.op === "delete" ? s.opPathDelete : null),
+                  }}
+                >
+                  {op.path}
+                </span>
               </div>
               {op.content != null && <pre style={s.content}>{op.content}</pre>}
+              {op.op === "delete" && (
+                <span style={s.deleteNote}>This file will be removed.</span>
+              )}
             </div>
           ))}
           {plan.graphDelta.edgesAdded.length > 0 && (
             <div style={s.op}>
-              <span style={s.opBadge}>edge</span>
+              <span style={s.opBadge}>edge +</span>
               {plan.graphDelta.edgesAdded.map((e, i) => (
                 <span key={i} style={s.edge}>
+                  {e.from} <span style={s.edgeType}>{e.type}</span> {e.to}
+                </span>
+              ))}
+            </div>
+          )}
+          {(plan.graphDelta.edgesRemoved?.length ?? 0) > 0 && (
+            <div style={s.op}>
+              <span style={{ ...s.opBadge, ...s.opBadgeDelete }}>edge −</span>
+              {plan.graphDelta.edgesRemoved!.map((e, i) => (
+                <span key={i} style={{ ...s.edge, ...s.edgeRemoved }}>
                   {e.from} <span style={s.edgeType}>{e.type}</span> {e.to}
                 </span>
               ))}
@@ -124,6 +151,19 @@ const s: Record<string, CSSProperties> = {
     fontSize: "0.76rem",
     color: "var(--ink-soft)",
   },
+  /* Deletions carry weight, not hue: solid badge, struck path. */
+  opBadgeDelete: {
+    background: "var(--ink)",
+    color: "var(--paper)",
+    borderColor: "var(--ink)",
+  },
+  opPathDelete: { textDecoration: "line-through" },
+  deleteNote: {
+    fontSize: "0.72rem",
+    fontStyle: "italic",
+    color: "var(--ink-muted)",
+  },
+  edgeRemoved: { textDecoration: "line-through" },
   content: {
     margin: 0,
     padding: "0.6rem 0.75rem",

@@ -111,30 +111,43 @@ class FileDraft(BaseModel):
             ".sanad/skills/code-review/SKILL.md). Plans may only touch .sanad/."
         )
     )
-    content: str = Field(
+    content: str | None = Field(
+        default=None,
         description=(
             "The COMPLETE desired content of the file — what it should contain "
-            "after apply, not a diff or a fragment."
-        )
+            "after apply, not a diff or a fragment. Omit (with delete=true) to "
+            "DELETE the file instead."
+        ),
+    )
+    delete: bool = Field(
+        default=False,
+        description="True to delete this file (content must be omitted).",
     )
 
 
 class DraftParams(BaseModel):
-    action: Literal["writeFiles", "createResource", "createEdge"] = Field(
+    action: Literal[
+        "writeFiles", "createResource", "createEdge", "deleteResource", "removeEdge"
+    ] = Field(
         description=(
             "writeFiles to draft REAL file contents — new resources with "
-            "substantive definitions, or edits to existing files (preferred); "
-            "createResource to scaffold an empty template; createEdge to connect "
-            "two existing resources with a typed relationship."
+            "substantive definitions, edits, or per-file deletions (preferred); "
+            "createResource to scaffold an empty template; createEdge/removeEdge "
+            "to connect or disconnect two existing resources; deleteResource to "
+            "remove a resource entirely (its files AND every reference to it)."
         )
     )
     files: list[FileDraft] | None = Field(
         default=None,
         description=(
-            "writeFiles only: every file to write, each with its complete "
-            "content. Read existing files first and include their full updated "
-            "content when editing."
+            "writeFiles only: every file to write or delete. Writes carry the "
+            "complete content (read existing files first); deletions set "
+            "delete=true. Removing a whole resource: prefer deleteResource."
         ),
+    )
+    id: str | None = Field(
+        default=None,
+        description="deleteResource only: the resource id (e.g. skill:code-review).",
     )
     summary: str | None = Field(
         default=None,
@@ -200,6 +213,8 @@ class DraftBlueprintChange(CallableTool2[DraftParams]):
             PlanError,
             plan_create_edge,
             plan_create_resource,
+            plan_delete_resource,
+            plan_remove_edge,
             plan_write_files,
         )
 
@@ -215,14 +230,34 @@ class DraftBlueprintChange(CallableTool2[DraftParams]):
             if params.action == "writeFiles":
                 if not params.files:
                     return ToolError(
-                        message="writeFiles needs `files` — each with a path and its complete content.",
+                        message="writeFiles needs `files` — each with a path and its complete content (or delete=true).",
                         brief="Missing files",
                     )
+                for f in params.files:
+                    if not f.delete and f.content is None:
+                        return ToolError(
+                            message=f"{f.path}: provide content, or set delete=true.",
+                            brief="Missing content",
+                        )
                 plan = plan_write_files(
                     index,
-                    [(f.path, f.content) for f in params.files],
+                    [(f.path, None if f.delete else f.content) for f in params.files],
                     params.summary or "Update the blueprint",
                 )
+            elif params.action == "deleteResource":
+                if not params.id:
+                    return ToolError(
+                        message="deleteResource needs `id` (e.g. skill:code-review).",
+                        brief="Missing id",
+                    )
+                plan = plan_delete_resource(index, params.id)
+            elif params.action == "removeEdge":
+                if not params.source or not params.target:
+                    return ToolError(
+                        message="removeEdge needs both `source` and `target` resource ids.",
+                        brief="Missing source/target",
+                    )
+                plan = plan_remove_edge(index, params.source, params.target, params.edge_type)
             elif params.action == "createResource":
                 if not params.kind or not params.name:
                     return ToolError(

@@ -32,7 +32,9 @@ from sanad_blueprint.transaction import (
     apply_plan,
     plan_create_edge,
     plan_create_resource,
+    plan_delete_resource,
     plan_from_dict,
+    plan_remove_edge,
     rollback,
 )
 from sanad_blueprint.validate import validate_index
@@ -41,6 +43,7 @@ from sanad_terminal.blueprint_trust import (
     file_sha256,
     is_executable_path,
     record_trust,
+    remove_trust,
     trust_statuses,
 )
 from sanad_terminal.routes_workspace import workspace_root
@@ -160,12 +163,13 @@ async def templates() -> JSONResponse:
 
 
 class PlanBody(BaseModel):
-    action: str  # "createResource" | "createEdge"
+    action: str  # "createResource" | "createEdge" | "deleteResource" | "removeEdge"
     kind: str | None = None
     name: str | None = None
     source: str | None = None
     edgeType: str | None = None
     target: str | None = None
+    id: str | None = None  # deleteResource
 
 
 @router.post("/plan")
@@ -202,6 +206,25 @@ async def plan(root: Root, body: PlanBody) -> JSONResponse:
                 )
             # edgeType is optional: omitted → infer the legal relationship.
             built = plan_create_edge(index, body.source, body.target, body.edgeType)
+        elif body.action == "deleteResource":
+            if not body.id:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": {"code": "invalid_request", "message": "id required"}},
+                )
+            built = plan_delete_resource(index, body.id)
+        elif body.action == "removeEdge":
+            if not (body.source and body.target):
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "code": "invalid_request",
+                            "message": "source and target required",
+                        }
+                    },
+                )
+            built = plan_remove_edge(index, body.source, body.target, body.edgeType)
         else:
             return JSONResponse(
                 status_code=400,
@@ -253,6 +276,15 @@ async def apply(root: Root, body: ApplyBody) -> JSONResponse:
         }
         if applied_executables:
             record_trust(root, applied_executables, "apply")
+        # Deleted executable definitions lose their trust entries — an orphaned
+        # record must never vouch for content recreated later at the same path.
+        deleted_executables = [
+            op.path
+            for op in parsed.operations
+            if op.op == "delete" and is_executable_path(op.path)
+        ]
+        if deleted_executables:
+            remove_trust(root, deleted_executables)
 
         graph = _annotate_trust(compile_graph(index_blueprint(_sanad_dir(root))).to_dict(), root)
 

@@ -25,7 +25,10 @@ export interface ChangePlan {
     nodesAdded: string[];
     /** Resources whose manifests an update-plan rewrites (absent pre-S9 plans). */
     nodesChanged?: string[];
+    /** Resources a delete-plan removes (absent on older plans). */
+    nodesRemoved?: string[];
     edgesAdded: { from: string; type: string; to: string }[];
+    edgesRemoved?: { from: string; type: string; to: string }[];
   };
 }
 
@@ -48,7 +51,9 @@ export async function fetchCreatableKinds(
 
 type PlanRequest =
   | { action: "createResource"; kind: string; name: string }
-  | { action: "createEdge"; source: string; target: string; edgeType?: string };
+  | { action: "createEdge"; source: string; target: string; edgeType?: string }
+  | { action: "deleteResource"; id: string }
+  | { action: "removeEdge"; source: string; target: string; edgeType?: string };
 
 export interface PlanOutcome {
   plan?: ChangePlan;

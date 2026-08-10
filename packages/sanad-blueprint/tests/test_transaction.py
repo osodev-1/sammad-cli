@@ -16,6 +16,8 @@ from sanad_blueprint.transaction import (
     apply_plan,
     plan_create_edge,
     plan_create_resource,
+    plan_delete_resource,
+    plan_remove_edge,
     plan_write_files,
     rollback,
 )
@@ -229,3 +231,107 @@ def test_apply_rejects_paths_outside_sanad(tmp_path: Path):
         apply_plan(tmp_path, evil)
     assert e.value.code == "invalid_path"
     assert not (tmp_path.parent / "blueprint-trust.json").exists()
+
+
+# ------------------------------------- delete + remove-edge (R1, 2026-08-11) ---
+
+
+def test_delete_resource_cascades_inbound_references(tmp_path: Path):
+    """Deleting a skill removes its files AND strips the agent's reference —
+    a delete never leaves broken edges behind."""
+    sanad = _sanad(tmp_path)
+    apply_plan(tmp_path, plan_create_resource(index_blueprint(sanad), ResourceKind.SKILL, "Rev"))
+    index = index_blueprint(sanad)
+    apply_plan(tmp_path, plan_create_edge(index, "agent:primary", "skill:rev"))
+
+    index = index_blueprint(sanad)
+    plan = plan_delete_resource(index, "skill:rev")
+    assert plan.nodes_removed == ["skill:rev"]
+    assert {"from": "agent:primary", "type": "uses", "to": "skill:rev"} in plan.edges_removed
+    # Every delete op is protected by a hash precondition.
+    delete_paths = {op.path for op in plan.operations if op.op == "delete"}
+    protected = {p.path for p in plan.preconditions if p.sha256 is not None}
+    assert delete_paths and delete_paths <= protected
+
+    apply_plan(tmp_path, plan)
+    reindexed = index_blueprint(sanad)
+    assert "skill:rev" not in reindexed.resources
+    assert not (tmp_path / ".sanad/skills/rev").exists() or not any(
+        (tmp_path / ".sanad/skills/rev").iterdir()
+    )
+    # The agent's manifest no longer references the skill (no broken edge).
+    agent_text = (tmp_path / ".sanad/agents/primary/agent.yaml").read_text()
+    assert "skill:rev" not in agent_text
+
+
+def test_delete_project_is_refused(tmp_path: Path):
+    sanad = _sanad(tmp_path)
+    (sanad / "sanad.yaml").write_text(
+        "apiVersion: sanad.dev/v1alpha1\nkind: Project\n"
+        "metadata:\n  id: project:workspace\n  name: WS\nspec: {}\n"
+    )
+    index = index_blueprint(sanad)
+    with pytest.raises(PlanError) as e:
+        plan_delete_resource(index, "project:workspace")
+    assert e.value.code == "cannot_delete_project"
+
+
+def test_remove_edge_mirrors_create(tmp_path: Path):
+    sanad = _sanad(tmp_path)
+    apply_plan(tmp_path, plan_create_resource(index_blueprint(sanad), ResourceKind.SKILL, "Rev"))
+    apply_plan(tmp_path, plan_create_edge(index_blueprint(sanad), "agent:primary", "skill:rev"))
+
+    index = index_blueprint(sanad)
+    plan = plan_remove_edge(index, "agent:primary", "skill:rev")
+    assert plan.edges_removed == [{"from": "agent:primary", "type": "uses", "to": "skill:rev"}]
+    apply_plan(tmp_path, plan)
+    assert "skill:rev" not in (tmp_path / ".sanad/agents/primary/agent.yaml").read_text()
+
+    # Removing a non-existent edge is an error, not a no-op.
+    with pytest.raises(PlanError) as e:
+        plan_remove_edge(index_blueprint(sanad), "agent:primary", "skill:rev")
+    assert e.value.code == "edge_missing"
+
+
+def test_apply_rejects_unprotected_delete(tmp_path: Path):
+    _sanad(tmp_path)
+    evil = ChangePlan(
+        summary="delete without proof",
+        operations=[Operation(op="delete", path=".sanad/agents/primary/agent.yaml")],
+        preconditions=[],  # no hash — must be refused
+    )
+    with pytest.raises(PlanError) as e:
+        apply_plan(tmp_path, evil)
+    assert e.value.code == "unprotected_delete"
+    assert (tmp_path / ".sanad/agents/primary/agent.yaml").exists()
+
+
+def test_write_files_delete_entry(tmp_path: Path):
+    sanad = _sanad(tmp_path)
+    apply_plan(tmp_path, plan_create_resource(index_blueprint(sanad), ResourceKind.SKILL, "Rev"))
+    index = index_blueprint(sanad)
+    plan = plan_write_files(
+        index,
+        [(".sanad/skills/rev/SKILL.md", None)],
+        "Remove the instructions file",
+    )
+    [op] = plan.operations
+    assert op.op == "delete" and plan.preconditions[0].sha256 is not None
+    apply_plan(tmp_path, plan)
+    assert not (tmp_path / ".sanad/skills/rev/SKILL.md").exists()
+    # Deleting an absent file is a stale draft, not a no-op.
+    with pytest.raises(PlanError) as e:
+        plan_write_files(index_blueprint(sanad), [(".sanad/skills/rev/SKILL.md", None)], "again")
+    assert e.value.code == "delete_missing"
+
+
+def test_new_kinds_are_creatable(tmp_path: Path):
+    sanad = _sanad(tmp_path)
+    for kind, rid in (
+        (ResourceKind.WORKFLOW, "workflow:daily-review"),
+        (ResourceKind.PROMPT, "prompt:tone"),
+        (ResourceKind.CONTEXT_DOCUMENT, "context:domain-notes"),
+    ):
+        name = rid.split(":", 1)[1].replace("-", " ").title()
+        apply_plan(tmp_path, plan_create_resource(index_blueprint(sanad), kind, name))
+        assert rid in index_blueprint(sanad).resources, rid

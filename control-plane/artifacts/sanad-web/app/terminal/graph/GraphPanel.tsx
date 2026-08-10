@@ -269,6 +269,28 @@ export default function GraphPanel({
     [draft],
   );
 
+  /* Clicking an edge drafts its removal — still review-gated, so the click is
+     an intent, never a write. The PlanPreview is the confirm. */
+  const onEdgeClick = useCallback(
+    (_: unknown, edge: Edge) => {
+      void draft({
+        action: "removeEdge",
+        source: edge.source,
+        target: edge.target,
+      });
+    },
+    [draft],
+  );
+
+  /* Delete a resource (from the Inspector) — the plan cascades reference
+     removal, and the review modal lists every file and stripped edge. */
+  const onDeleteResource = useCallback(
+    (node: BlueprintNode) => {
+      void draft({ action: "deleteResource", id: node.id });
+    },
+    [draft],
+  );
+
   const submitNewNode = useCallback(() => {
     if (!newKind || !newName.trim()) return;
     setNewMenu(false);
@@ -469,6 +491,7 @@ export default function GraphPanel({
             onNodeClick={onNodeClick}
             onNodeDoubleClick={onNodeDoubleClick}
             onConnect={onConnect}
+            onEdgeClick={onEdgeClick}
             fitView
             minZoom={0.2}
             maxZoom={2}
@@ -495,6 +518,7 @@ export default function GraphPanel({
           onClose={() => setSelectedId(null)}
           onTrust={(n) => void doTrust(n)}
           trustBusy={trustBusy}
+          onDelete={onDeleteResource}
         />
       )}
 

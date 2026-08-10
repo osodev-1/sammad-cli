@@ -201,6 +201,56 @@ async def test_draft_write_files_carries_real_content(workspace: Path):
     assert pres[".sanad/skills/code-review/skill.yaml"] is None
 
 
+async def test_draft_delete_resource_cascades(workspace: Path):
+    """deleteResource drafts the removal of a resource's files AND every
+    reference to it — the review card shows exactly what disappears."""
+    skill = workspace / ".sanad" / "skills" / "review"
+    skill.mkdir(parents=True)
+    (skill / "skill.yaml").write_text(
+        "apiVersion: sanad.dev/v1alpha1\nkind: Skill\n"
+        "metadata:\n  id: skill:review\n  name: Review\nspec: {}\n"
+    )
+    # The agent references the skill, so deletion must strip that edge too.
+    (workspace / ".sanad" / "agents" / "primary" / "agent.yaml").write_text(
+        "apiVersion: sanad.dev/v1alpha1\nkind: Agent\n"
+        "metadata:\n  id: agent:primary\n  name: Primary\n"
+        "spec:\n  skills:\n    - skill:review\n"
+    )
+    res = await DraftBlueprintChange(_rt(workspace)).__call__(
+        DraftParams(action="deleteResource", id="skill:review")
+    )
+    assert not res.is_error
+    plan = _plan(res)
+    assert plan["graphDelta"]["nodesRemoved"] == ["skill:review"]
+    assert {"from": "agent:primary", "type": "uses", "to": "skill:review"} in plan[
+        "graphDelta"
+    ]["edgesRemoved"]
+    ops = {(o["op"], o["path"]) for o in plan["operations"]}
+    assert ("delete", ".sanad/skills/review/skill.yaml") in ops
+    assert ("update", ".sanad/agents/primary/agent.yaml") in ops
+
+
+async def test_draft_write_files_delete_entry(workspace: Path):
+    target = workspace / ".sanad" / "agents" / "primary" / "prompt.md"
+    target.write_text("old prompt\n")
+    res = await DraftBlueprintChange(_rt(workspace)).__call__(
+        DraftParams(
+            action="writeFiles",
+            summary="Drop the stale prompt file",
+            files=[FileDraft(path=".sanad/agents/primary/prompt.md", delete=True)],
+        )
+    )
+    assert not res.is_error
+    [op] = _plan(res)["operations"]
+    assert op["op"] == "delete"
+
+    # A write entry with neither content nor delete is a usage error.
+    missing = await DraftBlueprintChange(_rt(workspace)).__call__(
+        DraftParams(action="writeFiles", files=[FileDraft(path=".sanad/x.md")])
+    )
+    assert missing.is_error
+
+
 async def test_draft_write_files_refuses_escape(workspace: Path):
     res = await DraftBlueprintChange(_rt(workspace)).__call__(
         DraftParams(

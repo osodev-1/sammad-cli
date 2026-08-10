@@ -59,6 +59,9 @@ function reduce(blocks: Block[], item: ArchitectItem): Block[] {
         files: plan.operations.length,
         edges: plan.graphDelta.edgesAdded.length,
         updated: plan.graphDelta.nodesChanged?.length ?? 0,
+        removed:
+          (plan.graphDelta.nodesRemoved?.length ?? 0) +
+          (plan.graphDelta.edgesRemoved?.length ?? 0),
         state: "pending",
         plan,
       },
@@ -426,6 +429,7 @@ export default function ArchitectPanel({
                     <div style={s.planMeta}>
                       {b.files} file{b.files === 1 ? "" : "s"}
                       {(b.updated ?? 0) > 0 && ` · ${b.updated} updated`}
+                      {(b.removed ?? 0) > 0 && ` · ${b.removed} removed`}
                       {(b.edges ?? 0) > 0 && ` · ${b.edges} edge`}
                     </div>
                     {b.state === "applied" ? (
