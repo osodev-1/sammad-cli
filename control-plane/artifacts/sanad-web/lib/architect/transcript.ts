@@ -14,6 +14,8 @@ import type { StoredArchitectMessage } from "@/lib/sessions/state";
 
 export type Block =
   | { kind: "text"; text: string }
+  /** Live reasoning steps — shown on demand, never persisted. */
+  | { kind: "think"; text: string }
   | { kind: "tool"; label: string }
   | {
       kind: "plan";
@@ -47,22 +49,31 @@ export function toStored(messages: Message[]): StoredArchitectMessage[] {
     }
     return {
       role: "assistant",
-      blocks: m.blocks.slice(0, MAX_BLOCKS).map((b) => {
-        if (b.kind === "text") {
-          return { kind: "text" as const, text: clip(b.text, MAX_TEXT) };
-        }
-        if (b.kind === "tool") {
-          return { kind: "tool" as const, label: clip(b.label, 200) };
-        }
-        return {
-          kind: "plan" as const,
-          summary: clip(b.summary, 300),
-          files: Math.min(b.files, 50),
-          state:
-            b.state === "applied" ? ("applied" as const) : ("expired" as const),
-          ...(b.txId ? { txId: b.txId } : {}),
-        };
-      }),
+      // Reasoning steps are ephemeral: a restored chat keeps the answers and
+      // actions, not the deliberation.
+      blocks: m.blocks
+        .filter(
+          (b): b is Exclude<Block, { kind: "think" }> => b.kind !== "think",
+        )
+        .slice(0, MAX_BLOCKS)
+        .map((b) => {
+          if (b.kind === "text") {
+            return { kind: "text" as const, text: clip(b.text, MAX_TEXT) };
+          }
+          if (b.kind === "tool") {
+            return { kind: "tool" as const, label: clip(b.label, 200) };
+          }
+          return {
+            kind: "plan" as const,
+            summary: clip(b.summary, 300),
+            files: Math.min(b.files, 50),
+            state:
+              b.state === "applied"
+                ? ("applied" as const)
+                : ("expired" as const),
+            ...(b.txId ? { txId: b.txId } : {}),
+          };
+        }),
     };
   });
 }

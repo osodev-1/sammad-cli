@@ -8,6 +8,7 @@ import {
   planFromEvent,
   startArchitect,
   textFromEvent,
+  thinkFromEvent,
   toolLabel,
   type ArchitectItem,
 } from "@/lib/architect/client";
@@ -23,6 +24,17 @@ import PlanPreview from "../graph/PlanPreview";
 
 /* Fold one stream item into the in-progress assistant message's blocks. */
 function reduce(blocks: Block[], item: ArchitectItem): Block[] {
+  const think = thinkFromEvent(item);
+  if (think) {
+    const last = blocks[blocks.length - 1];
+    if (last && last.kind === "think") {
+      return [
+        ...blocks.slice(0, -1),
+        { kind: "think", text: last.text + think },
+      ];
+    }
+    return [...blocks, { kind: "think", text: think }];
+  }
   const text = textFromEvent(item);
   if (text) {
     const last = blocks[blocks.length - 1];
@@ -108,6 +120,8 @@ export default function ArchitectPanel({
   const [input, setInput] = useState("");
   const [outbox, setOutbox] = useState<{ text: string; retry?: boolean }[]>([]);
   const [stalled, setStalled] = useState(false);
+  /* Clicking "Architecting…" reveals the live steps (reasoning + tools). */
+  const [showSteps, setShowSteps] = useState(false);
   const [review, setReview] = useState<{ mi: number; bi: number } | null>(null);
   const [applyBusy, setApplyBusy] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
@@ -218,6 +232,31 @@ export default function ArchitectPanel({
         setOutbox((prev) => [{ text, retry: true }, ...prev]);
         await begin(); // fresh subprocess, freshly redeemed auth
       } else {
+        // A turn that ended with NOTHING (no content, no error item — e.g. a
+        // machine still on an older image whose dead turns die silently) must
+        // never leave a blank message: explain, and point at the recovery.
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (
+            last &&
+            last.role === "assistant" &&
+            !last.blocks.some((b) => b.kind !== "think")
+          ) {
+            const next = [...prev];
+            next[next.length - 1] = {
+              role: "assistant",
+              blocks: [
+                ...last.blocks,
+                {
+                  kind: "text",
+                  text: "⚠ No response arrived for this turn. If this keeps happening, use Reset (top of the file sidebar) to restart the workspace agents.",
+                },
+              ],
+            };
+            return next;
+          }
+          return prev;
+        });
         setPhase("ready");
       }
     },
@@ -359,12 +398,13 @@ export default function ArchitectPanel({
             </div>
           ) : (
             <div key={mi} style={s.assistantRow}>
-              {m.blocks.length === 0 &&
-                phase === "streaming" &&
-                mi === messages.length - 1 && (
-                  <div style={s.thinking}>Architecting…</div>
-                )}
               {m.blocks.map((b, bi) => {
+                if (b.kind === "think")
+                  return showSteps ? (
+                    <div key={bi} style={s.thinkText}>
+                      {b.text}
+                    </div>
+                  ) : null;
                 if (b.kind === "text")
                   return (
                     <div key={bi} style={s.text}>
@@ -418,6 +458,19 @@ export default function ArchitectPanel({
                   </div>
                 );
               })}
+              {phase === "streaming" && mi === messages.length - 1 && (
+                <button
+                  style={s.architecting}
+                  onClick={() => setShowSteps((v) => !v)}
+                  title="Show the architect's live steps — reasoning and tool activity"
+                >
+                  <span style={s.pulse} />
+                  Architecting…
+                  <span style={s.stepsHint}>
+                    {showSteps ? "hide steps" : "show steps"}
+                  </span>
+                </button>
+              )}
             </div>
           ),
         )}
@@ -593,10 +646,44 @@ const s: Record<string, CSSProperties> = {
     whiteSpace: "nowrap",
   },
   assistantRow: { display: "flex", flexDirection: "column", gap: "0.5rem" },
-  thinking: {
-    color: "var(--ink-muted)",
+  architecting: {
+    alignSelf: "flex-start",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "0.45rem",
+    font: "inherit",
     fontSize: "0.82rem",
     fontStyle: "italic",
+    color: "var(--ink-muted)",
+    background: "none",
+    border: "none",
+    padding: 0,
+    cursor: "pointer",
+  },
+  pulse: {
+    width: "7px",
+    height: "7px",
+    borderRadius: "50%",
+    background: "var(--ink)",
+    display: "inline-block",
+    animation: "spin 1.2s linear infinite",
+  },
+  stepsHint: {
+    fontStyle: "normal",
+    fontFamily: "var(--font-mono)",
+    fontSize: "0.62rem",
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+    textDecoration: "underline",
+    textUnderlineOffset: "2px",
+  },
+  thinkText: {
+    fontSize: "0.78rem",
+    lineHeight: 1.55,
+    color: "var(--ink-muted)",
+    whiteSpace: "pre-wrap",
+    borderLeft: "2px solid var(--rule-strong)",
+    paddingLeft: "0.6rem",
   },
   text: {
     fontSize: "0.88rem",

@@ -163,3 +163,15 @@ export function textFromEvent(item: ArchitectItem): string | null {
   const text = (item.event.payload as { text?: unknown } | undefined)?.text;
   return typeof text === "string" && text ? text : null;
 }
+
+/** The model's reasoning stream (ContentPart type "think") — the live "steps"
+ * revealed by clicking Architecting…; never part of the final answer. */
+export function thinkFromEvent(item: ArchitectItem): string | null {
+  if (item.kind !== "event") return null;
+  const payload = item.event.payload as
+    { type?: unknown; think?: unknown } | undefined;
+  if (payload?.type !== "think") return null;
+  return typeof payload.think === "string" && payload.think
+    ? payload.think
+    : null;
+}
