@@ -132,6 +132,27 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
     [activeSessionId],
   );
 
+  /* Delete a project: the server cascades (machine stopped, files
+     unreachable, project-born CLI sessions revoked) — the client just
+     resyncs the list and moves off the deleted project if it was on screen. */
+  const deleteSession = useCallback(
+    async (id: string) => {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      }).catch(() => null);
+      if (!res?.ok) return; // the panel keeps the row; the next load resyncs
+      const remaining = sessions.filter((r) => r.id !== id);
+      setSessions(remaining);
+      // Deleting the on-screen project switches to the first remaining one;
+      // deleting the last reloads (the list endpoint auto-creates "main").
+      if (id === activeSessionId) {
+        if (remaining[0]) selectSession(remaining[0].id);
+        else window.location.reload();
+      }
+    },
+    [sessions, activeSessionId, selectSession],
+  );
+
   /* Session controller pane — collapse state survives reloads. */
   const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
   useEffect(() => {
@@ -217,6 +238,7 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
               onRename={renameSession}
               onCreate={createSession}
               onRestart={restartSession}
+              onDelete={deleteSession}
               onToggleCollapsed={toggleSessions}
             />
           </div>

@@ -12,6 +12,7 @@ import {
 } from "@aws-sdk/client-ecs";
 import {
   CreateAccessPointCommand,
+  DeleteAccessPointCommand,
   DescribeAccessPointsCommand,
   EFSClient,
 } from "@aws-sdk/client-efs";
@@ -42,7 +43,9 @@ export function awsComputeConfig(): AwsComputeConfig {
   return {
     region: env.AWS_REGION ?? "eu-central-1",
     cluster: env.SANAD_AWS_CLUSTER ?? "sanad-workspaces",
-    subnets: require("SANAD_TASKS_SUBNETS").split(",").map((s) => s.trim()),
+    subnets: require("SANAD_TASKS_SUBNETS")
+      .split(",")
+      .map((s) => s.trim()),
     tasksSecurityGroup: require("SANAD_TASKS_SG"),
     efsId: require("SANAD_EFS_ID"),
     workspaceImage: require("WORKSPACE_IMAGE"),
@@ -64,14 +67,17 @@ const efs = (region: string): EFSClient =>
 /** Per-user EFS access point: uid/gid 1000 (the image's `dev`), rooted at /users/<hash>. */
 export async function ensureAccessPoint(
   config: AwsComputeConfig,
-  hash12: string
+  hash12: string,
 ): Promise<string> {
   const client = efs(config.region);
   const existing = await client.send(
-    new DescribeAccessPointsCommand({ FileSystemId: config.efsId, MaxResults: 100 })
+    new DescribeAccessPointsCommand({
+      FileSystemId: config.efsId,
+      MaxResults: 100,
+    }),
   );
   const hit = existing.AccessPoints?.find(
-    (ap) => ap.RootDirectory?.Path === `/users/${hash12}`
+    (ap) => ap.RootDirectory?.Path === `/users/${hash12}`,
   );
   if (hit?.AccessPointId) return hit.AccessPointId;
 
@@ -85,11 +91,32 @@ export async function ensureAccessPoint(
         CreationInfo: { OwnerUid: 1000, OwnerGid: 1000, Permissions: "700" },
       },
       Tags: [{ Key: "Name", Value: `sanad-ws-${hash12}` }],
-    })
+    }),
   );
   const id = created.AccessPointId;
   if (!id) throw new Error("EFS access point creation returned no id");
   return id;
+}
+
+/**
+ * Delete a project's EFS access point — its files become unreachable (no
+ * future machine can mount them). The directory's DATA stays on the
+ * filesystem (EFS has no recursive-delete API); a storage-cleanup sweep is
+ * the documented follow-up. Idempotent: an already-deleted AP is success.
+ */
+export async function deleteAccessPoint(
+  config: AwsComputeConfig,
+  accessPointId: string,
+): Promise<void> {
+  const client = efs(config.region);
+  try {
+    await client.send(
+      new DeleteAccessPointCommand({ AccessPointId: accessPointId }),
+    );
+  } catch (e) {
+    if ((e as { name?: string }).name === "AccessPointNotFound") return;
+    throw e;
+  }
 }
 
 /** One task definition family per user (it embeds their access point). */
@@ -97,7 +124,7 @@ export async function registerTaskDefinition(
   config: AwsComputeConfig,
   hash12: string,
   accessPointId: string,
-  agentEnv: Record<string, string>
+  agentEnv: Record<string, string>,
 ): Promise<string> {
   const result = await ecs(config.region).send(
     new RegisterTaskDefinitionCommand({
@@ -123,7 +150,10 @@ export async function registerTaskDefinition(
           name: "workspace",
           image: config.workspaceImage,
           essential: true,
-          environment: Object.entries(agentEnv).map(([name, value]) => ({ name, value })),
+          environment: Object.entries(agentEnv).map(([name, value]) => ({
+            name,
+            value,
+          })),
           mountPoints: [{ sourceVolume: "data", containerPath: "/data" }],
           portMappings: [7070, 3000, 5173, 8000, 8080].map((p) => ({
             containerPort: p,
@@ -139,7 +169,7 @@ export async function registerTaskDefinition(
           },
         },
       ],
-    })
+    }),
   );
   const arn = result.taskDefinition?.taskDefinitionArn;
   if (!arn) throw new Error("task definition registration returned no ARN");
@@ -154,7 +184,7 @@ export interface RunningTask {
 export async function runWorkspaceTask(
   config: AwsComputeConfig,
   taskDefinitionArn: string,
-  overrideEnv: Record<string, string>
+  overrideEnv: Record<string, string>,
 ): Promise<string> {
   const result = await ecs(config.region).send(
     new RunTaskCommand({
@@ -180,7 +210,7 @@ export async function runWorkspaceTask(
           },
         ],
       },
-    })
+    }),
   );
   const arn = result.tasks?.[0]?.taskArn;
   if (!arn) {
@@ -192,10 +222,14 @@ export async function runWorkspaceTask(
 
 export async function describeTask(
   config: AwsComputeConfig,
-  taskArn: string
-): Promise<{ status: string; privateIp: string | null; imageDigest: string | null }> {
+  taskArn: string,
+): Promise<{
+  status: string;
+  privateIp: string | null;
+  imageDigest: string | null;
+}> {
   const result = await ecs(config.region).send(
-    new DescribeTasksCommand({ cluster: config.cluster, tasks: [taskArn] })
+    new DescribeTasksCommand({ cluster: config.cluster, tasks: [taskArn] }),
   );
   const task = result.tasks?.[0];
   if (!task) return { status: "MISSING", privateIp: null, imageDigest: null };
@@ -210,14 +244,24 @@ export async function describeTask(
   };
 }
 
-export async function stopTask(config: AwsComputeConfig, taskArn: string): Promise<void> {
+export async function stopTask(
+  config: AwsComputeConfig,
+  taskArn: string,
+): Promise<void> {
   await ecs(config.region).send(
-    new StopTaskCommand({ cluster: config.cluster, task: taskArn, reason: "sanad reconcile" })
+    new StopTaskCommand({
+      cluster: config.cluster,
+      task: taskArn,
+      reason: "sanad reconcile",
+    }),
   );
 }
 
 let ecrClient: ECRClient | null = null;
-let digestCache: { digest: string | null; at: number } = { digest: null, at: 0 };
+let digestCache: { digest: string | null; at: number } = {
+  digest: null,
+  at: 0,
+};
 
 /**
  * The digest currently behind the workspace image tag, cached briefly. Used
@@ -225,7 +269,7 @@ let digestCache: { digest: string | null; at: number } = { digest: null, at: 0 }
  * on its next wake — busy machines are never touched.
  */
 export async function latestWorkspaceImageDigest(
-  config: AwsComputeConfig
+  config: AwsComputeConfig,
 ): Promise<string | null> {
   if (Date.now() - digestCache.at < 60_000) return digestCache.digest;
   try {
@@ -241,7 +285,7 @@ export async function latestWorkspaceImageDigest(
       new DescribeImagesCommand({
         repositoryName,
         imageIds: [{ imageTag: tag }],
-      })
+      }),
     );
     const digest = result.imageDetails?.[0]?.imageDigest ?? null;
     digestCache = { digest, at: Date.now() };

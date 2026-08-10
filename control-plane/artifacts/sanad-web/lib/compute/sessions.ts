@@ -7,11 +7,18 @@
  * history by working directory). ensureSessionTask is the same verified state
  * machine that ran the per-user workspace, keyed per session.
  */
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import { db } from "../db";
-import { workspaceSessions } from "../db/schema";
+import {
+  cliSessions,
+  projectSessions,
+  workspaceSessions,
+  workspaceTasks,
+} from "../db/schema";
+import { revokeSession } from "../auth/session";
 import {
   awsComputeConfig,
+  deleteAccessPoint,
   describeTask,
   ensureAccessPoint,
   latestWorkspaceImageDigest,
@@ -61,7 +68,7 @@ async function probeHealthz(url: string, timeoutMs = 3_000): Promise<boolean> {
 
 /** agentd's healthz body — session counts drive the safe-to-recycle check. */
 async function probeAgentd(
-  baseUrl: string
+  baseUrl: string,
 ): Promise<{ activeSessions: number; detachedSessions: number } | null> {
   try {
     const res = await fetch(`${baseUrl}/healthz`, {
@@ -84,7 +91,7 @@ async function probeAgentd(
 
 async function waitForRunning(
   config: AwsComputeConfig,
-  taskArn: string
+  taskArn: string,
 ): Promise<string> {
   const deadline = Date.now() + RUN_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -114,7 +121,10 @@ async function waitForAgentd(baseUrl: string): Promise<void> {
   throw new Error(`agentd never became healthy: ${lastError}`);
 }
 
-function agentBaseEnv(config: AwsComputeConfig, userId: string): Record<string, string> {
+function agentBaseEnv(
+  config: AwsComputeConfig,
+  userId: string,
+): Record<string, string> {
   return {
     WORKSPACE_MODE: "task",
     SANAD_WORKSPACE_USER: userId,
@@ -136,13 +146,16 @@ export async function listSessions(userId: string): Promise<SessionRow[]> {
 
 export async function getSession(
   userId: string,
-  sessionId: string
+  sessionId: string,
 ): Promise<SessionRow | null> {
   const [row] = await db
     .select()
     .from(workspaceSessions)
     .where(
-      and(eq(workspaceSessions.userId, userId), eq(workspaceSessions.id, sessionId))
+      and(
+        eq(workspaceSessions.userId, userId),
+        eq(workspaceSessions.id, sessionId),
+      ),
     )
     .limit(1);
   return row ?? null;
@@ -153,16 +166,23 @@ export async function getSession(
  * to a "main" session (same hash, same access point — nothing moved); a brand
  * new user gets one created on first touch.
  */
-export async function getOrCreateMainSession(userId: string): Promise<SessionRow> {
+export async function getOrCreateMainSession(
+  userId: string,
+): Promise<SessionRow> {
   const rows = await listSessions(userId);
   if (rows.length > 0) return rows[0];
   return createSession(userId, "main");
 }
 
-export async function createSession(userId: string, name: string): Promise<SessionRow> {
+export async function createSession(
+  userId: string,
+  name: string,
+): Promise<SessionRow> {
   const existing = await listSessions(userId);
   if (existing.length >= MAX_SESSIONS_PER_USER) {
-    throw Object.assign(new Error("session limit reached"), { code: "session_limit" });
+    throw Object.assign(new Error("session limit reached"), {
+      code: "session_limit",
+    });
   }
   const config = awsComputeConfig();
   const id = crypto.randomUUID();
@@ -186,16 +206,79 @@ export async function createSession(userId: string, name: string): Promise<Sessi
 export async function renameSession(
   userId: string,
   sessionId: string,
-  name: string
+  name: string,
 ): Promise<SessionRow | null> {
   const [row] = await db
     .update(workspaceSessions)
-    .set({ name: name.trim().slice(0, 40) || "untitled", updatedAt: new Date() })
+    .set({
+      name: name.trim().slice(0, 40) || "untitled",
+      updatedAt: new Date(),
+    })
     .where(
-      and(eq(workspaceSessions.userId, userId), eq(workspaceSessions.id, sessionId))
+      and(
+        eq(workspaceSessions.userId, userId),
+        eq(workspaceSessions.id, sessionId),
+      ),
     )
     .returning();
   return row ?? null;
+}
+
+/**
+ * Delete a project and everything downstream that must not outlive it:
+ *
+ * 1. its machine — StopTask, so billing ends now;
+ * 2. its EFS access point — the files become unreachable (the directory's
+ *    data stays on the filesystem until a storage-cleanup sweep; EFS has no
+ *    recursive-delete API). EXCEPTION: the migrated "main" project shares its
+ *    access point with the legacy workspace_tasks row — that AP is left
+ *    alone so the legacy path keeps working;
+ * 3. every CLI session born in the project — revoked, which cascades to its
+ *    runtime tokens, so a terminal that was signed in through this project
+ *    loses gateway access immediately, not at token expiry;
+ * 4. its PRD-session rows (FK on project_id), then the project row itself.
+ *
+ * usage_events and cli_sessions keep their project_id STRINGS by design
+ * (soft references, no FK): historical usage attribution survives deletion.
+ */
+export async function deleteSession(
+  userId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const row = await getSession(userId, sessionId);
+  if (!row) return false;
+  const config = awsComputeConfig();
+
+  if (row.taskArn) {
+    await stopTask(config, row.taskArn).catch(() => {});
+  }
+
+  const [legacyShared] = await db
+    .select({ id: workspaceTasks.id })
+    .from(workspaceTasks)
+    .where(eq(workspaceTasks.efsAccessPointId, row.efsAccessPointId))
+    .limit(1);
+  if (!legacyShared) {
+    await deleteAccessPoint(config, row.efsAccessPointId).catch((e) => {
+      // The row still goes away — an orphaned AP is a cleanup item, not a
+      // reason to leave a half-deleted project in the UI.
+      console.error("access point delete failed (continuing)", e);
+    });
+  }
+
+  const born = await db
+    .select({ id: cliSessions.id })
+    .from(cliSessions)
+    .where(
+      and(eq(cliSessions.projectId, row.id), isNull(cliSessions.revokedAt)),
+    );
+  for (const s of born) {
+    await revokeSession(s.id);
+  }
+
+  await db.delete(projectSessions).where(eq(projectSessions.projectId, row.id));
+  await db.delete(workspaceSessions).where(eq(workspaceSessions.id, row.id));
+  return true;
 }
 
 /* ------------------------------------------------------- machine control --- */
@@ -211,7 +294,7 @@ const ensureInFlight = new Map<string, Promise<SessionTarget>>();
 /** Ensure the session's machine is running and reachable; wake it if not. */
 export function ensureSessionTask(
   userId: string,
-  sessionId: string
+  sessionId: string,
 ): Promise<SessionTarget> {
   const key = `${userId}:${sessionId}`;
   const existing = ensureInFlight.get(key);
@@ -225,17 +308,23 @@ export function ensureSessionTask(
 
 async function ensureSessionTaskInner(
   userId: string,
-  sessionId: string
+  sessionId: string,
 ): Promise<SessionTarget> {
   const config = awsComputeConfig();
   const row = await getSession(userId, sessionId);
-  if (!row) throw Object.assign(new Error("unknown session"), { code: "unknown_session" });
+  if (!row)
+    throw Object.assign(new Error("unknown session"), {
+      code: "unknown_session",
+    });
 
   const baseUrl = computeBaseUrl(row.hash12);
 
   // A recorded task may still be running (warm attach) …
   if (row.taskArn && row.runNonce) {
-    const { status, privateIp, imageDigest } = await describeTask(config, row.taskArn);
+    const { status, privateIp, imageDigest } = await describeTask(
+      config,
+      row.taskArn,
+    );
     if (status === "RUNNING" && privateIp) {
       if (privateIp !== row.taskIp) {
         await db
@@ -250,9 +339,11 @@ async function ensureSessionTaskInner(
         // A QUIET machine on yesterday's image recycles now so features land
         // without manual restarts; anything with live or detached work is
         // never touched — it picks the new image up after its own idle stop.
-        const quiet = counts.activeSessions === 0 && counts.detachedSessions === 0;
+        const quiet =
+          counts.activeSessions === 0 && counts.detachedSessions === 0;
         const latest = quiet ? await latestWorkspaceImageDigest(config) : null;
-        const stale = latest !== null && imageDigest !== null && latest !== imageDigest;
+        const stale =
+          latest !== null && imageDigest !== null && latest !== imageDigest;
         if (!(quiet && stale)) {
           return {
             sessionId: row.id,
@@ -263,7 +354,9 @@ async function ensureSessionTaskInner(
             coldStart: false,
           };
         }
-        console.log(`session ${row.id} machine is quiet on a stale image — recycling`);
+        console.log(
+          `session ${row.id} machine is quiet on a stale image — recycling`,
+        );
         await stopTask(config, row.taskArn).catch(() => {});
         // fall through to a fresh run on the current image
       } else {
@@ -274,7 +367,9 @@ async function ensureSessionTaskInner(
         if (!(await probeHealthz(`https://${host}/healthz`))) {
           throw new Error("compute ingress is unavailable — retry shortly");
         }
-        console.error(`session task ${row.taskArn} is RUNNING but unreachable — replacing`);
+        console.error(
+          `session task ${row.taskArn} is RUNNING but unreachable — replacing`,
+        );
         await stopTask(config, row.taskArn).catch(() => {});
       }
     }
@@ -287,7 +382,7 @@ async function ensureSessionTaskInner(
     config,
     row.hash12,
     row.efsAccessPointId,
-    agentBaseEnv(config, userId)
+    agentBaseEnv(config, userId),
   );
   const taskArn = await runWorkspaceTask(config, taskDefArn, {
     AGENTD_TOKEN: agentdToken,
@@ -334,7 +429,10 @@ async function ensureSessionTaskInner(
  * image — this is how a user picks up platform updates without waiting for
  * the idle stop.
  */
-export async function restartSession(userId: string, sessionId: string): Promise<boolean> {
+export async function restartSession(
+  userId: string,
+  sessionId: string,
+): Promise<boolean> {
   const row = await getSession(userId, sessionId);
   if (!row) return false;
   if (row.taskArn) {
@@ -357,11 +455,11 @@ export async function restartSession(userId: string, sessionId: string): Promise
 /** Auth material for proxying workspace REST to a (hopefully) running session machine. */
 export async function sessionTaskAuth(
   userId: string,
-  sessionId?: string
+  sessionId?: string,
 ): Promise<{ baseUrl: string; token: string } | null> {
   const row = sessionId
     ? await getSession(userId, sessionId)
-    : (await listSessions(userId))[0] ?? null;
+    : ((await listSessions(userId))[0] ?? null);
   if (!row?.runNonce) return null;
   return {
     baseUrl: computeBaseUrl(row.hash12),

@@ -57,6 +57,70 @@ export default function ProjectsClient({
     });
   };
 
+  const [creating, setCreating] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const createProject = async (name: string) => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      const res = await fetch("/api/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(body?.error?.message ?? "Could not create the project");
+      }
+      const row = body.data.session as {
+        id: string;
+        name: string;
+        state: string;
+      };
+      setProjects((prev) => [
+        ...prev,
+        { ...row, sessionCount: 0, lastActiveAt: new Date().toISOString() },
+      ]);
+      setCreating(false);
+    } catch (e) {
+      setActionError(
+        e instanceof Error ? e.message : "Could not create the project",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteProject = async (p: ProjectRow) => {
+    if (
+      !window.confirm(
+        `Delete the project “${p.name}”?\n\nIts machine stops, its files become unreachable, and terminals signed in through it lose access. This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(p.id)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error?.message ?? "Could not delete the project");
+      }
+      setProjects((prev) => prev.filter((x) => x.id !== p.id));
+    } catch (e) {
+      setActionError(
+        e instanceof Error ? e.message : "Could not delete the project",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div style={s.root}>
       <Nav
@@ -132,16 +196,59 @@ export default function ProjectsClient({
                       {new Date(p.lastActiveAt).toLocaleDateString()}
                     </span>
                   </div>
-                  <button
-                    style={button.secondary(size.sm)}
-                    onClick={() => open(p.id)}
-                  >
-                    Open
-                  </button>
+                  <div style={s.rowActions}>
+                    <button
+                      style={button.secondary(size.sm)}
+                      onClick={() => open(p.id)}
+                    >
+                      Open
+                    </button>
+                    <button
+                      type="button"
+                      style={s.deleteBtn}
+                      title="Delete project — stops its machine and makes its files unreachable"
+                      aria-label={`Delete ${p.name}`}
+                      onClick={() => void deleteProject(p)}
+                      disabled={busy}
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </div>
               </li>
             ))}
           </ul>
+        )}
+
+        {awsMode && (
+          <div style={s.createArea}>
+            {creating ? (
+              <input
+                autoFocus
+                style={s.input}
+                placeholder="Project name"
+                maxLength={40}
+                disabled={busy}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    const name = e.currentTarget.value.trim();
+                    if (name) void createProject(name.slice(0, 40));
+                  } else if (e.key === "Escape") {
+                    setCreating(false);
+                    setActionError(null);
+                  }
+                }}
+              />
+            ) : (
+              <button
+                style={button.primary(size.sm)}
+                onClick={() => setCreating(true)}
+              >
+                New project
+              </button>
+            )}
+            {actionError && <span style={s.actionError}>{actionError}</span>}
+          </div>
         )}
       </main>
     </div>
@@ -196,6 +303,25 @@ const s: Record<string, CSSProperties> = {
     minWidth: 0,
   },
   nameRow: { display: "flex", alignItems: "center", gap: "0.4rem" },
+  rowActions: { display: "flex", alignItems: "center", gap: "0.5rem" },
+  deleteBtn: {
+    font: "inherit",
+    fontSize: "0.8rem",
+    fontWeight: 600,
+    color: "var(--ink)",
+    background: "none",
+    border: "1px solid var(--rule-strong)",
+    borderRadius: "var(--radius-pill)",
+    padding: "0.3rem 0.85rem",
+    cursor: "pointer",
+  },
+  createArea: {
+    marginTop: "1.5rem",
+    display: "flex",
+    alignItems: "center",
+    gap: "0.75rem",
+  },
+  actionError: { ...type.small, color: "var(--ink)" },
   name: { fontSize: "1rem", fontWeight: 650, color: "var(--ink)" },
   iconButton: {
     display: "inline-flex",

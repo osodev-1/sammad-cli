@@ -26,6 +26,7 @@ export default function SessionPanel({
   onRename,
   onCreate,
   onRestart,
+  onDelete,
   onToggleCollapsed,
 }: {
   sessions: WorkspaceSessionInfo[];
@@ -37,6 +38,8 @@ export default function SessionPanel({
   onRename: (id: string, name: string) => void;
   onCreate: (name: string) => Promise<void>;
   onRestart: (id: string) => void;
+  /** Delete the project — machine, files, and access go with it. */
+  onDelete?: (id: string) => void;
   onToggleCollapsed: () => void;
 }) {
   const [editing, setEditing] = useState<{ id: string; draft: string } | null>(
@@ -191,6 +194,26 @@ export default function SessionPanel({
                   >
                     <RefreshIcon size={13} />
                   </button>
+                  {onDelete && (
+                    <button
+                      type="button"
+                      style={s.iconButton}
+                      title="Delete project — stops its machine and makes its files unreachable"
+                      aria-label={`Delete ${row.name}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (
+                          window.confirm(
+                            `Delete the project “${row.name}”?\n\nIts machine stops, its files become unreachable, and terminals signed in through it lose access. This cannot be undone.`,
+                          )
+                        ) {
+                          onDelete(row.id);
+                        }
+                      }}
+                    >
+                      ✕
+                    </button>
+                  )}
                 </span>
               )}
             </div>
