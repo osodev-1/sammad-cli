@@ -139,3 +139,56 @@ async def test_runner_serves_multiple_turns_then_stops(tmp_path: Path):
     finally:
         await runner.stop()
     assert not runner.alive
+
+
+def test_failed_turn_recycles_the_runner(client: TestClient):
+    """A turn that ends without "finished" (dead auth, crashed provider) must
+    emit turn_failed AND drop the runner — otherwise the idempotent start keeps
+    handing back a zombie whose every LLM call 401s."""
+    from sanad_terminal.architect_runner import get_runner
+    from sanad_terminal.routes_workspace import workspace_root
+
+    assert (
+        client.post(
+            "/internal/architect/start", headers=HEADERS, json={"ticket": "tt_good"}
+        ).status_code
+        == 200
+    )
+
+    res = client.post(
+        "/internal/architect/ask", headers=HEADERS, json={"input": "FAIL this turn"}
+    )
+    assert res.status_code == 200
+    items = _lines(res.text)
+    assert any(i.get("code") == "turn_failed" for i in items if i["kind"] == "error")
+    assert items[-1]["kind"] == "end" and items[-1]["status"] != "finished"
+
+    # The runner is gone: the next ask reports not_started (the panel re-begins).
+    res = client.post("/internal/architect/ask", headers=HEADERS, json={"input": "hi"})
+    assert res.status_code == 409
+    assert res.json()["error"]["code"] == "not_started"
+
+    # And a fresh start spawns a working runner again.
+    assert (
+        client.post(
+            "/internal/architect/start", headers=HEADERS, json={"ticket": "tt_good"}
+        ).status_code
+        == 200
+    )
+    ok = client.post("/internal/architect/ask", headers=HEADERS, json={"input": "hello"})
+    assert _lines(ok.text)[-1]["status"] == "finished"
+
+
+def test_reset_drops_the_runner(client: TestClient):
+    assert (
+        client.post(
+            "/internal/architect/start", headers=HEADERS, json={"ticket": "tt_good"}
+        ).status_code
+        == 200
+    )
+    assert client.post("/internal/architect/reset", headers=HEADERS).status_code == 200
+    # Runner gone: ask now 409s until a fresh start.
+    res = client.post("/internal/architect/ask", headers=HEADERS, json={"input": "hi"})
+    assert res.status_code == 409 and res.json()["error"]["code"] == "not_started"
+    # Reset is idempotent with no runner.
+    assert client.post("/internal/architect/reset", headers=HEADERS).status_code == 200

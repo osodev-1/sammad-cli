@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from sanad_terminal.architect_runner import (
     ArchitectError,
     ArchitectRunner,
+    drop_runner,
     get_runner,
     put_runner,
 )
@@ -116,11 +117,43 @@ async def ask(root: Root, body: AskBody) -> StreamingResponse | JSONResponse:
         )
 
     async def stream() -> AsyncIterator[bytes]:
+        # A turn that ends any way other than "finished"/"cancelled" (provider
+        # auth died, subprocess crashed) marks the runner UNHEALTHY: drop it so
+        # the next start spawns fresh with freshly redeemed auth. Without this,
+        # the idempotent start keeps handing back a zombie whose every LLM call
+        # 401s — the "architect stopped responding" trap.
+        failed = False
         try:
             async for item in runner.ask(body.input):
+                if item.get("kind") == "end" and item.get("status") not in (
+                    "finished",
+                    "cancelled",
+                ):
+                    failed = True
+                    yield (
+                        json.dumps(
+                            {
+                                "kind": "error",
+                                "code": "turn_failed",
+                                "message": (
+                                    "The architect's session expired — it restarts "
+                                    "automatically on your next message."
+                                ),
+                            }
+                        ).encode("utf-8")
+                        + b"\n"
+                    )
                 yield json.dumps(item).encode("utf-8") + b"\n"
         except ArchitectError as exc:
-            yield json.dumps({"kind": "error", "message": exc.message}).encode("utf-8") + b"\n"
+            failed = True
+            yield (
+                json.dumps(
+                    {"kind": "error", "code": "turn_failed", "message": exc.message}
+                ).encode("utf-8")
+                + b"\n"
+            )
+        if failed or not runner.alive:
+            await drop_runner(root)
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
@@ -131,4 +164,14 @@ async def cancel(root: Root) -> JSONResponse:
     runner = get_runner(root)
     if runner is not None and runner.alive:
         await runner.cancel()
+    return JSONResponse({"ok": True})
+
+
+@router.post("/reset")
+async def reset(root: Root) -> JSONResponse:
+    """Stop the architect subprocess. The next start spawns a fresh one with
+    freshly redeemed auth — the recovery lever for a wedged or stale runner,
+    and half of the workspace-reset affordance (the other half restarts the
+    agent PTYs so new blueprint definitions load)."""
+    await drop_runner(root)
     return JSONResponse({"ok": True})

@@ -43,7 +43,20 @@ def main() -> None:
                 }
             )
         elif method == "prompt":
-            _event("TurnBegin", {"user_input": msg.get("params", {}).get("user_input", "")})
+            user_input = msg.get("params", {}).get("user_input", "")
+            if "FAIL" in user_input:
+                # Simulate a dead-auth turn: the provider 401s instantly and
+                # the wire server answers the prompt with an ERROR response
+                # (no status) instead of {"status": "finished"}.
+                _write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": mid,
+                        "error": {"code": -32000, "message": "chat provider error: 401"},
+                    }
+                )
+                continue
+            _event("TurnBegin", {"user_input": user_input})
             _event("TextPart", {"type": "text", "text": "Here is a plan to add a skill."})
             _event(
                 "ToolResult",

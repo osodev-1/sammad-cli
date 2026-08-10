@@ -106,7 +106,7 @@ export default function ArchitectPanel({
     () => initial?.length ?? 0,
   );
   const [input, setInput] = useState("");
-  const [outbox, setOutbox] = useState<string[]>([]);
+  const [outbox, setOutbox] = useState<{ text: string; retry?: boolean }[]>([]);
   const [stalled, setStalled] = useState(false);
   const [review, setReview] = useState<{ mi: number; bi: number } | null>(null);
   const [applyBusy, setApplyBusy] = useState(false);
@@ -161,11 +161,14 @@ export default function ArchitectPanel({
     return () => window.clearTimeout(t);
   }, [messages, phase, onPersist]);
 
-  /* One turn. On "busy" (the runner is still on a turn — e.g. from a previous
-     page load), the message goes back to the front of the queue and we retry
-     shortly; the user sees a queued bubble, never a dead error. */
+  /* One turn. Two self-healing paths keep the queue moving:
+     - "busy": the runner is still on a turn (e.g. from a previous page load)
+       — requeue at the front and retry shortly.
+     - "turn_failed"/"not_started": the runner's auth died (agentd already
+       dropped it, or the process exited) — restart the architect and resend
+       the message ONCE; a second failure surfaces as a visible error. */
   const runTurn = useCallback(
-    async (text: string) => {
+    async (text: string, isRetry: boolean) => {
       setPhase("streaming");
       setStalled(false);
       lastItemAtRef.current = Date.now();
@@ -175,6 +178,7 @@ export default function ArchitectPanel({
         { role: "assistant", blocks: [] },
       ]);
       let busy = false;
+      let failed = false;
       await askArchitect(text, sessionId, (item) => {
         lastItemAtRef.current = Date.now();
         setStalled(false);
@@ -182,6 +186,15 @@ export default function ArchitectPanel({
         if (item.kind === "error" && item.code === "busy") {
           busy = true;
           return;
+        }
+        if (
+          item.kind === "error" &&
+          (item.code === "turn_failed" || item.code === "not_started")
+        ) {
+          failed = true;
+          // First attempt heals silently (restart + resend); on the retry the
+          // error falls through to render, so a real outage stays visible.
+          if (!isRetry) return;
         }
         setMessages((prev) => {
           const next = [...prev];
@@ -198,13 +211,17 @@ export default function ArchitectPanel({
       if (busy) {
         // Roll back the optimistic bubbles; the text waits in the queue.
         setMessages((prev) => prev.slice(0, -2));
-        setOutbox((prev) => [text, ...prev]);
+        setOutbox((prev) => [{ text, retry: isRetry }, ...prev]);
         setPhase("busy");
+      } else if (failed && !isRetry) {
+        setMessages((prev) => prev.slice(0, -2));
+        setOutbox((prev) => [{ text, retry: true }, ...prev]);
+        await begin(); // fresh subprocess, freshly redeemed auth
       } else {
         setPhase("ready");
       }
     },
-    [sessionId],
+    [sessionId, begin],
   );
 
   /* Drain the queue whenever the architect is free. */
@@ -213,7 +230,7 @@ export default function ArchitectPanel({
     drainingRef.current = true;
     const [next, ...rest] = outbox;
     setOutbox(rest);
-    void runTurn(next).finally(() => {
+    void runTurn(next.text, next.retry ?? false).finally(() => {
       drainingRef.current = false;
     });
   }, [phase, outbox, runTurn]);
@@ -238,7 +255,7 @@ export default function ArchitectPanel({
     const text = input.trim();
     if (!text || phase === "error") return;
     setInput("");
-    setOutbox((prev) => [...prev, text]);
+    setOutbox((prev) => [...prev, { text }]);
   }, [input, phase]);
 
   const stopTurn = useCallback(() => {
@@ -345,7 +362,7 @@ export default function ArchitectPanel({
               {m.blocks.length === 0 &&
                 phase === "streaming" &&
                 mi === messages.length - 1 && (
-                  <div style={s.thinking}>Thinking…</div>
+                  <div style={s.thinking}>Architecting…</div>
                 )}
               {m.blocks.map((b, bi) => {
                 if (b.kind === "text")
@@ -405,10 +422,10 @@ export default function ArchitectPanel({
           ),
         )}
 
-        {outbox.map((text, i) => (
+        {outbox.map((entry, i) => (
           <div key={`q-${i}`} style={s.userRow}>
             <div style={s.queuedBubble}>
-              {text}
+              {entry.text}
               <span style={s.queuedTag}>queued</span>
             </div>
           </div>

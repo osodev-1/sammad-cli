@@ -242,3 +242,36 @@ def test_renew_once_stops_on_nonretryable_error() -> None:
     )
     assert r.renew_once() is False
     assert [e.code for e in errors] == ["revoked"]
+
+
+def test_run_loop_fires_on_exhausted_when_renewal_dies() -> None:
+    """A revoked session (non-retryable renew) must fire on_exhausted — the
+    hook a headless wire runner uses to exit instead of zombie-ing on a dead
+    token where every LLM call is a guaranteed 401."""
+    exhausted: list[bool] = []
+    client = FakeRenewClient(error=SanadError("revoked", "gone", status=401, retryable=False))
+    r = RuntimeTokenRenewer(
+        client,  # type: ignore[arg-type]
+        "sess",
+        _mint(),
+        now=lambda: BASE_TIME,
+        sleep=lambda _s: None,  # run the loop inline, no real waiting
+        on_exhausted=lambda: exhausted.append(True),
+    )
+    r._run()  # noqa: SLF001 — drive the loop body directly, no thread
+    assert exhausted == [True]
+
+
+def test_run_loop_does_not_fire_on_exhausted_when_stopped() -> None:
+    exhausted: list[bool] = []
+    client = FakeRenewClient(new_expiry=(BASE_TIME + timedelta(minutes=20)).isoformat())
+    r = RuntimeTokenRenewer(
+        client,  # type: ignore[arg-type]
+        "sess",
+        _mint(),
+        now=lambda: BASE_TIME,
+        on_exhausted=lambda: exhausted.append(True),
+    )
+    r.stop()  # a deliberate shutdown is not exhaustion
+    r._run()  # noqa: SLF001
+    assert exhausted == []

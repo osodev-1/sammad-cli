@@ -25,10 +25,13 @@ export default function WorkspaceContextHeader({
   projectName,
   sessionId,
   onChanged,
+  onReset,
 }: {
   projectName: string;
   sessionId?: string;
   onChanged?: () => void;
+  /** Workspace reset: restart the agents so the current blueprint loads. */
+  onReset?: () => void;
 }) {
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [menu, setMenu] = useState<
@@ -146,6 +149,23 @@ export default function WorkspaceContextHeader({
         <span style={s.repo} title={projectName}>
           {projectName}
         </span>
+        {onReset && (
+          <button
+            style={s.resetBtn}
+            title="Restart the workspace agents so the current blueprint (skills, definitions) loads into the session"
+            onClick={() => {
+              if (
+                window.confirm(
+                  "Reset the workspace? Running agents restart (the conversation resumes) and the current blueprint loads.",
+                )
+              ) {
+                onReset();
+              }
+            }}
+          >
+            Reset
+          </button>
+        )}
       </div>
       <div style={s.row}>
         <button
@@ -285,7 +305,25 @@ const s: Record<string, CSSProperties> = {
     background: "var(--paper)",
     padding: "0.5rem 0.7rem",
   },
-  top: { marginBottom: "0.35rem" },
+  top: {
+    marginBottom: "0.35rem",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "0.5rem",
+  },
+  resetBtn: {
+    font: "inherit",
+    fontSize: "0.66rem",
+    fontWeight: 600,
+    color: "var(--ink-muted)",
+    background: "none",
+    border: "1px solid var(--rule-strong)",
+    borderRadius: "var(--radius-pill)",
+    padding: "0.1rem 0.55rem",
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
   repo: {
     fontSize: "0.82rem",
     fontWeight: 650,

@@ -123,8 +123,15 @@ class SanadSession:
         save_config(config, config_file)
         return mint
 
-    def new_renewer(self, mint: MintResponse) -> RuntimeTokenRenewer:
-        return RuntimeTokenRenewer(self._client, self.require_token(), mint)
+    def new_renewer(
+        self,
+        mint: MintResponse,
+        *,
+        on_exhausted: Callable[[], None] | None = None,
+    ) -> RuntimeTokenRenewer:
+        return RuntimeTokenRenewer(
+            self._client, self.require_token(), mint, on_exhausted=on_exhausted
+        )
 
     def close(self) -> None:
         self._client.close()
@@ -148,6 +155,7 @@ class RuntimeTokenRenewer:
         sleep: Callable[[float], None] | None = None,
         now: Callable[[], datetime] | None = None,
         on_error: Callable[[SanadError], None] | None = None,
+        on_exhausted: Callable[[], None] | None = None,
     ) -> None:
         self._client = client
         self._session_token = session_token
@@ -158,6 +166,11 @@ class RuntimeTokenRenewer:
         self._min_sleep = min_sleep_seconds
         self._now = now or (lambda: datetime.now(UTC))
         self._on_error = on_error
+        # Fired when renewal ends for good WITHOUT stop() — session revoked
+        # (non-retryable renew) or the 24h absolute cap. From here every LLM
+        # call is a guaranteed 401: a headless runner should die (and be
+        # respawned with fresh auth) rather than zombie on a dead token.
+        self._on_exhausted = on_exhausted
         self._stop = threading.Event()
         self._sleep = sleep or self._stop.wait  # interruptible sleep by default
         self._thread: threading.Thread | None = None
@@ -192,6 +205,8 @@ class RuntimeTokenRenewer:
             if self._stop.is_set():
                 return
             if not self.renew_once():
+                if self._on_exhausted is not None:
+                    self._on_exhausted()
                 return
 
     def start(self) -> None:

@@ -112,7 +112,15 @@ def _launch_workspace(console: Console, extra_args: Sequence[str] = ()) -> None:
         _fail(console, exc)
         return
 
-    renewer = session.new_renewer(mint)
+    # Headless wire runners (the Architect bridge) must never outlive their
+    # auth: once renewal is exhausted — session revoked, or the 24h absolute
+    # cap — every LLM call is a guaranteed 401 and the process is a zombie
+    # that agentd would keep reusing. Exiting lets the supervisor respawn it
+    # with a freshly redeemed session. Interactive runs keep the current
+    # behavior (the user sees provider errors and can re-login in place).
+    wire_mode = "--wire" in extra_args
+    on_exhausted = (lambda: os._exit(43)) if wire_mode else None
+    renewer = session.new_renewer(mint, on_exhausted=on_exhausted)
     renewer.start()
     try:
         from kimi_cli.cli import cli

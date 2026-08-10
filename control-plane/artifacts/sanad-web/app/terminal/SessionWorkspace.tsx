@@ -256,21 +256,26 @@ export default function SessionWorkspace({
      panels remount and reconnect (the fresh spawn resumes the conversation). */
   const [termEpoch, setTermEpoch] = useState(0);
 
-  /* S9 activation: the CLI discovers skills at construction, so applying a new
-     definition needs a fresh agent process to take effect. Kill the machine's
-     agent PTYs, then remount the panels; the first respawn resumes the newest
-     conversation from disk — same chat, freshly loaded (trust-gated) skills.
-     The drawer shell is a different kind and is never touched. */
-  const restartAgents = useCallback(async () => {
+  /* Workspace reset (S9 activation): the CLI discovers skills at
+     construction, so the current blueprint only loads into FRESH agent
+     processes. Reset = (a) stop the architect subprocess (next ask spawns it
+     with fresh auth), (b) kill the machine's agent PTYs, (c) remount the
+     panels; the first respawn resumes the newest conversation from disk —
+     same chat, current blueprint. The drawer shell is never touched. */
+  const resetWorkspace = useCallback(async () => {
     try {
+      // Architect reset is best-effort — the machine may not have a runner.
+      void fetch(withSession("/api/architect/reset", sessionId), {
+        method: "POST",
+      }).catch(() => {});
       const res = await fetch(withSession("/api/terminal/restart", sessionId), {
         method: "POST",
       });
       if (!res.ok) throw new Error("restart failed");
       setTermEpoch((e) => e + 1);
-      setNotice("Agent restarted — same conversation, updated blueprint.");
+      setNotice("Workspace reset — agents restarted with the current blueprint.");
     } catch {
-      setNotice("Could not restart the agent — try again in a moment.");
+      setNotice("Could not reset the workspace — try again in a moment.");
     }
   }, [sessionId]);
 
@@ -435,6 +440,7 @@ export default function SessionWorkspace({
           projectName={projectName ?? "Workspace"}
           sessionId={sessionId}
           onChanged={() => void refresh(true)}
+          onReset={() => void resetWorkspace()}
         />
         <div style={s.treeScroll}>
           <FileTree
@@ -508,7 +514,7 @@ export default function SessionWorkspace({
                   visible={graphActive}
                   onOpenFile={openFile}
                   onApplied={onBlueprintApplied}
-                  onRestartAgents={restartAgents}
+                  onRestartAgents={resetWorkspace}
                   focusResourceId={graphFocus}
                   architectOpen={architectOpen}
                   onToggleArchitect={() => setArchitectOpen((v) => !v)}
@@ -523,7 +529,7 @@ export default function SessionWorkspace({
                   initial={architectTranscript}
                   onPersist={setArchitectTranscript}
                   onApplied={onBlueprintApplied}
-                  onRestartAgents={restartAgents}
+                  onRestartAgents={resetWorkspace}
                 />
               </div>
             </div>
