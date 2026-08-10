@@ -211,7 +211,14 @@ export default function GraphPanel({
   const onNodeDoubleClick = useCallback(
     (_: unknown, node: Node) => {
       const n = graph?.nodes.find((x) => x.id === node.id);
-      if (n) onOpenFile(n.path);
+      if (!n) return;
+      // For a skill, the substance is its instructions — open SKILL.md, not
+      // the manifest (which stays one click away in the Inspector).
+      const instructions =
+        n.kind === "Skill"
+          ? n.supporting_paths.find((p) => p.endsWith("/SKILL.md"))
+          : undefined;
+      onOpenFile(instructions ?? n.path);
     },
     [graph, onOpenFile],
   );

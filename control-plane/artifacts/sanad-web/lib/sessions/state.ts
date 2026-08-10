@@ -24,6 +24,35 @@ export const terminalTabState = z.object({
   label: z.string(),
 });
 
+/**
+ * Persisted Architect transcript (S9). A RECORD of the conversation, not a
+ * live draft store: text is truncated, and plan blocks keep only summary +
+ * outcome — a pending plan from a dead session is stored as "expired" (its
+ * preconditions are stale and the runner's context is gone), so a restored
+ * card can never apply. Sizes are capped so the uiState blob stays small.
+ */
+export const architectBlockState = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("text"), text: z.string().max(6000) }),
+  z.object({ kind: z.literal("tool"), label: z.string().max(200) }),
+  z.object({
+    kind: z.literal("plan"),
+    summary: z.string().max(300),
+    files: z.number().int().min(0).max(50),
+    state: z.enum(["applied", "expired"]),
+    txId: z.string().max(80).optional(),
+  }),
+]);
+
+export const architectMessageState = z.union([
+  z.object({ role: z.literal("user"), text: z.string().max(8000) }),
+  z.object({
+    role: z.literal("assistant"),
+    blocks: z.array(architectBlockState).max(80),
+  }),
+]);
+
+export type StoredArchitectMessage = z.infer<typeof architectMessageState>;
+
 export const sessionUiState = z.object({
   v: z.literal(SESSION_STATE_VERSION),
   terminals: z.array(terminalTabState).max(16).default([]),
@@ -33,6 +62,8 @@ export const sessionUiState = z.object({
   drawerOpen: z.boolean().default(false),
   // Graph viewport placeholder — populated when the graph tab lands (M1).
   graphViewport: z.record(z.string(), z.number()).optional(),
+  // Architect chat transcript — optional so pre-S9 blobs parse unchanged.
+  architect: z.array(architectMessageState).max(60).optional(),
 });
 
 export type SessionUiState = z.infer<typeof sessionUiState>;

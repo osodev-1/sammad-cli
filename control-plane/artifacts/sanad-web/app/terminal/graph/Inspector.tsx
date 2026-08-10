@@ -65,6 +65,21 @@ export default function Inspector({
         )}
 
         <Section title="Files">
+          {/* A skill IS its instructions — surface SKILL.md first and plainly,
+              so "where is the md?" never needs hunting through paths. */}
+          {(() => {
+            const instructions = node.supporting_paths.find((p) =>
+              p.endsWith("/SKILL.md"),
+            );
+            return instructions ? (
+              <button
+                style={s.instructionsBtn}
+                onClick={() => onOpenFile(instructions)}
+              >
+                Open instructions (SKILL.md)
+              </button>
+            ) : null;
+          })()}
           <button style={s.fileLink} onClick={() => onOpenFile(node.path)}>
             {node.path}
           </button>
@@ -195,6 +210,19 @@ const s: Record<string, CSSProperties> = {
     letterSpacing: "0.1em",
     textTransform: "uppercase",
     color: "var(--ink-muted)",
+  },
+  instructionsBtn: {
+    alignSelf: "flex-start",
+    font: "inherit",
+    fontSize: "0.76rem",
+    fontWeight: 600,
+    color: "var(--ink)",
+    background: "none",
+    border: "1px solid var(--ink)",
+    borderRadius: "var(--radius-pill)",
+    padding: "0.2rem 0.75rem",
+    cursor: "pointer",
+    marginBottom: "0.2rem",
   },
   fileLink: {
     textAlign: "left",

@@ -62,8 +62,10 @@ describe("architect stream parsing", () => {
     );
     const items: ArchitectItem[] = [];
     await askArchitect("hi", undefined, (i) => items.push(i));
+    // The error code rides along so the panel can treat "busy" as queueable
+    // (retry shortly) rather than a dead error.
     expect(items).toEqual([
-      { kind: "error", message: "a turn is in progress" },
+      { kind: "error", code: "busy", message: "a turn is in progress" },
     ]);
   });
 });

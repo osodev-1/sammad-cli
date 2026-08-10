@@ -41,4 +41,34 @@ describe("session UI state", () => {
     expect(parsed.fileTabs[0].alias).toBeUndefined();
     expect(parsed.active).toBeNull();
   });
+
+  it("carries an architect transcript; pre-S9 blobs parse without one", () => {
+    const withChat = parseSessionState({
+      v: 1,
+      architect: [
+        { role: "user", text: "add a code review skill" },
+        {
+          role: "assistant",
+          blocks: [
+            { kind: "text", text: "Here's a plan." },
+            { kind: "tool", label: "BlueprintGraph" },
+            {
+              kind: "plan",
+              summary: "Create Skill “Code Review”",
+              files: 2,
+              state: "applied",
+              txId: "tx_1",
+            },
+          ],
+        },
+      ],
+    });
+    expect(withChat.architect).toHaveLength(2);
+    // Pre-S9 blob: absent field stays absent, everything else intact.
+    expect(parseSessionState({ v: 1 }).architect).toBeUndefined();
+    // A malformed transcript degrades the whole blob (record, not source of truth).
+    expect(
+      parseSessionState({ v: 1, architect: [{ role: "wizard" }] }),
+    ).toEqual(EMPTY_SESSION_STATE);
+  });
 });

@@ -9,7 +9,7 @@ export type ArchitectItem =
       event: { type?: string; payload?: Record<string, unknown> };
     }
   | { kind: "end"; status?: string }
-  | { kind: "error"; message?: string };
+  | { kind: "error"; message?: string; code?: string };
 
 export interface StartResult {
   ok: boolean;
@@ -85,6 +85,7 @@ export async function askArchitect(
     const b = await res.json().catch(() => null);
     onItem({
       kind: "error",
+      code: b?.error?.code,
       message: b?.error?.message ?? "The architect could not respond.",
     });
     return;

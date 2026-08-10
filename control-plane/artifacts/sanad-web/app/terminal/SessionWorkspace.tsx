@@ -27,7 +27,10 @@ import {
 } from "@/lib/terminal/workspace-model";
 import type { ThemeMode } from "@/lib/terminal/xtermTheme";
 import { loadDefaultSession, persistSessionState } from "@/lib/sessions/client";
-import { SESSION_STATE_VERSION } from "@/lib/sessions/state";
+import {
+  SESSION_STATE_VERSION,
+  type StoredArchitectMessage,
+} from "@/lib/sessions/state";
 
 const POLL_MS = 4000;
 const MAX_TERMINALS = 3;
@@ -63,6 +66,11 @@ export default function SessionWorkspace({
      first open, then kept alive (hidden) so the shell survives the drawer. */
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerMounted, setDrawerMounted] = useState(false);
+  /* Architect chat transcript — rides the PRD-session uiState (restored in the
+     hydration effect below, persisted with the other tab state). */
+  const [architectTranscript, setArchitectTranscript] = useState<
+    StoredArchitectMessage[] | undefined
+  >(undefined);
   const toggleDrawer = useCallback(() => {
     setDrawerMounted(true);
     setDrawerOpen((prev) => !prev);
@@ -118,6 +126,9 @@ export default function SessionWorkspace({
         setDrawerOpen(true);
       }
       if (s.active) setActive(s.active);
+      if (s.architect && s.architect.length > 0) {
+        setArchitectTranscript(s.architect);
+      }
       hydrated.current = true;
     })();
     return () => {
@@ -204,10 +215,19 @@ export default function SessionWorkspace({
         viewTabs: viewTabs.map((t) => ({ url: t.url, alias: t.title })),
         active,
         drawerOpen,
+        architect: architectTranscript,
       });
     }, 800);
     return () => window.clearTimeout(timer);
-  }, [terminals, fileTabs, viewTabs, active, drawerOpen, sessionId]);
+  }, [
+    terminals,
+    fileTabs,
+    viewTabs,
+    active,
+    drawerOpen,
+    architectTranscript,
+    sessionId,
+  ]);
 
   const tree = useMemo(() => buildTree(entries), [entries]);
   const artifacts = useMemo(
@@ -500,6 +520,8 @@ export default function SessionWorkspace({
                 <ArchitectPanel
                   sessionId={sessionId}
                   visible={graphActive && architectOpen}
+                  initial={architectTranscript}
+                  onPersist={setArchitectTranscript}
                   onApplied={onBlueprintApplied}
                   onRestartAgents={restartAgents}
                 />
