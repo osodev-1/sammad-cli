@@ -64,6 +64,8 @@ export const sessionUiState = z.object({
   graphViewport: z.record(z.string(), z.number()).optional(),
   // Architect chat transcript — optional so pre-S9 blobs parse unchanged.
   architect: z.array(architectMessageState).max(60).optional(),
+  // Context dock visibility (R4) — optional; absent = open.
+  dockOpen: z.boolean().optional(),
 });
 
 export type SessionUiState = z.infer<typeof sessionUiState>;

@@ -98,6 +98,7 @@ export default function ArchitectPanel({
   onPersist,
   onApplied,
   onRestartAgents,
+  onPendingReviews,
 }: {
   sessionId?: string;
   visible: boolean;
@@ -109,6 +110,8 @@ export default function ArchitectPanel({
   onApplied?: (writtenPaths: string[]) => void;
   /** Kill + respawn the agent terminals so a new definition loads now (S9). */
   onRestartAgents?: () => void;
+  /** Drafts awaiting review (summaries) — feeds the context dock (R4). */
+  onPendingReviews?: (summaries: string[]) => void;
 }) {
   const [phase, setPhase] = useState<
     "idle" | "starting" | "ready" | "streaming" | "busy" | "error"
@@ -203,6 +206,19 @@ export default function ArchitectPanel({
     const t = window.setTimeout(() => onPersist(toStored(messages)), 600);
     return () => window.clearTimeout(t);
   }, [messages, phase, onPersist]);
+
+  /* The dock's Reviews section mirrors the drafts still awaiting action. */
+  useEffect(() => {
+    if (!onPendingReviews) return;
+    const pending = messages.flatMap((m) =>
+      m.role === "assistant"
+        ? m.blocks
+            .filter((b) => b.kind === "plan" && b.state === "pending")
+            .map((b) => (b.kind === "plan" ? b.summary : ""))
+        : [],
+    );
+    onPendingReviews(pending);
+  }, [messages, onPendingReviews]);
 
   /* One turn. Two self-healing paths keep the queue moving:
      - "busy": the runner is still on a turn (e.g. from a previous page load)

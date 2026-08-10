@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { GitBranchIcon } from "../ui/icons";
+import type { ProjectControls } from "./SessionWorkspace";
 import {
   fetchGitBranches,
   fetchGitStatus,
@@ -26,16 +27,19 @@ export default function WorkspaceContextHeader({
   sessionId,
   onChanged,
   onReset,
+  projectControls,
 }: {
   projectName: string;
   sessionId?: string;
   onChanged?: () => void;
   /** Workspace reset: restart the agents so the current blueprint loads. */
   onReset?: () => void;
+  /** The project switcher (R4) — replaces the retired Projects pane. */
+  projectControls?: ProjectControls;
 }) {
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [menu, setMenu] = useState<
-    "none" | "branches" | "commit" | "newBranch"
+    "none" | "branches" | "commit" | "newBranch" | "projects"
   >("none");
   const [branches, setBranches] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
@@ -146,9 +150,21 @@ export default function WorkspaceContextHeader({
   return (
     <div style={s.wrap} ref={rootRef}>
       <div style={s.top}>
-        <span style={s.repo} title={projectName}>
-          {projectName}
-        </span>
+        {projectControls ? (
+          <button
+            type="button"
+            style={s.repoBtn}
+            title="Switch project"
+            onClick={() => setMenu(menu === "projects" ? "none" : "projects")}
+          >
+            <span style={s.repo}>{projectName}</span>
+            <span style={s.repoCaret}>▾</span>
+          </button>
+        ) : (
+          <span style={s.repo} title={projectName}>
+            {projectName}
+          </span>
+        )}
         {onReset && (
           <button
             style={s.resetBtn}
@@ -195,6 +211,74 @@ export default function WorkspaceContextHeader({
           <span style={s.track}>↓{status?.behind}</span>
         )}
       </div>
+
+      {menu === "projects" && projectControls && (
+        <div style={s.menu}>
+          <div style={s.menuHeader}>
+            <span style={s.menuTitle}>Projects</span>
+            <button
+              style={s.menuAction}
+              disabled={
+                projectControls.projects.length >= projectControls.limit
+              }
+              onClick={() => {
+                const name = window.prompt("New project name");
+                if (name?.trim()) {
+                  setMenu("none");
+                  void projectControls.onCreate(name.trim().slice(0, 40));
+                }
+              }}
+            >
+              + new
+            </button>
+          </div>
+          {projectControls.projects.map((p) => (
+            <div key={p.id} style={s.projectRow}>
+              <button
+                style={{
+                  ...s.menuItem,
+                  ...(p.id === projectControls.activeId
+                    ? s.menuItemActive
+                    : null),
+                  flex: 1,
+                }}
+                onClick={() => {
+                  setMenu("none");
+                  projectControls.onSelect(p.id);
+                }}
+              >
+                {p.name}
+              </button>
+              <button
+                style={s.projectAction}
+                title="Restart machine — files and history persist"
+                onClick={() => {
+                  setMenu("none");
+                  projectControls.onRestart(p.id);
+                }}
+              >
+                ↻
+              </button>
+              <button
+                style={s.projectAction}
+                title="Delete project — stops its machine, files become unreachable"
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      `Delete the project “${p.name}”?\n\nIts machine stops, its files become unreachable, and terminals signed in through it lose access. This cannot be undone.`,
+                    )
+                  ) {
+                    setMenu("none");
+                    projectControls.onDelete(p.id);
+                  }
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {menu === "branches" && (
         <div style={s.menu}>
@@ -311,6 +395,31 @@ const s: Record<string, CSSProperties> = {
     alignItems: "center",
     justifyContent: "space-between",
     gap: "0.5rem",
+  },
+  repoBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "0.3rem",
+    background: "none",
+    border: "none",
+    padding: 0,
+    cursor: "pointer",
+    minWidth: 0,
+  },
+  repoCaret: { fontSize: "0.6rem", color: "var(--ink-muted)" },
+  projectRow: { display: "flex", alignItems: "center", gap: "0.15rem" },
+  projectAction: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "22px",
+    height: "22px",
+    background: "none",
+    border: "none",
+    borderRadius: "var(--radius-sm)",
+    color: "var(--ink-muted)",
+    cursor: "pointer",
+    fontSize: "0.75rem",
   },
   resetBtn: {
     font: "inherit",

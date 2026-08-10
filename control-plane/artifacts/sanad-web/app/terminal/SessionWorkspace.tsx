@@ -16,6 +16,7 @@ import {
   type WorkspaceTab,
 } from "./tabs";
 import GraphPanel from "./graph/GraphPanel";
+import ContextDock from "./dock/ContextDock";
 import ArchitectPanel from "./architect/ArchitectPanel";
 import WorkspaceContextHeader from "./WorkspaceContextHeader";
 import {
@@ -35,6 +36,23 @@ import {
 const POLL_MS = 4000;
 const MAX_TERMINALS = 3;
 
+export interface WorkspaceSessionInfo {
+  id: string;
+  name: string;
+  state: string;
+}
+
+/** Project lifecycle controls, passed down for the header switcher (R4). */
+export interface ProjectControls {
+  projects: WorkspaceSessionInfo[];
+  activeId?: string;
+  limit: number;
+  onSelect: (id: string) => void;
+  onCreate: (name: string) => Promise<void>;
+  onRestart: (id: string) => void;
+  onDelete: (id: string) => void;
+}
+
 /**
  * One session's entire pane: Files sidebar, tabbed main area (terminals +
  * previews), artifacts strip. The parent mounts this KEYED BY SESSION — a
@@ -46,11 +64,13 @@ export default function SessionWorkspace({
   projectName,
   themeMode,
   onStatusPhase,
+  projectControls,
 }: {
   sessionId?: string;
   projectName?: string;
   themeMode: ThemeMode;
   onStatusPhase?: (phase: TerminalPhase) => void;
+  projectControls?: ProjectControls;
 }) {
   const [entries, setEntries] = useState<WsEntry[]>([]);
   const [polling, setPolling] = useState(false);
@@ -71,6 +91,11 @@ export default function SessionWorkspace({
   const [architectTranscript, setArchitectTranscript] = useState<
     StoredArchitectMessage[] | undefined
   >(undefined);
+  /* Context dock (R4): open state persists; reviews + activity feed it. */
+  const [dockOpen, setDockOpen] = useState(true);
+  const [pendingReviews, setPendingReviews] = useState<string[]>([]);
+  const [activityEpoch, setActivityEpoch] = useState(0);
+  const prevPendingCount = useRef(0);
   const toggleDrawer = useCallback(() => {
     setDrawerMounted(true);
     setDrawerOpen((prev) => !prev);
@@ -129,6 +154,7 @@ export default function SessionWorkspace({
       if (s.architect && s.architect.length > 0) {
         setArchitectTranscript(s.architect);
       }
+      if (s.dockOpen === false) setDockOpen(false);
       hydrated.current = true;
     })();
     return () => {
@@ -216,6 +242,7 @@ export default function SessionWorkspace({
         active,
         drawerOpen,
         architect: architectTranscript,
+        dockOpen,
       });
     }, 800);
     return () => window.clearTimeout(timer);
@@ -226,6 +253,7 @@ export default function SessionWorkspace({
     active,
     drawerOpen,
     architectTranscript,
+    dockOpen,
     sessionId,
   ]);
 
@@ -273,7 +301,9 @@ export default function SessionWorkspace({
       });
       if (!res.ok) throw new Error("restart failed");
       setTermEpoch((e) => e + 1);
-      setNotice("Workspace reset — agents restarted with the current blueprint.");
+      setNotice(
+        "Workspace reset — agents restarted with the current blueprint.",
+      );
     } catch {
       setNotice("Could not reset the workspace — try again in a moment.");
     }
@@ -297,9 +327,25 @@ export default function SessionWorkspace({
     (writtenPaths: string[]) => {
       void refresh(true);
       setRevealPaths([...writtenPaths]);
+      setActivityEpoch((e) => e + 1); // dock refetches trust + history
     },
     [refresh],
   );
+
+  /* "In addition to the main context": a draft landing while the dock is
+     hidden (or the user is off the Blueprint tab) gets a toast so it is
+     never missed. */
+  useEffect(() => {
+    const grew = pendingReviews.length > prevPendingCount.current;
+    prevPendingCount.current = pendingReviews.length;
+    if (grew && (!dockOpen || active !== GRAPH_TAB_ID)) {
+      setNotice(
+        "The architect drafted a change — it's waiting in the side dock.",
+      );
+    }
+    // dockOpen/active deliberately unwatched: only NEW drafts notify.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingReviews]);
 
   const viewTitle = (url: string): string => {
     if (/^https?:\/\//i.test(url)) {
@@ -441,6 +487,7 @@ export default function SessionWorkspace({
           sessionId={sessionId}
           onChanged={() => void refresh(true)}
           onReset={() => void resetWorkspace()}
+          projectControls={projectControls}
         />
         <div style={s.treeScroll}>
           <FileTree
@@ -530,6 +577,7 @@ export default function SessionWorkspace({
                   onPersist={setArchitectTranscript}
                   onApplied={onBlueprintApplied}
                   onRestartAgents={resetWorkspace}
+                  onPendingReviews={setPendingReviews}
                 />
               </div>
             </div>
@@ -567,6 +615,17 @@ export default function SessionWorkspace({
           }
         />
       </main>
+      <div className="nav-hide-sm" style={s.dockCol}>
+        <ContextDock
+          sessionId={sessionId}
+          context={graphActive ? "graph" : "other"}
+          open={dockOpen}
+          onToggle={() => setDockOpen((v) => !v)}
+          pendingReviews={pendingReviews}
+          activityEpoch={activityEpoch}
+          onOpenGraph={openGraph}
+        />
+      </div>
       {notice && <div style={s.notice}>{notice}</div>}
     </>
   );
@@ -627,6 +686,7 @@ const s: Record<string, CSSProperties> = {
     visibility: "hidden",
     pointerEvents: "none",
   },
+  dockCol: { display: "flex", minHeight: 0 },
   notice: {
     position: "fixed",
     bottom: "3rem",

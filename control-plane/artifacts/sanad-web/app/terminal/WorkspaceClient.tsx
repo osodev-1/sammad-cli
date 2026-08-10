@@ -4,8 +4,10 @@ import { useCallback, useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import Nav from "../ui/Nav";
 import { MoonIcon, SunIcon } from "../ui/icons";
-import SessionPanel, { type WorkspaceSessionInfo } from "./SessionPanel";
-import SessionWorkspace from "./SessionWorkspace";
+
+import SessionWorkspace, {
+  type WorkspaceSessionInfo,
+} from "./SessionWorkspace";
 import StatusBar from "./StatusBar";
 import type { TerminalPhase } from "./TerminalPanel";
 import {
@@ -153,32 +155,6 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
     [sessions, activeSessionId, selectSession],
   );
 
-  /* Session controller pane — collapse state survives reloads. */
-  const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
-  useEffect(() => {
-    try {
-      setSessionsCollapsed(
-        window.localStorage.getItem("sanad-ws-sessions") === "collapsed",
-      );
-    } catch {
-      /* storage blocked — default open */
-    }
-  }, []);
-  const toggleSessions = useCallback(() => {
-    setSessionsCollapsed((prev) => {
-      const next = !prev;
-      try {
-        window.localStorage.setItem(
-          "sanad-ws-sessions",
-          next ? "collapsed" : "open",
-        );
-      } catch {
-        /* storage blocked */
-      }
-      return next;
-    });
-  }, []);
-
   const onStatusPhase = useCallback((p: TerminalPhase) => {
     setPaneStatus((prev) => (prev.tag === p.tag ? prev : p));
   }, []);
@@ -225,24 +201,16 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
           projectName={sessions.find((x) => x.id === activeSessionId)?.name}
           themeMode={themeMode}
           onStatusPhase={onStatusPhase}
+          projectControls={{
+            projects: sessions,
+            activeId: activeSessionId,
+            limit: sessionLimit,
+            onSelect: selectSession,
+            onCreate: createSession,
+            onRestart: restartSession,
+            onDelete: deleteSession,
+          }}
         />
-        {sessions.length > 0 && (
-          <div className="nav-hide-sm" style={s.rightPane}>
-            <SessionPanel
-              sessions={sessions}
-              activeId={activeSessionId}
-              activePhase={paneStatus}
-              canAdd={sessions.length < sessionLimit}
-              collapsed={sessionsCollapsed}
-              onSelect={selectSession}
-              onRename={renameSession}
-              onCreate={createSession}
-              onRestart={restartSession}
-              onDelete={deleteSession}
-              onToggleCollapsed={toggleSessions}
-            />
-          </div>
-        )}
       </div>
       <StatusBar phase={paneStatus} />
     </div>
