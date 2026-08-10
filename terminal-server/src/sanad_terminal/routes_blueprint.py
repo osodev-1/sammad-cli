@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import UTC, datetime
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from typing import Annotated
@@ -71,6 +72,33 @@ def _tx_dir(root: Path) -> Path:
     d = _sanad_dir(root) / ".cache" / "transactions"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+_TX_KEEP = 50
+
+
+def _prune_tx(root: Path) -> None:
+    """Keep the newest records only — the cache is instant-undo, not history
+    (git is history)."""
+    records = sorted(
+        _tx_dir(root).glob("tx_*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
+    for stale in records[_TX_KEEP:]:
+        stale.unlink(missing_ok=True)
+
+
+async def _auto_commit(request: Request, root: Path, message: str) -> bool:
+    """Commit .sanad with the signed-in user's identity (proxy-injected
+    headers; the browser can't spoof them). False on any git trouble."""
+    try:
+        from sanad_terminal.routes_git import _repo
+
+        author = request.headers.get("x-author-name") or "Sanad Workspace"
+        email = request.headers.get("x-author-email") or "workspace@sanadcode.com"
+        await _repo(request, root).commit_paths([".sanad"], message, author, email)
+        return True
+    except Exception:
+        return False
 
 
 def _plan_error(exc: PlanError) -> JSONResponse:
@@ -294,13 +322,22 @@ async def apply(request: Request, root: Root, body: ApplyBody) -> JSONResponse:
             return _plan_error(exc)
 
         tx_id = f"tx_{uuid.uuid4().hex[:16]}"
+        # Post-apply hashes anchor SAFE revert: rollback replays only when the
+        # tree still looks exactly like this apply left it (R3).
+        after_hashes = {
+            op.path: (file_sha256(root / op.path) if (root / op.path).is_file() else None)
+            for op in parsed.operations
+        }
         record = {
             "txId": tx_id,
+            "createdAt": datetime.now(UTC).isoformat(),
             "summary": parsed.summary,
             "operations": [asdict(o) for o in parsed.operations],
             "rollback": [asdict(r) for r in result.rollback],
+            "after": after_hashes,
         }
         (_tx_dir(root) / f"{tx_id}.json").write_text(json.dumps(record), encoding="utf-8")
+        _prune_tx(root)
 
         # Apply IS the trust review (S9): the user just read these exact files
         # in the review modal, so executable definitions the plan wrote are
@@ -323,10 +360,19 @@ async def apply(request: Request, root: Root, body: ApplyBody) -> JSONResponse:
         if deleted_executables:
             remove_trust(root, deleted_executables)
 
+        # R3: every governed apply lands in git — the durable, diffable history
+        # the committedness ring and the History timeline read from. Scoped to
+        # .sanad so a user's unrelated workspace edits are never swept in.
+        # Non-fatal: the apply already succeeded; a git hiccup only means the
+        # ring shows uncommitted until the next commit.
+        committed = await _auto_commit(
+            request, root, f"blueprint: {parsed.summary} [{tx_id}]"
+        )
+
         graph = _annotate_trust(compile_graph(index_blueprint(_sanad_dir(root))).to_dict(), root)
         graph = await _annotate_git(graph, request, root)
 
-    return JSONResponse({"ok": True, "txId": tx_id, "graph": graph})
+    return JSONResponse({"ok": True, "txId": tx_id, "committed": committed, "graph": graph})
 
 
 class RollbackBody(BaseModel):
@@ -334,8 +380,15 @@ class RollbackBody(BaseModel):
 
 
 @router.post("/rollback")
-async def rollback_tx(root: Root, body: RollbackBody) -> JSONResponse:
-    """Undo a transaction by replaying its rollback record."""
+async def rollback_tx(request: Request, root: Root, body: RollbackBody) -> JSONResponse:
+    """Undo a transaction by replaying its rollback record.
+
+    SAFE (R3): replay happens only while the tree still looks exactly like
+    the apply left it — every path is re-hashed against the record's
+    post-apply state, and any drift (a later apply, a PTY-agent edit) refuses
+    with 409 stale_rollback pointing the user at git history instead of
+    silently clobbering the newer work.
+    """
     record_path = _tx_dir(root) / f"{body.txId}.json"
     if not record_path.is_file():
         return JSONResponse(
@@ -344,14 +397,52 @@ async def rollback_tx(root: Root, body: RollbackBody) -> JSONResponse:
         )
     async with _lock_for(root):
         record = json.loads(record_path.read_text(encoding="utf-8"))
+        after = record.get("after")
+        if isinstance(after, dict):
+            for rel, expected in after.items():
+                target = root / rel
+                actual = file_sha256(target) if target.is_file() else None
+                if actual != expected:
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "error": {
+                                "code": "stale_rollback",
+                                "message": (
+                                    f"{rel} changed after this apply — revert from "
+                                    "the history timeline instead"
+                                ),
+                            }
+                        },
+                    )
         entries = [
             RollbackEntry(path=e["path"], action=e["action"], prior_content=e.get("prior_content"))
             for e in record.get("rollback", [])
         ]
         await asyncio.to_thread(rollback, root, entries)
         record_path.unlink(missing_ok=True)
-        graph = compile_graph(index_blueprint(_sanad_dir(root))).to_dict()
-    return JSONResponse({"ok": True, "graph": graph})
+        # Trust follows the tree: re-record what the revert restored, drop what
+        # it removed (mirrors apply's own bookkeeping).
+        restored_exec = {
+            e["path"]: file_sha256(root / e["path"])
+            for e in record.get("rollback", [])
+            if is_executable_path(e["path"]) and (root / e["path"]).is_file()
+        }
+        if restored_exec:
+            record_trust(root, restored_exec, "apply")
+        gone_exec = [
+            e["path"]
+            for e in record.get("rollback", [])
+            if is_executable_path(e["path"]) and not (root / e["path"]).is_file()
+        ]
+        if gone_exec:
+            remove_trust(root, gone_exec)
+        committed = await _auto_commit(
+            request, root, f"blueprint: revert {record.get('summary', body.txId)} [{body.txId}]"
+        )
+        graph = _annotate_trust(compile_graph(index_blueprint(_sanad_dir(root))).to_dict(), root)
+        graph = await _annotate_git(graph, request, root)
+    return JSONResponse({"ok": True, "committed": committed, "graph": graph})
 
 
 @router.get("/trust")

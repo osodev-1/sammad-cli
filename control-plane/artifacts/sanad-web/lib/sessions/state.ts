@@ -38,7 +38,7 @@ export const architectBlockState = z.discriminatedUnion("kind", [
     kind: z.literal("plan"),
     summary: z.string().max(300),
     files: z.number().int().min(0).max(50),
-    state: z.enum(["applied", "expired"]),
+    state: z.enum(["applied", "expired", "reverted"]),
     txId: z.string().max(80).optional(),
   }),
 ]);

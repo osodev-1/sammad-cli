@@ -25,7 +25,7 @@ export type Block =
       edges?: number;
       updated?: number;
       removed?: number;
-      state: "pending" | "applied" | "expired";
+      state: "pending" | "applied" | "expired" | "reverted";
       txId?: string;
       /** Present only while actionable (this session, not yet applied). */
       plan?: ChangePlan;

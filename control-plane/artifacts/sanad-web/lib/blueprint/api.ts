@@ -146,6 +146,26 @@ export async function reviewTrust(
   }
 }
 
+/** Revert an applied transaction (safe: 409 stale_rollback if the tree
+ * moved on since that apply — git history is the fallback then). */
+export async function revertTx(
+  txId: string,
+  sessionId?: string,
+): Promise<ApplyOutcome> {
+  try {
+    const res = await fetch(withSession("/api/blueprint/rollback", sessionId), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ txId }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) return { error: body?.error ?? { message: "Revert failed" } };
+    return { graph: body?.data?.graph };
+  } catch {
+    return { error: { message: "Network error" } };
+  }
+}
+
 /** Apply an approved plan; returns the fresh graph. */
 export async function applyPlan(
   plan: ChangePlan,

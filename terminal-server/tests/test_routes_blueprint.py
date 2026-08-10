@@ -385,3 +385,90 @@ def test_graph_annotates_committedness(client: TestClient):
     )
     g2 = client.get("/internal/blueprint/graph", headers=HEADERS).json()
     assert {n["id"]: n.get("git") for n in g2["nodes"]}["agent:primary"] == "modified"
+
+
+def _init_repo(client: TestClient):
+    import subprocess
+
+    ws = client._users_dir / USER / "workspace"  # type: ignore[attr-defined]
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@t", "HOME": str(ws), "PATH": "/usr/bin:/bin:/usr/local/bin"}
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=ws, env=env, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=ws, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=ws, env=env, check=True)
+    return ws, env
+
+
+def test_apply_auto_commits_scoped_to_sanad(client: TestClient):
+    """R3: a governed apply lands in git with the proxy-injected identity —
+    scoped to .sanad, so the user's unrelated edits stay out of the commit."""
+    import subprocess
+
+    _seed(client)
+    ws, env = _init_repo(client)
+    # An unrelated dirty file that must NOT be swept into the blueprint commit.
+    (ws / "notes.txt").write_text("wip\n")
+
+    plan = client.post(
+        "/internal/blueprint/plan",
+        headers=HEADERS,
+        json={"action": "createResource", "kind": "Tool", "name": "T"},
+    ).json()["plan"]
+    res = client.post(
+        "/internal/blueprint/apply",
+        headers={**HEADERS, "x-author-name": "Omar A", "x-author-email": "omar@x.test"},
+        json={"plan": plan},
+    )
+    assert res.status_code == 200
+    assert res.json()["committed"] is True
+
+    log = subprocess.run(
+        ["git", "log", "-1", "--format=%an|%s", "--name-only"],
+        cwd=ws, env=env, check=True, capture_output=True, text=True,
+    ).stdout
+    assert log.startswith("Omar A|blueprint: Create Tool “T” [tx_")
+    assert ".sanad/tools/t/tool.yaml" in log
+    assert "notes.txt" not in log  # unrelated edit untouched
+    # And the tx id in the subject matches the response.
+    assert res.json()["txId"] in log
+
+
+def test_rollback_is_safe_and_reverts_commit(client: TestClient):
+    """R3: revert replays only while the tree matches the apply's recorded
+    after-state; drift → 409 stale_rollback, nothing clobbered."""
+    _seed(client)
+    _init_repo(client)
+    plan = client.post(
+        "/internal/blueprint/plan",
+        headers=HEADERS,
+        json={"action": "createResource", "kind": "Tool", "name": "R"},
+    ).json()["plan"]
+    applied = client.post("/internal/blueprint/apply", headers=HEADERS, json={"plan": plan})
+    tx_id = applied.json()["txId"]
+
+    # Clean revert works and removes the resource.
+    rb = client.post("/internal/blueprint/rollback", headers=HEADERS, json={"txId": tx_id})
+    assert rb.status_code == 200
+    assert not any(n["id"] == "tool:r" for n in rb.json()["graph"]["nodes"])
+
+    # Re-apply, then drift the file — revert must refuse.
+    plan2 = client.post(
+        "/internal/blueprint/plan",
+        headers=HEADERS,
+        json={"action": "createResource", "kind": "Tool", "name": "R"},
+    ).json()["plan"]
+    applied2 = client.post("/internal/blueprint/apply", headers=HEADERS, json={"plan": plan2})
+    tx2 = applied2.json()["txId"]
+    client.put(
+        "/internal/workspace/file?path=.sanad/tools/r/tool.yaml",
+        headers=HEADERS,
+        content=b"drifted: true\n",
+    )
+    stale = client.post("/internal/blueprint/rollback", headers=HEADERS, json={"txId": tx2})
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "stale_rollback"
+    # The drifted content survives untouched.
+    kept = client.get(
+        "/internal/workspace/file?path=.sanad/tools/r/tool.yaml", headers=HEADERS
+    )
+    assert b"drifted" in kept.content

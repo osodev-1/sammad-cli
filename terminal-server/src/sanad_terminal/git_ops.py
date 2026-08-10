@@ -117,12 +117,28 @@ class GitRepo:
 
     async def ensure_repo(self) -> None:
         if await self.is_repo():
+            await self._ensure_cache_ignored()
             return
         await self._run("init", "-b", "main")
         # A default local identity so the first commit never fails; the commit
         # endpoint overrides author/committer per call from the signed-in user.
         await self._run("config", "user.name", "Sanad Workspace")
         await self._run("config", "user.email", "workspace@sanadcode.com")
+        await self._ensure_cache_ignored()
+
+    async def _ensure_cache_ignored(self) -> None:
+        """The blueprint's disposable cache (transaction records, graph index)
+        must never enter history — auto-commit on apply would otherwise sweep
+        it in with every change."""
+        ignore = self._root / ".gitignore"
+        line = ".sanad/.cache/"
+        try:
+            existing = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
+            if line not in existing.split("\n"):
+                joiner = "" if existing.endswith("\n") or not existing else "\n"
+                ignore.write_text(existing + joiner + line + "\n", encoding="utf-8")
+        except OSError:
+            pass  # unignorable cache is cosmetic, never fatal
 
     async def status(self) -> GitStatus:
         if not await self.is_repo():
@@ -223,6 +239,69 @@ class GitRepo:
             raise GitError("commit_failed", err.strip() or out.strip() or "commit failed")
         _, head, _ = await self._run("rev-parse", "--short", "HEAD", check=False)
         return head.strip()
+
+    async def commit_paths(
+        self, paths: list[str], message: str, author_name: str, author_email: str
+    ) -> str:
+        """Commit ONLY the given pathspecs — the blueprint auto-commit must
+        never sweep the user's unrelated workspace edits into its history."""
+        await self.ensure_repo()
+        await self._run("add", "-A", "--", *paths)
+        rc, out, err = await self._run(
+            "-c",
+            f"user.name={author_name}",
+            "-c",
+            f"user.email={author_email}",
+            "commit",
+            "-m",
+            message,
+            "--",
+            *paths,
+            check=False,
+        )
+        if rc != 0:
+            combined = (out + err).lower()
+            if "nothing to commit" in combined or "no changes added" in combined:
+                raise GitError("nothing_to_commit", "There are no changes to commit")
+            raise GitError("commit_failed", err.strip() or out.strip() or "commit failed")
+        _, head, _ = await self._run("rev-parse", "--short", "HEAD", check=False)
+        return head.strip()
+
+    async def log(self, limit: int = 50, path: str | None = None) -> list[dict[str, str]]:
+        """Recent commits, newest first: hash, authorName, date (ISO), subject.
+        Empty on a repo with no commits yet (or no repo at all)."""
+        if not await self.is_repo():
+            return []
+        sep = "\x1f"
+        args = ["log", f"--max-count={max(1, min(limit, 200))}", f"--format=%h{sep}%an{sep}%aI{sep}%s"]
+        if path:
+            args += ["--", path]
+        rc, out, _ = await self._run(*args, check=False)
+        if rc != 0:
+            return []  # unborn HEAD
+        entries: list[dict[str, str]] = []
+        for line in out.splitlines():
+            parts = line.split(sep)
+            if len(parts) == 4:
+                entries.append(
+                    {"hash": parts[0], "authorName": parts[1], "date": parts[2], "subject": parts[3]}
+                )
+        return entries
+
+    async def show(self, ref: str, path: str | None = None) -> str:
+        """One commit's unified diff (with subject header), optionally scoped
+        to a path. The ref is validated to a short/full hex hash — never an
+        arbitrary revision expression."""
+        if not all(c in "0123456789abcdef" for c in ref.lower()) or not (4 <= len(ref) <= 40):
+            raise GitError("invalid_ref", "not a commit hash")
+        args = ["show", "--stat=72", "--patch", "--format=%h %an %aI%n%s%n", ref]
+        if path:
+            args += ["--", path]
+        rc, out, err = await self._run(*args, check=False)
+        if rc != 0:
+            raise GitError("show_failed", err.strip() or "no such commit")
+        # Bound the payload — a pathological commit must not flood the UI.
+        return out if len(out) <= 200_000 else out[:200_000] + "\n… (truncated)\n"
 
     async def stash(self) -> None:
         rc, _, err = await self._run("stash", "push", "-u", check=False)

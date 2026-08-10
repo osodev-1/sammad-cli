@@ -72,6 +72,26 @@ async def branches(request: Request, root: Root) -> JSONResponse:
     return JSONResponse({"current": current, "branches": names})
 
 
+@router.get("/log")
+async def log(
+    request: Request, root: Root, limit: int = 50, path: str | None = None
+) -> JSONResponse:
+    """Recent commits, newest first — optionally scoped to a path (the
+    blueprint History timeline passes path=.sanad)."""
+    entries = await _repo(request, root).log(limit=limit, path=path)
+    return JSONResponse({"commits": entries})
+
+
+@router.get("/show")
+async def show(request: Request, root: Root, ref: str, path: str | None = None) -> JSONResponse:
+    """One commit's unified diff, for the expandable history entry."""
+    try:
+        text = await _repo(request, root).show(ref, path=path)
+    except GitError as exc:
+        return _error(exc, 404 if exc.code == "show_failed" else 400)
+    return JSONResponse({"diff": text})
+
+
 @router.post("/init")
 async def init(request: Request, root: Root) -> JSONResponse:
     await _repo(request, root).ensure_repo()

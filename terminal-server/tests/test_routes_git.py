@@ -47,8 +47,11 @@ def test_init_status_and_dirty_count(client: TestClient):
     body = res.json()
     assert body["isRepo"] is True
     assert body["branch"] == "main"
-    assert body["dirtyCount"] == 1
+    # init also drops a .gitignore (R3: .sanad/.cache must never enter
+    # history), so the fresh workspace carries two untracked files.
+    assert body["dirtyCount"] == 2
     assert "README.md" in body["untracked"]
+    assert ".gitignore" in body["untracked"]
 
 
 def test_commit_flow(client: TestClient):
@@ -115,3 +118,33 @@ def test_invalid_branch_name_rejected(client: TestClient):
 
 def test_git_requires_the_proxy_credential(client: TestClient):
     assert client.get("/internal/git/status").status_code == 401
+
+
+def test_log_and_show(client: TestClient):
+    """R3 history endpoints: log lists commits newest-first; show returns the
+    unified diff for a hash and rejects non-hash refs."""
+    c = client
+    c.post("/internal/git/init", headers=HEADERS)
+    _write(c, "a.txt", "one\n")
+    r = c.post(
+        "/internal/git/commit",
+        headers=HEADERS,
+        json={"message": "first", "authorName": "A", "authorEmail": "a@x"},
+    )
+    assert r.status_code == 200
+    _write(c, "a.txt", "one\ntwo\n")
+    c.post(
+        "/internal/git/commit",
+        headers=HEADERS,
+        json={"message": "second", "authorName": "A", "authorEmail": "a@x"},
+    )
+
+    log = c.get("/internal/git/log?limit=10", headers=HEADERS).json()["commits"]
+    assert [e["subject"] for e in log[:2]] == ["second", "first"]
+    assert log[0]["authorName"] == "A" and log[0]["hash"]
+
+    diff = c.get(f"/internal/git/show?ref={log[0]['hash']}", headers=HEADERS).json()["diff"]
+    assert "+two" in diff and "second" in diff
+
+    assert c.get("/internal/git/show?ref=main", headers=HEADERS).status_code == 400
+    assert c.get("/internal/git/show?ref=deadbeef", headers=HEADERS).status_code == 404

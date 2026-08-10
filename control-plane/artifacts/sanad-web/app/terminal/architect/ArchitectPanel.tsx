@@ -18,7 +18,7 @@ import {
   type Block,
   type Message,
 } from "@/lib/architect/transcript";
-import { applyPlan, fetchCurrentContents } from "@/lib/blueprint/api";
+import { applyPlan, fetchCurrentContents, revertTx } from "@/lib/blueprint/api";
 import type { StoredArchitectMessage } from "@/lib/sessions/state";
 import PlanPreview from "../graph/PlanPreview";
 
@@ -368,6 +368,37 @@ export default function ArchitectPanel({
     }
   }, [review, messages, sessionId, onApplied]);
 
+  /* Instant undo for an applied card (R3). Safe server-side: if anything
+     touched those files since, the revert refuses (stale_rollback) and we say
+     so — git history is the recovery path then. */
+  const doRevert = useCallback(
+    async (mi: number, bi: number) => {
+      const msg = messages[mi];
+      if (!msg || msg.role !== "assistant") return;
+      const block = msg.blocks[bi];
+      if (!block || block.kind !== "plan" || !block.txId) return;
+      const outcome = await revertTx(block.txId, sessionId);
+      setMessages((prev) => {
+        const next = [...prev];
+        const m = next[mi];
+        if (!m || m.role !== "assistant") return prev;
+        const blocks = [...m.blocks];
+        if (outcome.graph) {
+          blocks[bi] = { ...block, state: "reverted" };
+        } else {
+          blocks.push({
+            kind: "text",
+            text: `⚠ Revert refused: ${outcome.error?.message ?? "unknown error"}`,
+          });
+        }
+        next[mi] = { role: "assistant", blocks };
+        return next;
+      });
+      if (outcome.graph) onApplied?.([]);
+    },
+    [messages, sessionId, onApplied],
+  );
+
   if (!visible) return null;
 
   const reviewBlock =
@@ -472,7 +503,18 @@ export default function ArchitectPanel({
                             Restart agent now
                           </button>
                         )}
+                        {b.txId && (
+                          <button
+                            style={s.revertBtn}
+                            title="Undo this change (refused if the files moved on since)"
+                            onClick={() => void doRevert(mi, bi)}
+                          >
+                            Revert
+                          </button>
+                        )}
                       </span>
+                    ) : b.state === "reverted" ? (
+                      <span style={s.expired}>↺ Reverted.</span>
                     ) : b.state === "expired" ? (
                       <span style={s.expired}>
                         Drafted in an earlier session — ask again to redraft.
@@ -797,6 +839,17 @@ const s: Record<string, CSSProperties> = {
     color: "var(--paper)",
     background: "var(--ink)",
     border: "none",
+    borderRadius: "var(--radius-pill)",
+    padding: "0.15rem 0.7rem",
+    cursor: "pointer",
+  },
+  revertBtn: {
+    font: "inherit",
+    fontSize: "0.72rem",
+    fontWeight: 600,
+    color: "var(--ink)",
+    background: "none",
+    border: "1px solid var(--rule-strong)",
     borderRadius: "var(--radius-pill)",
     padding: "0.15rem 0.7rem",
     cursor: "pointer",
