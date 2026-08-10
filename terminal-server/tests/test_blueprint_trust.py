@@ -99,3 +99,15 @@ def test_store_shape_is_versioned_json(tmp_path: Path):
     data = json.loads(trust_file_for(root).read_text(encoding="utf-8"))
     assert data["version"] == 1
     assert set(data["entries"][".sanad/skills/v/SKILL.md"]) == {"sha256", "trustedAt", "source"}
+
+
+def test_mcp_manifests_are_gated_executables():
+    """R5: mcp.yaml joins the gate (it names the command a session runs)."""
+    from sanad_terminal.blueprint_trust import is_executable_path
+
+    assert is_executable_path(".sanad/mcps/files/mcp.yaml")
+    assert not is_executable_path(".sanad/mcps/../mcp.yaml")
+    assert not is_executable_path(".sanad/mcps/files/other.yaml")
+    assert not is_executable_path(".sanad/tools/t/tool.yaml")
+    # Skills unchanged.
+    assert is_executable_path(".sanad/skills/x/SKILL.md")

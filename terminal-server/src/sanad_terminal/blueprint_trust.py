@@ -45,19 +45,24 @@ def trust_file_for(root: Path) -> Path:
     return root.resolve().parent / TRUST_FILE_NAME
 
 
-def is_executable_path(rel: str) -> bool:
-    """Is this workspace-relative path an executable definition we gate?
+# Executable definitions we gate, by (kind directory, gated filename). Skills
+# gate their instructions; MCP servers gate the manifest itself (it names the
+# command/URL an agent session will actually run/connect to). Hooks and
+# runnable agents join as their activation rungs land (R5).
+_GATED: tuple[tuple[str, str], ...] = (
+    ("skills", "SKILL.md"),
+    ("mcps", "mcp.yaml"),
+)
 
-    v1 gates skill instructions only: ``.sanad/skills/<slug>/SKILL.md``.
-    MCP/hook/agent definitions join here in later S9 phases.
-    """
+
+def is_executable_path(rel: str) -> bool:
+    """Is this workspace-relative path an executable definition we gate?"""
     parts = PurePosixPath(rel).parts
     return (
         len(parts) == 4
         and parts[0] == ".sanad"
-        and parts[1] == "skills"
         and parts[2] not in ("..", ".")  # a traversal slug must never match
-        and parts[3] == "SKILL.md"
+        and (parts[1], parts[3]) in _GATED
     )
 
 

@@ -110,11 +110,11 @@ def _plan_error(exc: PlanError) -> JSONResponse:
 
 
 def _annotate_trust(payload: dict, root: Path) -> dict:
-    """Stamp each skill node with its executable definition's trust state.
+    """Stamp each node with its executable definition's trust state.
 
-    A skill node's manifest path is ``.sanad/skills/<slug>/skill.yaml``; its
-    gated instructions sit beside it as ``SKILL.md``. Nodes without a gated
-    file (no SKILL.md yet) carry no ``trust`` key at all.
+    A skill's gated file is the SKILL.md beside its manifest; an MCP server's
+    gated file is the manifest itself (it names the command/URL a session
+    would actually run). Nodes without a gated file carry no ``trust`` key.
     """
     statuses = trust_statuses(root)
     if not statuses:
@@ -123,8 +123,12 @@ def _annotate_trust(payload: dict, root: Path) -> dict:
         p = node.get("path") or ""
         if p.startswith(".sanad/skills/"):
             key = str(PurePosixPath(p).parent / "SKILL.md")
-            if key in statuses:
-                node["trust"] = statuses[key]["status"]
+        elif p.startswith(".sanad/mcps/"):
+            key = p
+        else:
+            continue
+        if key in statuses:
+            node["trust"] = statuses[key]["status"]
     return payload
 
 

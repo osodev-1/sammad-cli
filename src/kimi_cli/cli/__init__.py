@@ -540,6 +540,13 @@ def kimi(
 
     work_dir = KaosPath.unsafe_from_local_path(local_work_dir) if local_work_dir else KaosPath.cwd()
 
+    # Governed workspaces (R5): TRUSTED blueprint MCP servers join the session
+    # alongside file/flag configs. No-op everywhere else — the adapter is
+    # env-gated (SANAD_BLUEPRINT_TRUST) and fails to "load nothing".
+    from kimi_cli.sanad.activation import workspace_mcp_configs
+
+    mcp_configs += workspace_mcp_configs(work_dir.unsafe_to_local_path())
+
     # Tracks the most recently created/loaded session so that _reload_loop's
     # exception handler can clean it up even when _run() fails before returning.
     _latest_created_session: Session | None = None
