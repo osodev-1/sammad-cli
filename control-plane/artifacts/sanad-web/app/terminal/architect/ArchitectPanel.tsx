@@ -125,6 +125,12 @@ export default function ArchitectPanel({
   );
   const [input, setInput] = useState("");
   const [outbox, setOutbox] = useState<{ text: string; retry?: boolean }[]>([]);
+  /* Editing a queued message pauses the drain so a finishing turn can't
+     send the old text out from under the edit. */
+  const [editingQueued, setEditingQueued] = useState<{
+    index: number;
+    draft: string;
+  } | null>(null);
   const [stalled, setStalled] = useState(false);
   /* Clicking "Architecting…" reveals the live steps (reasoning + tools). */
   const [showSteps, setShowSteps] = useState(false);
@@ -308,16 +314,47 @@ export default function ArchitectPanel({
     [sessionId, begin],
   );
 
-  /* Drain the queue whenever the architect is free. */
+  /* Drain the queue whenever the architect is free (paused mid-edit). */
   useEffect(() => {
-    if (phase !== "ready" || outbox.length === 0 || drainingRef.current) return;
+    if (
+      phase !== "ready" ||
+      outbox.length === 0 ||
+      drainingRef.current ||
+      editingQueued !== null
+    ) {
+      return;
+    }
     drainingRef.current = true;
     const [next, ...rest] = outbox;
     setOutbox(rest);
     void runTurn(next.text, next.retry ?? false).finally(() => {
       drainingRef.current = false;
     });
-  }, [phase, outbox, runTurn]);
+  }, [phase, outbox, runTurn, editingQueued]);
+
+  /* Commit/cancel/remove for queued messages. An edit that empties the text
+     removes the message; edited text drops any retry marker (it's new). */
+  const commitQueuedEdit = useCallback(() => {
+    if (!editingQueued) return;
+    const text = editingQueued.draft.trim();
+    setOutbox((prev) =>
+      text
+        ? prev.map((e, i) => (i === editingQueued.index ? { text } : e))
+        : prev.filter((_, i) => i !== editingQueued.index),
+    );
+    setEditingQueued(null);
+  }, [editingQueued]);
+
+  const removeQueued = useCallback((index: number) => {
+    setOutbox((prev) => prev.filter((_, i) => i !== index));
+    setEditingQueued((cur) =>
+      cur && cur.index === index
+        ? null
+        : cur && cur.index > index
+          ? { ...cur, index: cur.index - 1 }
+          : cur,
+    );
+  }, []);
 
   /* Busy backoff: try again shortly — the earlier turn may have finished. */
   useEffect(() => {
@@ -565,10 +602,53 @@ export default function ArchitectPanel({
 
         {outbox.map((entry, i) => (
           <div key={`q-${i}`} style={s.userRow}>
-            <div style={s.queuedBubble}>
-              {entry.text}
-              <span style={s.queuedTag}>queued</span>
-            </div>
+            {editingQueued?.index === i ? (
+              <textarea
+                autoFocus
+                style={s.queuedEdit}
+                value={editingQueued.draft}
+                rows={2}
+                onChange={(e) =>
+                  setEditingQueued({ index: i, draft: e.target.value })
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    commitQueuedEdit();
+                  } else if (e.key === "Escape") {
+                    setEditingQueued(null);
+                  }
+                }}
+                onBlur={commitQueuedEdit}
+              />
+            ) : (
+              <div style={s.queuedBubble}>
+                {entry.text}
+                <span style={s.queuedTag}>queued</span>
+                <span style={s.queuedActions}>
+                  <button
+                    type="button"
+                    style={s.queuedAction}
+                    title="Edit before it sends"
+                    aria-label="Edit queued message"
+                    onClick={() =>
+                      setEditingQueued({ index: i, draft: entry.text })
+                    }
+                  >
+                    ✎
+                  </button>
+                  <button
+                    type="button"
+                    style={s.queuedAction}
+                    title="Remove from the queue"
+                    aria-label="Remove queued message"
+                    onClick={() => removeQueued(i)}
+                  >
+                    ✕
+                  </button>
+                </span>
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -725,6 +805,38 @@ const s: Record<string, CSSProperties> = {
     display: "flex",
     alignItems: "baseline",
     gap: "0.5rem",
+  },
+  queuedEdit: {
+    maxWidth: "80%",
+    minWidth: "60%",
+    resize: "none",
+    font: "inherit",
+    fontSize: "0.86rem",
+    lineHeight: 1.5,
+    color: "var(--ink)",
+    background: "var(--paper)",
+    border: "1px dashed var(--rule-strong)",
+    borderRadius: "var(--radius-lg)",
+    padding: "0.45rem 0.75rem",
+  },
+  queuedActions: {
+    display: "inline-flex",
+    gap: "0.1rem",
+    marginLeft: "0.2rem",
+  },
+  queuedAction: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "20px",
+    height: "20px",
+    background: "none",
+    border: "none",
+    borderRadius: "var(--radius-sm)",
+    color: "var(--ink-muted)",
+    cursor: "pointer",
+    fontSize: "0.72rem",
+    padding: 0,
   },
   queuedTag: {
     fontFamily: "var(--font-mono)",
