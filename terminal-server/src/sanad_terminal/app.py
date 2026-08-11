@@ -74,6 +74,15 @@ def create_app(
         else None
     )
 
+    if idle_stopper is not None:
+        from sanad_terminal.wire_runner import runners_hold_machine
+
+        # A running architect/coder turn (or one that just finished, within the
+        # idle window) holds the machine even with zero PTYs and no HTTP.
+        idle_stopper.add_probe(
+            lambda: runners_hold_machine(resolved.idle_stop_seconds)
+        )
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         manager.start()

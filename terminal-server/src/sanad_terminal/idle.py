@@ -5,7 +5,7 @@ task and billing with it. "Nobody needs it" = zero sessions (live OR detached
 — detached sessions carry their own grace and count as needed) AND no
 internal/workspace API traffic for `idle_stop_seconds`. The health check path
 is excluded from activity so load-balancer probes can never keep a machine
-alive forever.
+alive forever. Runner activity (architect/coder turns) registers as probes — a machine mid-turn is needed even with zero PTY sessions and zero HTTP traffic.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import contextlib
 import os
 import signal
 import time
+from collections.abc import Callable
 
 from loguru import logger
 
@@ -34,9 +35,30 @@ class IdleStopper:
         self._tick = tick_seconds
         self._last_activity = time.monotonic()
         self._task: asyncio.Task[None] | None = None
+        self._probes: list[Callable[[], bool]] = []
+
+    def add_probe(self, probe: Callable[[], bool]) -> None:
+        """A zero-arg callable; truthy = the machine is needed."""
+        self._probes.append(probe)
 
     def touch(self) -> None:
         self._last_activity = time.monotonic()
+
+    def _needed(self) -> bool:
+        if self._manager.count > 0:
+            return True
+        for probe in self._probes:
+            try:
+                if probe():
+                    return True
+            except Exception:
+                logger.exception("idle probe failed — treating machine as needed")
+                return True
+        return False
+
+    def _stop_machine(self) -> None:
+        # SIGTERM → uvicorn graceful shutdown → clean exit → task stops.
+        os.kill(os.getpid(), signal.SIGTERM)
 
     def start(self) -> None:
         if self._task is None:
@@ -52,12 +74,11 @@ class IdleStopper:
     async def _loop(self) -> None:
         while True:
             await asyncio.sleep(self._tick)
-            if self._manager.count > 0:
+            if self._needed():
                 self._last_activity = time.monotonic()
                 continue
             quiet = time.monotonic() - self._last_activity
             if quiet >= self._idle_stop:
                 logger.info("idle for {:.0f}s with zero sessions — stopping the machine", quiet)
-                # SIGTERM → uvicorn graceful shutdown → clean exit → task stops.
-                os.kill(os.getpid(), signal.SIGTERM)
+                self._stop_machine()
                 return
