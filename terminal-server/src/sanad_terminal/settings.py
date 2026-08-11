@@ -48,6 +48,13 @@ class TerminalSettings:
     spawn_argv: tuple[str, ...] = field(default_factory=tuple)
     # argv for the drawer's plain shell (task mode).
     shell_argv: tuple[str, ...] = ("/bin/bash", "-l")
+    # -- coder panel (P0) -----------------------------------------------------
+    # Default-off master switch for /internal/coder/*; "1" is the only truthy.
+    coder_enabled: bool = False
+    # Panel-turn budgets — deliberately far below the CLI's raw 1000-step /
+    # 24h-token ceilings; a runaway browser-driven turn burns quota unattended.
+    coder_max_turn_seconds: float = 3600.0
+    coder_max_steps_per_turn: int = 200
 
     @classmethod
     def load(cls, env: Mapping[str, str] | None = None) -> TerminalSettings:
@@ -109,4 +116,7 @@ class TerminalSettings:
             child_api_base_url=e.get("SANAD_API_BASE_URL", control_plane).rstrip("/"),
             spawn_argv=argv,
             shell_argv=tuple((e.get("SHELL_ARGV") or "/bin/bash -l").split()),
+            coder_enabled=e.get("CODER_ENABLED", "") == "1",
+            coder_max_turn_seconds=float(e.get("CODER_MAX_TURN_SECONDS", "3600")),
+            coder_max_steps_per_turn=int(e.get("CODER_MAX_STEPS_PER_TURN", "200")),
         )

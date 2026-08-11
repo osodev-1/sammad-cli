@@ -9,6 +9,11 @@ BASE_ENV = {
 }
 
 
+@pytest.fixture
+def base_env():
+    return BASE_ENV.copy()
+
+
 def test_load_defaults():
     s = TerminalSettings.load(BASE_ENV)
     assert s.port == 8080
@@ -50,3 +55,29 @@ def test_env_overrides():
     assert s.allowed_origins == ("https://a.test", "https://b.test")
     assert s.idle_timeout_seconds == 60.0
     assert s.max_session_seconds == 120.0
+
+
+def test_coder_flags_default_off_and_budgets_default(base_env):
+    s = TerminalSettings.load(env=base_env)
+    assert s.coder_enabled is False
+    assert s.coder_max_turn_seconds == 3600.0
+    assert s.coder_max_steps_per_turn == 200
+
+
+def test_coder_flags_parse_from_env(base_env):
+    s = TerminalSettings.load(
+        env={
+            **base_env,
+            "CODER_ENABLED": "1",
+            "CODER_MAX_TURN_SECONDS": "120",
+            "CODER_MAX_STEPS_PER_TURN": "7",
+        }
+    )
+    assert s.coder_enabled is True
+    assert s.coder_max_turn_seconds == 120.0
+    assert s.coder_max_steps_per_turn == 7
+
+
+def test_coder_enabled_requires_exactly_one(base_env):
+    assert TerminalSettings.load(env={**base_env, "CODER_ENABLED": "true"}).coder_enabled is False
+    assert TerminalSettings.load(env={**base_env, "CODER_ENABLED": "0"}).coder_enabled is False
