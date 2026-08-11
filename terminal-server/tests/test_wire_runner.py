@@ -52,7 +52,9 @@ async def test_step_budget_cancels_a_looping_turn():
         state = await runner.start_turn("STEPHANG:5")
         items = await asyncio.wait_for(_drain(runner, state.turn_id), timeout=5.0)
         codes = [i.get("code") for i in items if i.get("kind") == "error"]
-        assert "turn_budget_exceeded" in codes
+        # Steps 3, 4, and 5 each independently exceed the threshold of 2 —
+        # the budget must trip exactly once, not once per offending step.
+        assert codes.count("turn_budget_exceeded") == 1
         assert state.status == "cancelled"
         assert state.steps >= 2
     finally:

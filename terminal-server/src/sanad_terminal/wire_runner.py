@@ -56,6 +56,7 @@ class TurnState:
     send_id: str | None = None
     items: list[dict[str, Any]] = field(default_factory=list)
     steps: int = 0
+    budget_tripped: bool = False
 
     @property
     def last_seq(self) -> int:
@@ -112,6 +113,7 @@ class WireRunner:
         self._current: TurnState | None = None
         self._consumer: asyncio.Task[None] | None = None
         self._budget_task: asyncio.Task[None] | None = None
+        self._trip_task: asyncio.Task[None] | None = None
         self._journal_cond = asyncio.Condition()
 
     # -- lifecycle -----------------------------------------------------------
@@ -186,6 +188,9 @@ class WireRunner:
         if self._budget_task is not None and not self._budget_task.done():
             self._budget_task.cancel()
             self._budget_task = None
+        if self._trip_task is not None and not self._trip_task.done():
+            self._trip_task.cancel()
+            self._trip_task = None
         proc = self._proc
         self._proc = None
         if self._reader is not None:
@@ -287,8 +292,14 @@ class WireRunner:
                         if (
                             self._max_steps_per_turn is not None
                             and state.steps > self._max_steps_per_turn
+                            and not state.budget_tripped
                         ):
-                            asyncio.create_task(
+                            # Cheap pre-filter only — `_trip_budget` itself is
+                            # the atomic check-and-set, so even a burst of
+                            # StepBegins that all pass this read before the
+                            # first trip task runs still yields exactly one
+                            # journaled breach (see `_trip_budget`).
+                            self._trip_task = asyncio.create_task(
                                 self._trip_budget(
                                     state,
                                     f"turn exceeded {self._max_steps_per_turn} steps",
@@ -315,18 +326,26 @@ class WireRunner:
             if self._budget_task is not None and not self._budget_task.done():
                 self._budget_task.cancel()
                 self._budget_task = None
+            if self._trip_task is not None and not self._trip_task.done():
+                self._trip_task.cancel()
+                self._trip_task = None
             self._touch()
             async with self._journal_cond:
                 self._journal_cond.notify_all()
 
     async def _budget_watch(self, state: TurnState, limit: float) -> None:
         await asyncio.sleep(limit)
-        if state.status == "running":
+        if state.status == "running" and not state.budget_tripped:
             await self._trip_budget(state, f"turn exceeded {limit:.0f}s wall clock")
 
     async def _trip_budget(self, state: TurnState, reason: str) -> None:
         """Journal the breach, then cancel — the turn ends `cancelled` with a
-        `turn_budget_exceeded` error item explaining why."""
+        `turn_budget_exceeded` error item explaining why. Idempotent per turn:
+        a turn can only trip once, so multiple StepBegins past the threshold
+        (or a step/wall-clock race) never double-journal the breach."""
+        if state.budget_tripped:
+            return
+        state.budget_tripped = True
         await self._append(
             state,
             {"kind": "error", "code": "turn_budget_exceeded", "message": reason},
