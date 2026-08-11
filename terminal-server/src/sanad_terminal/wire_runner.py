@@ -16,7 +16,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +55,7 @@ class TurnState:
     started_at: float = field(default_factory=time.time)
     send_id: str | None = None
     items: list[dict[str, Any]] = field(default_factory=list)
+    steps: int = 0
 
     @property
     def last_seq(self) -> int:
@@ -110,6 +111,7 @@ class WireRunner:
         self._turn_order: list[str] = []
         self._current: TurnState | None = None
         self._consumer: asyncio.Task[None] | None = None
+        self._budget_task: asyncio.Task[None] | None = None
         self._journal_cond = asyncio.Condition()
 
     # -- lifecycle -----------------------------------------------------------
@@ -181,6 +183,9 @@ class WireRunner:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._consumer
             self._consumer = None
+        if self._budget_task is not None and not self._budget_task.done():
+            self._budget_task.cancel()
+            self._budget_task = None
         proc = self._proc
         self._proc = None
         if self._reader is not None:
@@ -261,6 +266,10 @@ class WireRunner:
                 self._journal_cond.notify_all()
             raise
         self._consumer = asyncio.create_task(self._consume(state, queue))
+        if self._max_turn_seconds is not None:
+            self._budget_task = asyncio.create_task(
+                self._budget_watch(state, self._max_turn_seconds)
+            )
         return state
 
     async def _consume(self, state: TurnState, queue: asyncio.Queue[dict[str, Any]]) -> None:
@@ -271,6 +280,20 @@ class WireRunner:
                 item = await queue.get()
                 await self._append(state, item)
                 kind = item.get("kind")
+                if kind == "event":
+                    event = item.get("event") or {}
+                    if isinstance(event, dict) and event.get("type") == "StepBegin":
+                        state.steps += 1
+                        if (
+                            self._max_steps_per_turn is not None
+                            and state.steps > self._max_steps_per_turn
+                        ):
+                            asyncio.create_task(
+                                self._trip_budget(
+                                    state,
+                                    f"turn exceeded {self._max_steps_per_turn} steps",
+                                )
+                            )
                 if kind == "end":
                     status = item.get("status")
                     state.status = (
@@ -289,9 +312,26 @@ class WireRunner:
                 state.status = "failed"
             self._turn_queue = None
             self._prompt_id = None
+            if self._budget_task is not None and not self._budget_task.done():
+                self._budget_task.cancel()
+                self._budget_task = None
             self._touch()
             async with self._journal_cond:
                 self._journal_cond.notify_all()
+
+    async def _budget_watch(self, state: TurnState, limit: float) -> None:
+        await asyncio.sleep(limit)
+        if state.status == "running":
+            await self._trip_budget(state, f"turn exceeded {limit:.0f}s wall clock")
+
+    async def _trip_budget(self, state: TurnState, reason: str) -> None:
+        """Journal the breach, then cancel — the turn ends `cancelled` with a
+        `turn_budget_exceeded` error item explaining why."""
+        await self._append(
+            state,
+            {"kind": "error", "code": "turn_budget_exceeded", "message": reason},
+        )
+        await self.cancel()
 
     async def _append(self, state: TurnState, item: dict[str, Any]) -> None:
         state.items.append({"seq": len(state.items), **item})
