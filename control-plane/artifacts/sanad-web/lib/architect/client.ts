@@ -2,14 +2,23 @@ import { parseSessionGrant } from "@/lib/terminal/protocol";
 import { withSession } from "@/lib/terminal/workspace-model";
 import type { ChangePlan } from "@/lib/blueprint/api";
 
-/** One item off the architect turn stream (mirrors the agentd bridge). */
+/** One item off the architect turn stream (mirrors the agentd bridge).
+ * Items carry a journal `seq` — the reconnect cursor (R6 resilience). */
 export type ArchitectItem =
   | {
       kind: "event";
+      seq?: number;
       event: { type?: string; payload?: Record<string, unknown> };
     }
-  | { kind: "end"; status?: string }
-  | { kind: "error"; message?: string; code?: string };
+  | { kind: "turn"; seq?: number; turnId: string }
+  | { kind: "end"; seq?: number; status?: string }
+  | {
+      kind: "error";
+      seq?: number;
+      message?: string;
+      code?: string;
+      turnId?: string;
+    };
 
 export interface StartResult {
   ok: boolean;
@@ -56,41 +65,11 @@ export async function startArchitect(sessionId?: string): Promise<StartResult> {
   }
 }
 
-/**
- * Run one turn, invoking `onItem` for each streamed item until turn end. Parses
- * the NDJSON body line by line; malformed lines are skipped, never thrown.
- */
-export async function askArchitect(
-  input: string,
-  sessionId: string | undefined,
+async function streamNdjson(
+  res: Response,
   onItem: (item: ArchitectItem) => void,
-  signal?: AbortSignal,
 ): Promise<void> {
-  let res: Response;
-  try {
-    res = await fetch(withSession("/api/architect/ask", sessionId), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ input }),
-      signal,
-    });
-  } catch {
-    onItem({
-      kind: "error",
-      message: "Network error — check your connection.",
-    });
-    return;
-  }
-  if (!res.ok || !res.body) {
-    const b = await res.json().catch(() => null);
-    onItem({
-      kind: "error",
-      code: b?.error?.code,
-      message: b?.error?.message ?? "The architect could not respond.",
-    });
-    return;
-  }
-
+  if (!res.body) return;
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
@@ -108,7 +87,7 @@ export async function askArchitect(
     try {
       chunk = await reader.read();
     } catch {
-      break; // aborted or connection dropped
+      break; // aborted or connection dropped — the caller re-follows
     }
     if (chunk.done) break;
     buf += decoder.decode(chunk.value, { stream: true });
@@ -119,6 +98,102 @@ export async function askArchitect(
     }
   }
   flush(buf);
+}
+
+/**
+ * Start one turn, invoking `onItem` per streamed item. The server journals
+ * the turn independently of this connection: on a drop, the caller re-attaches
+ * with `followArchitect` from the last seen seq — nothing is lost.
+ * `sendId` makes the POST idempotent (a retry re-attaches, never re-prompts).
+ */
+export async function askArchitect(
+  input: string,
+  sendId: string | undefined,
+  sessionId: string | undefined,
+  onItem: (item: ArchitectItem) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(withSession("/api/architect/ask", sessionId), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input, sendId }),
+      signal,
+    });
+  } catch {
+    onItem({
+      kind: "error",
+      code: "network",
+      message: "Network error — check your connection.",
+    });
+    return;
+  }
+  if (!res.ok || !res.body) {
+    const b = await res.json().catch(() => null);
+    onItem({
+      kind: "error",
+      code: b?.error?.code,
+      turnId: b?.error?.turnId,
+      message: b?.error?.message ?? "The architect could not respond.",
+    });
+    return;
+  }
+  await streamNdjson(res, onItem);
+}
+
+/** Re-attach to a journaled turn from a seq (replay the gap, then live). */
+export async function followArchitect(
+  turnId: string,
+  fromSeq: number,
+  sessionId: string | undefined,
+  onItem: (item: ArchitectItem) => void,
+): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(
+      withSession(
+        `/api/architect/follow?turnId=${encodeURIComponent(turnId)}&from_seq=${fromSeq}`,
+        sessionId,
+      ),
+    );
+  } catch {
+    onItem({ kind: "error", code: "network", message: "Network error." });
+    return;
+  }
+  if (!res.ok || !res.body) {
+    const b = await res.json().catch(() => null);
+    onItem({
+      kind: "error",
+      code: b?.error?.code ?? "network",
+      message: b?.error?.message ?? "Could not re-attach to the turn.",
+    });
+    return;
+  }
+  await streamNdjson(res, onItem);
+}
+
+export interface TurnSummary {
+  turnId: string;
+  status: "running" | "finished" | "cancelled" | "failed";
+  userInput: string;
+  lastSeq: number;
+  startedAt: number;
+}
+
+/** Is a previous job still working? Null when unreachable. */
+export async function fetchTurnState(
+  sessionId?: string,
+): Promise<{ turn: TurnSummary | null; alive: boolean } | null> {
+  try {
+    const res = await fetch(withSession("/api/architect/turn", sessionId));
+    if (!res.ok) return null;
+    const body = await res.json();
+    const data = body?.data ?? body;
+    return { turn: data?.turn ?? null, alive: Boolean(data?.alive) };
+  } catch {
+    return null;
+  }
 }
 
 export async function cancelArchitect(sessionId?: string): Promise<void> {

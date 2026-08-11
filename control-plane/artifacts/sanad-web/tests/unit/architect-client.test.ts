@@ -38,7 +38,9 @@ describe("architect stream parsing", () => {
         ),
     );
     const items: ArchitectItem[] = [];
-    await askArchitect("hi", "sess", (i) => items.push(i));
+    await askArchitect("hi", undefined, "sess", (i: ArchitectItem) =>
+      items.push(i),
+    );
 
     expect(items).toHaveLength(2);
     expect(textFromEvent(items[0])).toBe("Hello");
@@ -61,7 +63,9 @@ describe("architect stream parsing", () => {
       ),
     );
     const items: ArchitectItem[] = [];
-    await askArchitect("hi", undefined, (i) => items.push(i));
+    await askArchitect("hi", undefined, undefined, (i: ArchitectItem) =>
+      items.push(i),
+    );
     // The error code rides along so the panel can treat "busy" as queueable
     // (retry shortly) rather than a dead error.
     expect(items).toEqual([

@@ -192,3 +192,97 @@ def test_reset_drops_the_runner(client: TestClient):
     assert res.status_code == 409 and res.json()["error"]["code"] == "not_started"
     # Reset is idempotent with no runner.
     assert client.post("/internal/architect/reset", headers=HEADERS).status_code == 200
+
+
+def test_turn_journal_survives_disconnected_clients(client: TestClient):
+    """R6 resilience core: a turn with NO follower still runs to completion in
+    the journal; a late follow replays everything — drafted plan included."""
+    import time as _time
+
+    assert (
+        client.post(
+            "/internal/architect/start", headers=HEADERS, json={"ticket": "tt_good"}
+        ).status_code
+        == 200
+    )
+    # Start the turn but DO NOT read the response stream body beyond headers —
+    # the TestClient consumes it eagerly, so instead start via a throwaway ask
+    # and then re-follow from zero: the replay must be byte-complete.
+    first = client.post(
+        "/internal/architect/ask", headers=HEADERS, json={"input": "add a review skill"}
+    )
+    items = _lines(first.text)
+    turn_id = next(i["turnId"] for i in items if i["kind"] == "turn")
+    assert items[-1]["status"] == "finished"
+
+    # Late re-attach from seq 0: full replay, identical content, then EOF.
+    replay = client.get(
+        f"/internal/architect/follow?turnId={turn_id}&from_seq=0", headers=HEADERS
+    )
+    replay_items = _lines(replay.text)
+    assert replay_items == items
+    assert any(
+        i["kind"] == "event" and i["event"].get("type") == "ToolResult"
+        for i in replay_items
+    )
+
+    # Partial re-attach: only the gap comes back.
+    tail = _lines(
+        client.get(
+            f"/internal/architect/follow?turnId={turn_id}&from_seq={items[-2]['seq'] + 1}",
+            headers=HEADERS,
+        ).text
+    )
+    assert tail == items[-1:]
+
+    # /turn answers "is my previous job still working?"
+    state = client.get("/internal/architect/turn", headers=HEADERS).json()
+    assert state["turn"]["turnId"] == turn_id
+    assert state["turn"]["status"] == "finished"
+    assert state["alive"] is True
+    _ = _time  # imported for parity with other tests; journal is in-memory
+
+    # Unknown turn → 404.
+    assert (
+        client.get(
+            "/internal/architect/follow?turnId=t_nope&from_seq=0", headers=HEADERS
+        ).status_code
+        == 404
+    )
+
+
+def test_send_id_makes_asks_idempotent(client: TestClient):
+    """A retried POST with the same sendId re-attaches to the SAME turn —
+    ambiguous network failures can never double-prompt."""
+    assert (
+        client.post(
+            "/internal/architect/start", headers=HEADERS, json={"ticket": "tt_good"}
+        ).status_code
+        == 200
+    )
+    a = _lines(
+        client.post(
+            "/internal/architect/ask",
+            headers=HEADERS,
+            json={"input": "hello", "sendId": "send-1"},
+        ).text
+    )
+    b = _lines(
+        client.post(
+            "/internal/architect/ask",
+            headers=HEADERS,
+            json={"input": "hello", "sendId": "send-1"},
+        ).text
+    )
+    ta = next(i["turnId"] for i in a if i["kind"] == "turn")
+    tb = next(i["turnId"] for i in b if i["kind"] == "turn")
+    assert ta == tb  # same turn, replayed — not a second prompt
+    # A DIFFERENT sendId starts a fresh turn.
+    c = _lines(
+        client.post(
+            "/internal/architect/ask",
+            headers=HEADERS,
+            json={"input": "hello again", "sendId": "send-2"},
+        ).text
+    )
+    assert next(i["turnId"] for i in c if i["kind"] == "turn") != ta

@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import {
   askArchitect,
   cancelArchitect,
+  fetchTurnState,
+  followArchitect,
   planFromEvent,
   startArchitect,
   textFromEvent,
@@ -124,7 +126,13 @@ export default function ArchitectPanel({
     () => initial?.length ?? 0,
   );
   const [input, setInput] = useState("");
-  const [outbox, setOutbox] = useState<{ text: string; retry?: boolean }[]>([]);
+  const [outbox, setOutbox] = useState<
+    { text: string; retry?: boolean; sendId?: string }[]
+  >([]);
+  /* R6 resilience: reconnecting = the turn lives server-side, our pipe
+     doesn't; activity = the always-on "what is it doing" line. */
+  const [reconnecting, setReconnecting] = useState(false);
+  const [activity, setActivity] = useState<string | null>(null);
   /* Editing a queued message pauses the drain so a finishing turn can't
      send the old text out from under the edit. */
   const [editingQueued, setEditingQueued] = useState<{
@@ -142,7 +150,9 @@ export default function ArchitectPanel({
   const [applyBusy, setApplyBusy] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
 
+  const anchorKey = `sanad-architect-turn:${sessionId ?? "default"}`;
   const startedRef = useRef(false);
+  const resumedRef = useRef(false);
   const drainingRef = useRef(false);
   const lastItemAtRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -226,61 +236,152 @@ export default function ArchitectPanel({
     onPendingReviews(pending);
   }, [messages, onPendingReviews]);
 
-  /* One turn. Two self-healing paths keep the queue moving:
-     - "busy": the runner is still on a turn (e.g. from a previous page load)
-       — requeue at the front and retry shortly.
-     - "turn_failed"/"not_started": the runner's auth died (agentd already
-       dropped it, or the process exited) — restart the architect and resend
-       the message ONCE; a second failure surfaces as a visible error. */
+  /* One turn — SERVER-AUTHORITATIVE (the model ChatGPT/Claude use): the
+     machine journals every item, so this function is only a follower.
+     Self-healing paths:
+     - "busy": requeue at the front and retry shortly.
+     - "turn_failed"/"not_started": restart the architect, resend ONCE.
+     - CONNECTION DROP mid-turn: the turn keeps running server-side; we
+       re-attach from the last seen seq (drafted plans replay too) and keep
+       trying for ~6 minutes. A sessionStorage anchor lets a full page reload
+       resume the same turn. */
   const runTurn = useCallback(
-    async (text: string, isRetry: boolean) => {
+    async (
+      text: string,
+      isRetry: boolean,
+      sendId?: string,
+      resume?: { turnId: string; at?: number },
+    ) => {
       setPhase("streaming");
       setStalled(false);
+      setActivity(null);
       lastItemAtRef.current = Date.now();
+      const at = resume?.at ?? Date.now();
       setMessages((m) => [
         ...m,
-        { role: "user", text },
-        { role: "assistant", blocks: [] },
+        { role: "user", text, at },
+        { role: "assistant", blocks: [], at },
       ]);
-      let busy = false;
-      let failed = false;
-      await askArchitect(text, sessionId, (item) => {
+      const flags = { busy: false, failed: false, ended: false };
+      let turnId: string | null = resume?.turnId ?? null;
+      let lastSeq = -1;
+      const saveAnchor = () => {
+        try {
+          window.sessionStorage.setItem(
+            anchorKey,
+            JSON.stringify({ turnId, lastSeq, userText: text, at }),
+          );
+        } catch {
+          /* storage blocked */
+        }
+      };
+      const consume = (item: ArchitectItem) => {
         lastItemAtRef.current = Date.now();
         setStalled(false);
-        if (item.kind === "end") return;
+        if (typeof item.seq === "number") {
+          if (item.seq <= lastSeq) return; // duplicate from a re-follow
+          lastSeq = item.seq;
+          saveAnchor();
+        }
+        if (item.kind === "turn") {
+          turnId = item.turnId;
+          saveAnchor();
+          return;
+        }
+        if (item.kind === "end") {
+          flags.ended = true;
+          return;
+        }
+        if (item.kind === "error" && item.code === "network") {
+          return; // this leg dropped — the outer loop re-attaches
+        }
         if (item.kind === "error" && item.code === "busy") {
-          busy = true;
+          flags.busy = true;
+          flags.ended = true;
           return;
         }
         if (
           item.kind === "error" &&
           (item.code === "turn_failed" || item.code === "not_started")
         ) {
-          failed = true;
+          flags.failed = true;
+          flags.ended = true;
           // First attempt heals silently (restart + resend); on the retry the
           // error falls through to render, so a real outage stays visible.
           if (!isRetry) return;
         }
+        // The always-on activity line — the user must SEE work happening.
+        const think = thinkFromEvent(item);
+        const label = toolLabel(item);
+        if (think) setActivity("Thinking");
+        else if (label) setActivity(label);
+        else if (textFromEvent(item)) setActivity("Writing");
         setMessages((prev) => {
           const next = [...prev];
           const last = next[next.length - 1];
           if (last && last.role === "assistant") {
             next[next.length - 1] = {
               role: "assistant",
+              at: last.at,
               blocks: reduce(last.blocks, item),
             };
           }
           return next;
         });
-      });
-      if (busy) {
+      };
+
+      if (resume) {
+        await followArchitect(resume.turnId, 0, sessionId, consume);
+      } else {
+        await askArchitect(text, sendId, sessionId, consume);
+      }
+      // Re-attach while the turn lives but our connection didn't.
+      let attempts = 0;
+      while (!flags.ended && turnId && attempts < 90) {
+        setReconnecting(true);
+        attempts += 1;
+        await new Promise((r) => window.setTimeout(r, 4000));
+        await followArchitect(turnId, lastSeq + 1, sessionId, consume);
+      }
+      setReconnecting(false);
+      setActivity(null);
+      try {
+        window.sessionStorage.removeItem(anchorKey);
+      } catch {
+        /* storage blocked */
+      }
+      if (!flags.ended && turnId) {
+        // Gave up re-attaching. The turn may still finish server-side — say
+        // so honestly instead of pretending it failed.
+        setMessages((prev) => {
+          const next = [...prev];
+          const last = next[next.length - 1];
+          if (last && last.role === "assistant") {
+            next[next.length - 1] = {
+              role: "assistant",
+              at: last.at,
+              blocks: [
+                ...last.blocks,
+                {
+                  kind: "text",
+                  text: "⚠ Lost contact with the workspace. The architect may still finish this turn — any applied result will show in the blueprint History.",
+                },
+              ],
+            };
+          }
+          return next;
+        });
+        setPhase("ready");
+        return;
+      }
+      if (flags.busy) {
         // Roll back the optimistic bubbles; the text waits in the queue.
         setMessages((prev) => prev.slice(0, -2));
-        setOutbox((prev) => [{ text, retry: isRetry }, ...prev]);
+        setOutbox((prev) => [{ text, retry: isRetry, sendId }, ...prev]);
         setPhase("busy");
-      } else if (failed && !isRetry) {
+      } else if (flags.failed && !isRetry) {
         setMessages((prev) => prev.slice(0, -2));
-        setOutbox((prev) => [{ text, retry: true }, ...prev]);
+        setOutbox((prev) => [{ text, retry: true, sendId }, ...prev]);
         await begin(); // fresh subprocess, freshly redeemed auth
       } else {
         // A turn that ended with NOTHING (no content, no error item — e.g. a
@@ -311,8 +412,40 @@ export default function ArchitectPanel({
         setPhase("ready");
       }
     },
-    [sessionId, begin],
+    [sessionId, begin, anchorKey],
   );
+
+  /* Resume a turn that outlived a page reload (sessionStorage anchor). */
+  useEffect(() => {
+    if (phase !== "ready" || resumedRef.current) return;
+    resumedRef.current = true;
+    let anchor: {
+      turnId?: string;
+      userText?: string;
+      at?: number;
+    } | null = null;
+    try {
+      anchor = JSON.parse(window.sessionStorage.getItem(anchorKey) ?? "null");
+    } catch {
+      /* storage blocked */
+    }
+    if (!anchor?.turnId || !anchor.userText) return;
+    const { turnId, userText, at } = anchor;
+    void (async () => {
+      const state = await fetchTurnState(sessionId);
+      if (!state?.turn || state.turn.turnId !== turnId) {
+        try {
+          window.sessionStorage.removeItem(anchorKey);
+        } catch {
+          /* storage blocked */
+        }
+        return;
+      }
+      // Full replay from seq 0 into a fresh message pair — the journal
+      // re-delivers everything, drafted plans included.
+      await runTurn(userText, true, undefined, { turnId, at });
+    })();
+  }, [phase, sessionId, runTurn, anchorKey]);
 
   /* Drain the queue whenever the architect is free (paused mid-edit). */
   useEffect(() => {
@@ -327,7 +460,7 @@ export default function ArchitectPanel({
     drainingRef.current = true;
     const [next, ...rest] = outbox;
     setOutbox(rest);
-    void runTurn(next.text, next.retry ?? false).finally(() => {
+    void runTurn(next.text, next.retry ?? false, next.sendId).finally(() => {
       drainingRef.current = false;
     });
   }, [phase, outbox, runTurn, editingQueued]);
@@ -339,7 +472,11 @@ export default function ArchitectPanel({
     const text = editingQueued.draft.trim();
     setOutbox((prev) =>
       text
-        ? prev.map((e, i) => (i === editingQueued.index ? { text } : e))
+        ? prev.map((e, i) =>
+            i === editingQueued.index
+              ? { text, sendId: crypto.randomUUID() }
+              : e,
+          )
         : prev.filter((_, i) => i !== editingQueued.index),
     );
     setEditingQueued(null);
@@ -376,7 +513,7 @@ export default function ArchitectPanel({
     const text = input.trim();
     if (!text || phase === "error") return;
     setInput("");
-    setOutbox((prev) => [...prev, { text }]);
+    setOutbox((prev) => [...prev, { text, sendId: crypto.randomUUID() }]);
   }, [input, phase]);
 
   const stopTurn = useCallback(() => {
@@ -504,101 +641,136 @@ export default function ArchitectPanel({
           </div>
         )}
 
-        {messages.map((m, mi) =>
-          m.role === "user" ? (
-            <div key={mi} style={s.userRow}>
-              <div style={s.userBubble}>{m.text}</div>
-            </div>
-          ) : (
-            <div key={mi} style={s.assistantRow}>
-              {m.blocks.map((b, bi) => {
-                if (b.kind === "think")
-                  return showSteps ? (
-                    <div key={bi} style={s.thinkText}>
-                      {b.text}
-                    </div>
-                  ) : null;
-                if (b.kind === "text")
-                  return (
-                    <div key={bi} style={s.text}>
-                      {b.text}
-                    </div>
-                  );
-                if (b.kind === "tool")
-                  return (
-                    <div key={bi} style={s.tool}>
-                      <span style={s.toolDot} /> {b.label}
-                    </div>
-                  );
-                return (
-                  <div key={bi} style={s.planCard}>
-                    <div style={s.planHead}>
-                      <span style={s.planEyebrow}>Proposed change</span>
-                      <span style={s.planSummary}>{b.summary}</span>
-                    </div>
-                    <div style={s.planMeta}>
-                      {b.files} file{b.files === 1 ? "" : "s"}
-                      {(b.updated ?? 0) > 0 && ` · ${b.updated} updated`}
-                      {(b.removed ?? 0) > 0 && ` · ${b.removed} removed`}
-                      {(b.edges ?? 0) > 0 && ` · ${b.edges} edge`}
-                    </div>
-                    {b.state === "applied" ? (
-                      <span style={s.applied}>
-                        ✓ Applied
-                        {/* S9 activation is next-session: say so here, so
+        {messages.map((m, mi) => {
+          const day = m.at ? new Date(m.at).toDateString() : null;
+          const prevAt = mi > 0 ? messages[mi - 1].at : undefined;
+          const prevDay = prevAt ? new Date(prevAt).toDateString() : null;
+          const sep =
+            day && day !== prevDay ? (
+              <div style={s.dateSep}>
+                {new Date(m.at!).toLocaleDateString([], {
+                  weekday: "short",
+                  month: "short",
+                  day: "numeric",
+                })}
+              </div>
+            ) : null;
+          return (
+            <Fragment key={mi}>
+              {sep}
+              {m.role === "user" ? (
+                <div style={s.userRow}>
+                  {m.at && (
+                    <span style={s.msgTime}>
+                      {new Date(m.at).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                  )}
+                  <div style={s.userBubble}>{m.text}</div>
+                </div>
+              ) : (
+                <div key={mi} style={s.assistantRow}>
+                  {m.at && (
+                    <span style={s.msgTimeLeft}>
+                      {new Date(m.at).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                  )}
+                  {m.blocks.map((b, bi) => {
+                    if (b.kind === "think")
+                      return showSteps ? (
+                        <div key={bi} style={s.thinkText}>
+                          {b.text}
+                        </div>
+                      ) : null;
+                    if (b.kind === "text")
+                      return (
+                        <div key={bi} style={s.text}>
+                          {b.text}
+                        </div>
+                      );
+                    if (b.kind === "tool")
+                      return (
+                        <div key={bi} style={s.tool}>
+                          <span style={s.toolDot} /> {b.label}
+                        </div>
+                      );
+                    return (
+                      <div key={bi} style={s.planCard}>
+                        <div style={s.planHead}>
+                          <span style={s.planEyebrow}>Proposed change</span>
+                          <span style={s.planSummary}>{b.summary}</span>
+                        </div>
+                        <div style={s.planMeta}>
+                          {b.files} file{b.files === 1 ? "" : "s"}
+                          {(b.updated ?? 0) > 0 && ` · ${b.updated} updated`}
+                          {(b.removed ?? 0) > 0 && ` · ${b.removed} removed`}
+                          {(b.edges ?? 0) > 0 && ` · ${b.edges} edge`}
+                        </div>
+                        {b.state === "applied" ? (
+                          <span style={s.applied}>
+                            ✓ Applied
+                            {/* S9 activation is next-session: say so here, so
                             "is the workspace ingesting it?" never recurs. */}
-                        {" · active in new terminals"}
-                        {onRestartAgents && (
+                            {" · active in new terminals"}
+                            {onRestartAgents && (
+                              <button
+                                style={s.restartBtn}
+                                onClick={onRestartAgents}
+                              >
+                                Restart agent now
+                              </button>
+                            )}
+                            {b.txId && (
+                              <button
+                                style={s.revertBtn}
+                                title="Undo this change (refused if the files moved on since)"
+                                onClick={() => void doRevert(mi, bi)}
+                              >
+                                Revert
+                              </button>
+                            )}
+                          </span>
+                        ) : b.state === "reverted" ? (
+                          <span style={s.expired}>↺ Reverted.</span>
+                        ) : b.state === "expired" ? (
+                          <span style={s.expired}>
+                            Drafted in an earlier session — ask again to
+                            redraft.
+                          </span>
+                        ) : (
                           <button
-                            style={s.restartBtn}
-                            onClick={onRestartAgents}
+                            style={s.reviewBtn}
+                            onClick={() => setReview({ mi, bi })}
                           >
-                            Restart agent now
+                            Review &amp; apply
                           </button>
                         )}
-                        {b.txId && (
-                          <button
-                            style={s.revertBtn}
-                            title="Undo this change (refused if the files moved on since)"
-                            onClick={() => void doRevert(mi, bi)}
-                          >
-                            Revert
-                          </button>
-                        )}
+                      </div>
+                    );
+                  })}
+                  {phase === "streaming" && mi === messages.length - 1 && (
+                    <button
+                      style={s.architecting}
+                      onClick={() => setShowSteps((v) => !v)}
+                      title="Show the architect's live steps — reasoning and tool activity"
+                    >
+                      <span style={s.pulse} />
+                      Architecting…
+                      <span style={s.stepsHint}>
+                        {showSteps ? "hide steps" : "show steps"}
                       </span>
-                    ) : b.state === "reverted" ? (
-                      <span style={s.expired}>↺ Reverted.</span>
-                    ) : b.state === "expired" ? (
-                      <span style={s.expired}>
-                        Drafted in an earlier session — ask again to redraft.
-                      </span>
-                    ) : (
-                      <button
-                        style={s.reviewBtn}
-                        onClick={() => setReview({ mi, bi })}
-                      >
-                        Review &amp; apply
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
-              {phase === "streaming" && mi === messages.length - 1 && (
-                <button
-                  style={s.architecting}
-                  onClick={() => setShowSteps((v) => !v)}
-                  title="Show the architect's live steps — reasoning and tool activity"
-                >
-                  <span style={s.pulse} />
-                  Architecting…
-                  <span style={s.stepsHint}>
-                    {showSteps ? "hide steps" : "show steps"}
-                  </span>
-                </button>
+                    </button>
+                  )}
+                </div>
               )}
-            </div>
-          ),
-        )}
+            </Fragment>
+          );
+        })}
 
         {outbox.map((entry, i) => (
           <div key={`q-${i}`} style={s.userRow}>
@@ -653,16 +825,28 @@ export default function ArchitectPanel({
         ))}
       </div>
 
-      {(phase === "busy" || stalled) && (
+      {(phase === "starting" ||
+        phase === "streaming" ||
+        phase === "busy" ||
+        reconnecting) && (
         <div style={s.statusStrip}>
-          <span>
-            {phase === "busy"
-              ? "The architect is finishing an earlier turn — your message is queued."
-              : "Still working — nothing received for a while."}
+          <span style={s.statusText}>
+            <span style={s.statusPulse} />
+            {reconnecting
+              ? "Connection lost — the architect keeps working; reconnecting…"
+              : phase === "busy"
+                ? "The architect is finishing an earlier turn — your message is queued."
+                : phase === "starting"
+                  ? "Starting the architect…"
+                  : stalled
+                    ? "Still working — nothing received for a while."
+                    : `${activity ?? "Working"}…`}
           </span>
-          <button style={s.stopBtn} onClick={stopTurn}>
-            Stop that turn
-          </button>
+          {(phase === "streaming" || phase === "busy") && (
+            <button style={s.stopBtn} onClick={stopTurn}>
+              Stop that turn
+            </button>
+          )}
         </div>
       )}
 
@@ -781,7 +965,32 @@ const s: Record<string, CSSProperties> = {
     borderBottom: "1px dashed var(--rule-strong)",
     paddingBottom: "0.6rem",
   },
-  userRow: { display: "flex", justifyContent: "flex-end" },
+  userRow: {
+    display: "flex",
+    justifyContent: "flex-end",
+    alignItems: "flex-end",
+    gap: "0.4rem",
+  },
+  dateSep: {
+    textAlign: "center",
+    fontFamily: "var(--font-mono)",
+    fontSize: "0.62rem",
+    letterSpacing: "0.1em",
+    textTransform: "uppercase",
+    color: "var(--ink-muted)",
+    margin: "0.4rem 0 0.1rem",
+  },
+  msgTime: {
+    fontFamily: "var(--font-mono)",
+    fontSize: "0.6rem",
+    color: "var(--ink-muted)",
+    whiteSpace: "nowrap",
+  },
+  msgTimeLeft: {
+    fontFamily: "var(--font-mono)",
+    fontSize: "0.6rem",
+    color: "var(--ink-muted)",
+  },
   userBubble: {
     maxWidth: "80%",
     background: "var(--ink)",
@@ -981,6 +1190,21 @@ const s: Record<string, CSSProperties> = {
     borderRadius: "var(--radius-pill)",
     padding: "0.15rem 0.7rem",
     cursor: "pointer",
+  },
+  statusText: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "0.45rem",
+    minWidth: 0,
+  },
+  statusPulse: {
+    width: "7px",
+    height: "7px",
+    borderRadius: "50%",
+    background: "var(--ink)",
+    display: "inline-block",
+    flexShrink: 0,
+    animation: "spin 1.2s linear infinite",
   },
   statusStrip: {
     display: "flex",

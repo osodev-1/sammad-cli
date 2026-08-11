@@ -44,10 +44,15 @@ export const architectBlockState = z.discriminatedUnion("kind", [
 ]);
 
 export const architectMessageState = z.union([
-  z.object({ role: z.literal("user"), text: z.string().max(8000) }),
+  z.object({
+    role: z.literal("user"),
+    text: z.string().max(8000),
+    at: z.number().optional(),
+  }),
   z.object({
     role: z.literal("assistant"),
     blocks: z.array(architectBlockState).max(80),
+    at: z.number().optional(),
   }),
 ]);
 

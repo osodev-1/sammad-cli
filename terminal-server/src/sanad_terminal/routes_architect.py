@@ -41,6 +41,9 @@ class StartBody(BaseModel):
 
 class AskBody(BaseModel):
     input: str = Field(min_length=1, max_length=32_000)
+    # Client message id — makes sends idempotent across ambiguous network
+    # failures (a retried POST re-attaches to the same turn, never re-prompts).
+    sendId: str | None = Field(default=None, max_length=64)
 
 
 def _spawn_params(settings: Any, root, session_token: str):  # noqa: ANN001, ANN202
@@ -101,30 +104,22 @@ async def start(root: Root, request: Request, body: StartBody) -> JSONResponse:
     return JSONResponse({"ok": True, "started": True})
 
 
-@router.post("/ask", response_model=None)
-async def ask(root: Root, body: AskBody) -> StreamingResponse | JSONResponse:
-    """Run one turn, streaming its wire events as newline-delimited JSON."""
-    runner = get_runner(root)
-    if runner is None or not runner.alive:
-        return JSONResponse(
-            status_code=409,
-            content={"error": {"code": "not_started", "message": "architect is not running"}},
-        )
-    if runner.busy:
-        return JSONResponse(
-            status_code=409,
-            content={"error": {"code": "busy", "message": "a turn is already in progress"}},
-        )
+def _recycling_stream(
+    root: Path, runner: ArchitectRunner, items: AsyncIterator[dict[str, Any]]
+) -> AsyncIterator[bytes]:
+    """Serialize a turn stream, recycling the runner on a failed turn.
+
+    A turn that ends any way other than "finished"/"cancelled" (provider auth
+    died, subprocess crashed) marks the runner UNHEALTHY: drop it so the next
+    start spawns fresh with freshly redeemed auth. Without this, the
+    idempotent start keeps handing back a zombie whose every LLM call 401s —
+    the "architect stopped responding" trap.
+    """
 
     async def stream() -> AsyncIterator[bytes]:
-        # A turn that ends any way other than "finished"/"cancelled" (provider
-        # auth died, subprocess crashed) marks the runner UNHEALTHY: drop it so
-        # the next start spawns fresh with freshly redeemed auth. Without this,
-        # the idempotent start keeps handing back a zombie whose every LLM call
-        # 401s — the "architect stopped responding" trap.
         failed = False
         try:
-            async for item in runner.ask(body.input):
+            async for item in items:
                 if item.get("kind") == "end" and item.get("status") not in (
                     "finished",
                     "cancelled",
@@ -155,7 +150,72 @@ async def ask(root: Root, body: AskBody) -> StreamingResponse | JSONResponse:
         if failed or not runner.alive:
             await drop_runner(root)
 
-    return StreamingResponse(stream(), media_type="application/x-ndjson")
+    return stream()
+
+
+@router.post("/ask", response_model=None)
+async def ask(root: Root, body: AskBody) -> StreamingResponse | JSONResponse:
+    """Start one turn and stream it as newline-delimited JSON.
+
+    The turn is journaled server-side: a dropped connection loses nothing —
+    the client re-attaches via GET /follow with the last seq it saw.
+    """
+    runner = get_runner(root)
+    if runner is None or not runner.alive:
+        return JSONResponse(
+            status_code=409,
+            content={"error": {"code": "not_started", "message": "architect is not running"}},
+        )
+    try:
+        state = await runner.start_turn(body.input, body.sendId)
+    except ArchitectError as exc:
+        if exc.code == "busy":
+            summary = runner.turn_summary() or {}
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": {
+                        "code": "busy",
+                        "message": "a turn is already in progress",
+                        "turnId": summary.get("turnId"),
+                    }
+                },
+            )
+        return JSONResponse(
+            status_code=409, content={"error": {"code": exc.code, "message": exc.message}}
+        )
+    return StreamingResponse(
+        _recycling_stream(root, runner, runner.follow(state.turn_id, 0)),
+        media_type="application/x-ndjson",
+    )
+
+
+@router.get("/turn")
+async def turn(root: Root) -> JSONResponse:
+    """The most recent turn's state — the reconnect answer to 'is my previous
+    job still working?'. Null when nothing has run (or the runner is gone)."""
+    runner = get_runner(root)
+    if runner is None:
+        return JSONResponse({"turn": None, "alive": False})
+    return JSONResponse({"turn": runner.turn_summary(), "alive": runner.alive})
+
+
+@router.get("/follow", response_model=None)
+async def follow(
+    root: Root, turnId: str, from_seq: int = 0
+) -> StreamingResponse | JSONResponse:
+    """Re-attach to a turn's journal from a seq — replay the missed window,
+    then continue live until the turn ends."""
+    runner = get_runner(root)
+    if runner is None or runner.get_turn(turnId) is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "unknown_turn", "message": "no such turn"}},
+        )
+    return StreamingResponse(
+        _recycling_stream(root, runner, runner.follow(turnId, from_seq)),
+        media_type="application/x-ndjson",
+    )
 
 
 @router.post("/cancel")

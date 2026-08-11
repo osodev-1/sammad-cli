@@ -32,7 +32,8 @@ export type Block =
     };
 
 export type Message =
-  { role: "user"; text: string } | { role: "assistant"; blocks: Block[] };
+  | { role: "user"; text: string; at?: number }
+  | { role: "assistant"; blocks: Block[]; at?: number };
 
 const MAX_MESSAGES = 60;
 const MAX_TEXT = 6000;
@@ -46,10 +47,15 @@ const clip = (s: string, n: number) =>
 export function toStored(messages: Message[]): StoredArchitectMessage[] {
   return messages.slice(-MAX_MESSAGES).map((m): StoredArchitectMessage => {
     if (m.role === "user") {
-      return { role: "user", text: clip(m.text, MAX_USER_TEXT) };
+      return {
+        role: "user",
+        text: clip(m.text, MAX_USER_TEXT),
+        ...(m.at ? { at: m.at } : {}),
+      };
     }
     return {
       role: "assistant",
+      ...(m.at ? { at: m.at } : {}),
       // Reasoning steps are ephemeral: a restored chat keeps the answers and
       // actions, not the deliberation.
       blocks: m.blocks
@@ -82,9 +88,10 @@ export function toStored(messages: Message[]): StoredArchitectMessage[] {
 /** Rehydrate a stored transcript into the live model (plans stay inert). */
 export function fromStored(stored: StoredArchitectMessage[]): Message[] {
   return stored.map((m): Message => {
-    if (m.role === "user") return { role: "user", text: m.text };
+    if (m.role === "user") return { role: "user", text: m.text, at: m.at };
     return {
       role: "assistant",
+      at: m.at,
       blocks: m.blocks.map((b): Block => {
         if (b.kind === "plan") {
           return {

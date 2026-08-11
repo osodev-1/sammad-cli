@@ -9,6 +9,13 @@ architect agent (M3a) has no write tools and we initialize with
 expects a response — the turn is a pure one-way event stream, which is exactly
 what a chunked HTTP response needs.
 
+Turns are SERVER-AUTHORITATIVE (the ChatGPT model): every wire item lands in
+an in-memory per-turn JOURNAL whether or not any browser is streaming it, so a
+dropped connection never orphans a turn — the client re-attaches with
+``follow(turn_id, from_seq)`` and replays exactly what it missed (drafted
+plans included). The journal keeps the last few turns; it is a delivery
+buffer, not history (the web transcript is the record).
+
 Governance holds by construction: this bridge can start turns and cancel them,
 but the agent it runs cannot mutate the blueprint. Applying a drafted change is
 a separate, user-driven POST to the transaction endpoint (M2).
@@ -21,6 +28,8 @@ import contextlib
 import json
 import os
 import time
+import uuid
+from dataclasses import dataclass, field
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -44,6 +53,34 @@ def _preexec(uid: int | None, gid: int | None):  # noqa: ANN202
             os.setuid(uid)
 
     return _run
+
+
+_TURN_KEEP = 5
+
+
+@dataclass
+class TurnState:
+    """One turn's journal + lifecycle — the server-side source of truth."""
+
+    turn_id: str
+    user_input: str
+    status: str = "running"  # running | finished | cancelled | failed
+    started_at: float = field(default_factory=time.time)
+    send_id: str | None = None
+    items: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def last_seq(self) -> int:
+        return len(self.items) - 1
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "turnId": self.turn_id,
+            "status": self.status,
+            "userInput": self.user_input[:200],
+            "lastSeq": self.last_seq,
+            "startedAt": self.started_at,
+        }
 
 
 class ArchitectError(Exception):
@@ -73,7 +110,6 @@ class ArchitectRunner:
 
         self._proc: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task[None] | None = None
-        self._turn_lock = asyncio.Lock()  # one prompt at a time
         self._start_lock = asyncio.Lock()  # idempotent start
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._turn_queue: asyncio.Queue[dict[str, Any]] | None = None
@@ -81,6 +117,12 @@ class ArchitectRunner:
         self._msg_id = 0
         self._alive = False
         self._last_activity = time.monotonic()
+        # Turn journal (server-authoritative; survives client disconnects).
+        self._turns: dict[str, TurnState] = {}
+        self._turn_order: list[str] = []
+        self._current: TurnState | None = None
+        self._consumer: asyncio.Task[None] | None = None
+        self._journal_cond = asyncio.Condition()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -91,7 +133,7 @@ class ArchitectRunner:
     @property
     def busy(self) -> bool:
         """A turn is in progress — a second ask should be refused, not queued."""
-        return self._turn_lock.locked()
+        return self._current is not None and self._current.status == "running"
 
     @property
     def idle_seconds(self) -> float:
@@ -144,6 +186,16 @@ class ArchitectRunner:
 
     async def stop(self) -> None:
         self._alive = False
+        cur = self._current
+        if cur is not None and cur.status == "running":
+            cur.status = "failed"
+            async with self._journal_cond:
+                self._journal_cond.notify_all()
+        if self._consumer is not None and not self._consumer.done():
+            self._consumer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._consumer
+            self._consumer = None
         proc = self._proc
         self._proc = None
         if self._reader is not None:
@@ -166,41 +218,138 @@ class ArchitectRunner:
 
     # -- turns ---------------------------------------------------------------
 
-    async def ask(self, user_input: str) -> AsyncIterator[dict[str, Any]]:
-        """Run one turn, yielding stream items until (and including) turn end.
+    async def start_turn(self, user_input: str, send_id: str | None = None) -> TurnState:
+        """Begin a turn and return its journal handle. The turn runs to
+        completion server-side whether or not anyone follows it.
 
-        Items are ``{"kind": "event", "event": {type, payload}}`` for each wire
-        event, terminated by ``{"kind": "end", "status": ...}`` (or
-        ``{"kind": "error", ...}`` if the subprocess dies mid-turn).
+        Idempotent on ``send_id``: resending the same client message id while
+        its turn runs (or after it finished) returns THAT turn instead of
+        double-prompting — ambiguous network failures can't duplicate work.
         """
         if not self.alive:
             raise ArchitectError("not_started", "architect is not running")
-        async with self._turn_lock:
-            if not self.alive:
-                raise ArchitectError("not_started", "architect is not running")
+        cur = self._current
+        if cur is not None and cur.status == "running":
+            if send_id and cur.send_id == send_id:
+                return cur
+            raise ArchitectError("busy", "a turn is already in progress")
+        if send_id and self._turn_order:
+            last = self._turns[self._turn_order[-1]]
+            if last.send_id == send_id:
+                return last
+
+        state = TurnState(
+            turn_id=f"t_{uuid.uuid4().hex[:12]}",
+            user_input=user_input,
+            send_id=send_id,
+        )
+        self._turns[state.turn_id] = state
+        self._turn_order.append(state.turn_id)
+        while len(self._turn_order) > _TURN_KEEP:
+            oldest = self._turn_order[0]
+            if self._turns[oldest].status == "running":
+                break
+            self._turn_order.pop(0)
+            self._turns.pop(oldest, None)
+        self._current = state
+
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._turn_queue = queue
+        pid = self._next_id()
+        self._prompt_id = pid
+        self._touch()
+        await self._append(state, {"kind": "turn", "turnId": state.turn_id})
+        try:
+            await self._send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "prompt",
+                    "id": str(pid),
+                    "params": {"user_input": user_input},
+                }
+            )
+        except Exception:
+            state.status = "failed"
+            self._turn_queue = None
+            self._prompt_id = None
+            async with self._journal_cond:
+                self._journal_cond.notify_all()
+            raise
+        self._consumer = asyncio.create_task(self._consume(state, queue))
+        return state
+
+    async def _consume(self, state: TurnState, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        """Drain the wire into the journal until turn end — the piece that
+        keeps a turn alive with zero browsers attached."""
+        try:
+            while True:
+                item = await queue.get()
+                await self._append(state, item)
+                kind = item.get("kind")
+                if kind == "end":
+                    status = item.get("status")
+                    state.status = (
+                        "finished"
+                        if status == "finished"
+                        else "cancelled"
+                        if status == "cancelled"
+                        else "failed"
+                    )
+                    break
+                if kind == "error":
+                    state.status = "failed"
+                    break
+        finally:
+            if state.status == "running":
+                state.status = "failed"
+            self._turn_queue = None
+            self._prompt_id = None
             self._touch()
-            queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-            self._turn_queue = queue
-            pid = self._next_id()
-            self._prompt_id = pid
-            try:
-                await self._send(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "prompt",
-                        "id": str(pid),
-                        "params": {"user_input": user_input},
-                    }
-                )
-                while True:
-                    item = await queue.get()
-                    yield item
-                    if item["kind"] in ("end", "error"):
-                        break
-            finally:
-                self._turn_queue = None
-                self._prompt_id = None
-                self._touch()
+            async with self._journal_cond:
+                self._journal_cond.notify_all()
+
+    async def _append(self, state: TurnState, item: dict[str, Any]) -> None:
+        state.items.append({"seq": len(state.items), **item})
+        async with self._journal_cond:
+            self._journal_cond.notify_all()
+
+    def turn_summary(self) -> dict[str, Any] | None:
+        """The most recent turn's state — how a reconnecting client learns
+        whether its previous job is still working."""
+        if not self._turn_order:
+            return None
+        return self._turns[self._turn_order[-1]].summary()
+
+    def get_turn(self, turn_id: str) -> TurnState | None:
+        return self._turns.get(turn_id)
+
+    async def follow(self, turn_id: str, from_seq: int = 0) -> AsyncIterator[dict[str, Any]]:
+        """Yield a turn's journal from ``from_seq``, then live until it ends.
+
+        Any number of followers, attaching at any time — a reconnect replays
+        the missed window and continues; a finished turn replays and returns.
+        """
+        state = self._turns.get(turn_id)
+        if state is None:
+            raise ArchitectError("unknown_turn", "no such turn")
+        i = max(0, from_seq)
+        while True:
+            while i < len(state.items):
+                yield state.items[i]
+                i += 1
+            if state.status != "running":
+                return
+            async with self._journal_cond:
+                if i >= len(state.items) and state.status == "running":
+                    await self._journal_cond.wait()
+
+    async def ask(
+        self, user_input: str, send_id: str | None = None
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Start a turn and follow it from the beginning (the POST /ask path)."""
+        state = await self.start_turn(user_input, send_id)
+        async for item in self.follow(state.turn_id, 0):
+            yield item
 
     async def cancel(self) -> None:
         """Interrupt the active turn. The turn's ``end`` (status cancelled)
