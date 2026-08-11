@@ -11,6 +11,16 @@ from sanad_terminal.wire_runner import (
     register_registry,
     runners_hold_machine,
 )
+from sanad_terminal.coder_runner import (
+    CONVERSATION_ID_RE,
+    CoderRunner,
+    get_conversation,
+    list_conversations,
+    new_conversation_id,
+    put_conversation,
+    drop_conversation,
+    shutdown_conversations,
+)
 
 FAKE_WIRE = Path(__file__).parent / "_fake_coder_wire.py"
 
@@ -94,6 +104,60 @@ async def test_inbound_request_is_rejected_by_default():
         ]
         assert len(outcomes) == 1
         assert outcomes[0]["error"]["code"] == -32601
+        assert state.status == "finished"
+    finally:
+        await runner.stop()
+
+
+def test_conversation_ids_are_minted_and_validated():
+    cid = new_conversation_id()
+    assert CONVERSATION_ID_RE.fullmatch(cid)
+    assert not CONVERSATION_ID_RE.fullmatch("../../etc/passwd")
+    assert not CONVERSATION_ID_RE.fullmatch("c_UPPER_NOPE_00")
+
+
+@pytest.mark.asyncio
+async def test_conversation_registry_roundtrip(tmp_path):
+    cid = new_conversation_id()
+    runner = CoderRunner(
+        conversation_id=cid,
+        argv=(sys.executable, str(FAKE_WIRE)),
+        cwd=tmp_path,
+        env={},
+        max_turn_seconds=3600.0,
+        max_steps_per_turn=200,
+    )
+    assert get_conversation(tmp_path, cid) is None
+    put_conversation(tmp_path, runner)
+    assert get_conversation(tmp_path, cid) is runner
+    assert [r.conversation_id for r in list_conversations(tmp_path)] == [cid]
+    await drop_conversation(tmp_path, cid)
+    assert get_conversation(tmp_path, cid) is None
+    await shutdown_conversations()
+
+
+@pytest.mark.asyncio
+async def test_coder_runner_speaks_wire_and_denies_requests(tmp_path):
+    """The P0 posture end to end on the coder class itself: turn streams,
+    inbound approval request is rejected (-32601), budgets are honored."""
+    runner = CoderRunner(
+        conversation_id=new_conversation_id(),
+        argv=(sys.executable, str(FAKE_WIRE)),
+        cwd=tmp_path,
+        env={},
+        max_turn_seconds=3600.0,
+        max_steps_per_turn=200,
+    )
+    await runner.start()
+    try:
+        state = await runner.start_turn("ASK_APPROVAL")
+        items = await asyncio.wait_for(_drain(runner, state.turn_id), timeout=5.0)
+        outcomes = [
+            i["event"]["payload"]["response"]
+            for i in items
+            if i.get("kind") == "event" and i["event"].get("type") == "RequestOutcome"
+        ]
+        assert outcomes and outcomes[0]["error"]["code"] == -32601
         assert state.status == "finished"
     finally:
         await runner.stop()
