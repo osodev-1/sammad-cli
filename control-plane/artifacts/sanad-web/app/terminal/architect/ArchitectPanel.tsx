@@ -153,6 +153,16 @@ export default function ArchitectPanel({
   const anchorKey = `sanad-architect-turn:${sessionId ?? "default"}`;
   const startedRef = useRef(false);
   const resumedRef = useRef(false);
+  /* Lets the busy branch re-enter runTurn (attach to the running turn). */
+  const runTurnRef = useRef<
+    | ((
+        text: string,
+        isRetry: boolean,
+        sendId?: string,
+        resume?: { turnId: string; at?: number },
+      ) => Promise<void>)
+    | null
+  >(null);
   const drainingRef = useRef(false);
   const lastItemAtRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -378,6 +388,26 @@ export default function ArchitectPanel({
         // Roll back the optimistic bubbles; the text waits in the queue.
         setMessages((prev) => prev.slice(0, -2));
         setOutbox((prev) => [{ text, retry: isRetry, sendId }, ...prev]);
+        if (!resume) {
+          // Attach to the RUNNING turn and render it live — the bottom of the
+          // chat shows the CURRENT state, with Stop on the active message.
+          // When that turn ends (or is stopped), the queue drains naturally.
+          const state = await fetchTurnState(sessionId);
+          if (state?.turn?.status === "running") {
+            await runTurnRef.current?.(
+              state.turn.userInput || "(earlier request)",
+              true,
+              undefined,
+              {
+                turnId: state.turn.turnId,
+                at: state.turn.startedAt
+                  ? state.turn.startedAt * 1000
+                  : Date.now(),
+              },
+            );
+            return;
+          }
+        }
         setPhase("busy");
       } else if (flags.failed && !isRetry) {
         setMessages((prev) => prev.slice(0, -2));
@@ -414,6 +444,7 @@ export default function ArchitectPanel({
     },
     [sessionId, begin, anchorKey],
   );
+  runTurnRef.current = runTurn;
 
   /* Resume a turn that outlived a page reload (sessionStorage anchor). */
   useEffect(() => {
@@ -842,7 +873,7 @@ export default function ArchitectPanel({
                     ? "Still working — nothing received for a while."
                     : `${activity ?? "Working"}…`}
           </span>
-          {(phase === "streaming" || phase === "busy") && (
+          {(phase === "busy" || stalled) && (
             <button style={s.stopBtn} onClick={stopTurn}>
               Stop that turn
             </button>
@@ -1056,6 +1087,22 @@ const s: Record<string, CSSProperties> = {
     whiteSpace: "nowrap",
   },
   assistantRow: { display: "flex", flexDirection: "column", gap: "0.5rem" },
+  activeRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.6rem",
+  },
+  stopInline: {
+    font: "inherit",
+    fontSize: "0.7rem",
+    fontWeight: 600,
+    color: "var(--ink)",
+    background: "none",
+    border: "1px solid var(--rule-strong)",
+    borderRadius: "var(--radius-pill)",
+    padding: "0.1rem 0.6rem",
+    cursor: "pointer",
+  },
   architecting: {
     alignSelf: "flex-start",
     display: "inline-flex",

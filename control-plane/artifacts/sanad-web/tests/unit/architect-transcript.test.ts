@@ -88,4 +88,32 @@ describe("architect transcript persistence", () => {
     const last = stored[stored.length - 1];
     expect(last.role === "user" && last.text.length).toBeLessThanOrEqual(8000);
   });
+
+  it("transient ⚠ status lines never persist nor restore (stale-state cure)", () => {
+    const live: Message[] = [
+      { role: "user", text: "where is the draft" },
+      {
+        role: "assistant",
+        blocks: [
+          { kind: "text", text: "⚠ Network error — check your connection." },
+          { kind: "text", text: "Here's the answer." },
+        ],
+      },
+    ];
+    const stored = toStored(live);
+    const blocks = stored[1].role === "assistant" ? stored[1].blocks : [];
+    expect(blocks).toEqual([{ kind: "text", text: "Here's the answer." }]);
+    // Old blobs that already carry ⚠ lines heal on rehydration too.
+    const healed = fromStored([
+      {
+        role: "assistant",
+        blocks: [
+          { kind: "text", text: "⚠ stale trouble" },
+          { kind: "tool", label: "Reading files" },
+        ],
+      },
+    ]);
+    const healedBlocks = healed[0].role === "assistant" ? healed[0].blocks : [];
+    expect(healedBlocks).toEqual([{ kind: "tool", label: "Reading files" }]);
+  });
 });

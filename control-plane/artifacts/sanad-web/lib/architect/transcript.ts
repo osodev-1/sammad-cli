@@ -56,11 +56,14 @@ export function toStored(messages: Message[]): StoredArchitectMessage[] {
     return {
       role: "assistant",
       ...(m.at ? { at: m.at } : {}),
-      // Reasoning steps are ephemeral: a restored chat keeps the answers and
-      // actions, not the deliberation.
+      // Reasoning steps are ephemeral, and so are transient status lines
+      // (⚠ network/turn errors): a restored chat keeps answers and actions —
+      // never yesterday's connection trouble presented as if it were current.
       blocks: m.blocks
         .filter(
-          (b): b is Exclude<Block, { kind: "think" }> => b.kind !== "think",
+          (b): b is Exclude<Block, { kind: "think" }> =>
+            b.kind !== "think" &&
+            !(b.kind === "text" && b.text.startsWith("⚠")),
         )
         .slice(0, MAX_BLOCKS)
         .map((b) => {
@@ -92,18 +95,22 @@ export function fromStored(stored: StoredArchitectMessage[]): Message[] {
     return {
       role: "assistant",
       at: m.at,
-      blocks: m.blocks.map((b): Block => {
-        if (b.kind === "plan") {
-          return {
-            kind: "plan",
-            summary: b.summary,
-            files: b.files,
-            state: b.state,
-            txId: b.txId,
-          };
-        }
-        return b;
-      }),
+      // Old blobs may still carry persisted ⚠ status lines — drop them here
+      // too, so one reload heals transcripts saved before this rule.
+      blocks: m.blocks
+        .filter((b) => !(b.kind === "text" && b.text.startsWith("⚠")))
+        .map((b): Block => {
+          if (b.kind === "plan") {
+            return {
+              kind: "plan",
+              summary: b.summary,
+              files: b.files,
+              state: b.state,
+              txId: b.txId,
+            };
+          }
+          return b;
+        }),
     };
   });
 }

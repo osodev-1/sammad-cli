@@ -18,6 +18,7 @@ import {
   draftPlan,
   fetchBlueprintGraph,
   fetchCreatableKinds,
+  fetchCurrentContents,
   reviewTrust,
   type ChangePlan,
   type CreatableKind,
@@ -73,6 +74,10 @@ export default function GraphPanel({
   /* Authoring state: a drafted plan awaiting the user's review, plus the
      New Node menu. */
   const [pendingPlan, setPendingPlan] = useState<ChangePlan | null>(null);
+  /* Current on-disk text for the pending plan's update targets (R2 diffs). */
+  const [pendingCurrent, setPendingCurrent] = useState<
+    Record<string, string> | undefined
+  >(undefined);
   const [applyBusy, setApplyBusy] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
   /* S9: transient post-apply nudge + manual trust review in-flight flag.
@@ -248,6 +253,10 @@ export default function GraphPanel({
       const outcome = await draftPlan(req, sessionId);
       if (outcome.plan) {
         setPendingPlan(outcome.plan);
+        setPendingCurrent(undefined);
+        void fetchCurrentContents(outcome.plan, sessionId).then(
+          setPendingCurrent,
+        );
       } else {
         setPendingPlan(null);
         setApplyError(outcome.error?.message ?? "Could not plan that change.");
@@ -530,6 +539,7 @@ export default function GraphPanel({
           error={applyError}
           onApply={applyPending}
           onCancel={cancelPending}
+          currentContents={pendingCurrent}
         />
       )}
     </div>
