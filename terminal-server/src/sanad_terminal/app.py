@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket
+from fastapi.responses import JSONResponse
 from loguru import logger
 
 from sanad_terminal.control_plane import ControlPlaneClient, ControlPlaneError
@@ -118,6 +119,9 @@ def create_app(
         from sanad_terminal.architect_runner import shutdown_runners
 
         await shutdown_runners()
+        from sanad_terminal.coder_runner import shutdown_conversations
+
+        await shutdown_conversations()
         await manager.shutdown()
         await cp.aclose()
 
@@ -142,6 +146,18 @@ def create_app(
     from sanad_terminal.routes_terminal import router as terminal_router
 
     app.include_router(terminal_router)
+    from sanad_terminal.routes_coder import CoderDisabled
+    from sanad_terminal.routes_coder import router as coder_router
+
+    app.include_router(coder_router)
+
+    @app.exception_handler(CoderDisabled)
+    async def _coder_disabled(request, exc):  # noqa: ANN001, ANN202
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "coder_disabled", "message": "coder panel is not enabled"}},
+        )
+
     register_error_handlers(app)
 
     if idle_stopper is not None:
