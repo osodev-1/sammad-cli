@@ -31,7 +31,14 @@ from kimi_cli.worker import (
     render_input_prompt,
 )
 from sanad_terminal.routes_workspace import _settings, workspace_root
-from sanad_terminal.run_runner import RUN_ID_RE, RunRunner, get_run, prepare_run_dirs, put_run
+from sanad_terminal.run_runner import (
+    RUN_ID_RE,
+    RunRunner,
+    drop_run,
+    get_run,
+    prepare_run_dirs,
+    put_run,
+)
 from sanad_terminal.wire_runner import WireRunnerError
 from sanad_terminal.workspace import build_child_env
 
@@ -146,10 +153,22 @@ async def start_run(
         if rel_path.is_absolute():
             return _err(400, "bad_bundle", f"absolute path not allowed: {rel}")
         resolved = (dirs.bundle / rel_path).resolve()
-        if not resolved.is_relative_to(bundle_root):
+        # `resolved == bundle_root` catches "." / "" / "sub/.." — every key
+        # that normalizes back to the bundle directory itself, which
+        # `is_relative_to` alone would happily accept (a path is relative to
+        # itself) and then blow up `write_text` with IsADirectoryError.
+        if resolved == bundle_root or not resolved.is_relative_to(bundle_root):
             return _err(400, "bad_bundle_path", rel)
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content, encoding="utf-8")
+        try:
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            resolved.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            # A key that conflicts with another (e.g. "a" and "a/b.txt" both
+            # present — one wants "a" as a file, the other as a directory)
+            # raises FileExistsError/IsADirectoryError/NotADirectoryError
+            # here rather than at the containment check above; surface it
+            # the same way instead of a bare 500.
+            return _err(400, "bad_bundle_path", f"{rel}: {exc}")
 
     try:
         spec = load_worker_spec(dirs.interface_file)
@@ -218,6 +237,13 @@ async def start_run(
     try:
         state = await runner.start_turn(prompt, body.send_id)
     except WireRunnerError as exc:
+        # Symmetric with the start() failure above: a runner that never got
+        # a turn must not linger in the registry — it would keep
+        # `runners_hold_machine` reporting the machine as busy, and every
+        # retry of this runId would 409 `busy_run` forever since `get_run`
+        # would keep finding a dead, turn-less entry. `drop_run` both stops
+        # the runner and removes it, freeing the id for a fresh attempt.
+        await drop_run(body.run_id)
         return _err(409, exc.code, exc.message)
 
     return _stream(runner, state.turn_id)

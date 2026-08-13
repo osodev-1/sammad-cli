@@ -5,9 +5,12 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from sanad_terminal.app import create_app
+from sanad_terminal.run_runner import RunRunner, get_run
 from sanad_terminal.settings import TerminalSettings
+from sanad_terminal.wire_runner import WireRunnerError
 
 FAKE_WIRE = Path(__file__).parent / "_fake_worker_wire.py"
 
@@ -99,6 +102,37 @@ def test_missing_worker_yaml_is_bad_bundle(tmp_path: Path) -> None:
         assert r.json()["error"]["code"] == "bad_bundle"
 
 
+def test_start_run_requires_auth(tmp_path: Path) -> None:
+    with _make_client(tmp_path, enabled=True) as c:
+        r = c.post("/internal/worker/runs", json=_body())
+        assert r.status_code == 401
+
+
+@pytest.mark.parametrize("key", [".", "", "sub/.."])
+def test_bundle_key_normalizing_to_bundle_root_rejected(tmp_path: Path, key: str) -> None:
+    """A key that resolves to the bundle directory itself (not merely outside
+    it) must 400 `bad_bundle_path`, not 500 from `write_text` hitting a
+    directory (`is_relative_to` alone accepts it — a path is relative to
+    itself)."""
+    body = _body()
+    body["bundle"]["files"] = {key: "x", **BUNDLE}
+    with _make_client(tmp_path, enabled=True) as c:
+        r = c.post("/internal/worker/runs", json=body, headers=AUTH)
+        assert r.status_code == 400, r.text
+        assert r.json()["error"]["code"] == "bad_bundle_path"
+
+
+def test_bundle_conflicting_file_and_directory_keys_rejected(tmp_path: Path) -> None:
+    """"a" wants to be a file; "a/b.txt" wants "a" to be a directory — must
+    400, not crash `mkdir`/`write_text` with an unhandled OSError."""
+    body = _body()
+    body["bundle"]["files"] = {"a": "x", "a/b.txt": "y", **BUNDLE}
+    with _make_client(tmp_path, enabled=True) as c:
+        r = c.post("/internal/worker/runs", json=body, headers=AUTH)
+        assert r.status_code == 400, r.text
+        assert r.json()["error"]["code"] == "bad_bundle_path"
+
+
 def test_run_streams_ndjson_and_replays_by_send_id(tmp_path: Path) -> None:
     with _make_client(tmp_path, enabled=True) as c:
         r = c.post("/internal/worker/runs", json=_body(), headers=AUTH)
@@ -142,3 +176,33 @@ def test_follow_and_cancel_require_auth(tmp_path: Path) -> None:
     with _make_client(tmp_path, enabled=True) as c:
         assert c.get("/internal/worker/runs/r_bbbbbbbbbbbb/follow").status_code == 401
         assert c.post("/internal/worker/runs/r_bbbbbbbbbbbb/cancel").status_code == 401
+
+
+def test_start_turn_failure_deregisters_the_run(tmp_path: Path, monkeypatch) -> None:
+    """`RunRunner.start()` can succeed (subprocess spawned, handshake done)
+    while `start_turn()` then fails — e.g. the child exited right after
+    `initialize`. The route must not leave that dead runner registered:
+    `runners_hold_machine` would keep reporting the machine busy for it, and
+    every retry of the same runId would 409 `busy_run` forever since
+    `get_run` would keep finding a turn-less entry. Forcing this cheaply
+    through the fake wire isn't practical (the child doesn't know at
+    `initialize` time whether it should exit — the only per-request signal is
+    the prompt text, sent later, by `start_turn` itself); a class-level
+    monkeypatch of `start_turn` after the real handshake exercises the same
+    route branch directly."""
+
+    async def _boom(self, user_input, send_id=None):  # noqa: ANN001, ARG001
+        raise WireRunnerError("not_started", "agent is not running")
+
+    monkeypatch.setattr(RunRunner, "start_turn", _boom)
+    with _make_client(tmp_path, enabled=True) as c:
+        r = c.post("/internal/worker/runs", json=_body(), headers=AUTH)
+        assert r.status_code == 409
+        assert r.json()["error"]["code"] == "not_started"
+        assert get_run("r_aaaaaaaaaaaa") is None
+
+        # Un-poison the id: a retry with the real start_turn must succeed,
+        # not 409 forever.
+        monkeypatch.undo()
+        r2 = c.post("/internal/worker/runs", json=_body(), headers=AUTH)
+        assert r2.status_code == 200
