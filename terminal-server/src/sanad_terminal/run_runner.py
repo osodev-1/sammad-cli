@@ -17,6 +17,7 @@ as a no-op, and only RunRunner overrides it to accumulate usage and trip
 from __future__ import annotations
 
 import asyncio
+import gzip
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -211,6 +212,32 @@ class RunRunner(WireRunner):
             if item.get("kind") in ("end", "error"):
                 return item
         return None
+
+    async def collect_trace(self) -> bytes | None:
+        """Locate this run's wire trace and gzip it for upload.
+
+        The CLI writes its session journal at
+        `<share>/sessions/<workdir-basename>/<session-id>/wire.jsonl`, and
+        the run was spawned with `--session <run_id>` (see routes_worker.py),
+        so `<session-id> == self.run_id` — but the workdir-basename segment
+        is the CLI's own choice, not ours, hence the glob. `KIMI_SHARE_DIR`
+        is set on `self._env` by the caller (`routes_worker.py`'s bundle env
+        overlay); its absence (e.g. a bare `RunRunner` built without it, as
+        plain unit tests do) is not an error — there is simply no trace to
+        collect, same as a share dir that exists but has no matching file.
+        """
+        share_dir = self._env.get("KIMI_SHARE_DIR")
+        if not share_dir:
+            return None
+        matches = sorted(Path(share_dir).glob(f"sessions/*/{self.run_id}/wire.jsonl"))
+        if not matches:
+            return None
+        try:
+            data = matches[0].read_bytes()
+        except OSError:
+            logger.exception("failed to read wire trace for run {}", self.run_id)
+            return None
+        return gzip.compress(data)
 
     async def wait_finished_hooks(self) -> None:
         """Await the `on_finished` callback task, if one was scheduled — lets

@@ -1,11 +1,13 @@
 import asyncio
+import gzip
 import sys
 from pathlib import Path
 
 import pytest
-
 from sanad_terminal.run_runner import (
-    RUN_ID_RE, RunRunner, get_run, prepare_run_dirs, put_run,
+    RUN_ID_RE,
+    RunRunner,
+    prepare_run_dirs,
 )
 from sanad_terminal.wire_runner import WireRunnerError
 
@@ -130,6 +132,49 @@ async def test_observe_event_ignores_malformed_token_usage(tmp_path: Path) -> No
         }
     )
     assert runner.usage_totals() == {"tokensIn": 0, "tokensOut": 0, "modelAlias": None}
+
+
+async def test_collect_trace_none_without_share_dir(tmp_path: Path) -> None:
+    """No `KIMI_SHARE_DIR` in env (a bare RunRunner, as most of this file's
+    fixtures build it) is not an error — there's simply nowhere to look."""
+    runner = _runner(tmp_path)
+    assert await runner.collect_trace() is None
+
+
+async def test_collect_trace_none_when_wire_jsonl_missing(tmp_path: Path) -> None:
+    run_id = "r_ffffffffffff"
+    dirs = prepare_run_dirs(tmp_path, run_id)
+    runner = RunRunner(
+        run_id=run_id, argv=(sys.executable, str(FAKE_WIRE)),
+        cwd=dirs.workspace,
+        env={"KIMI_WORKER_OUTPUT_FILE": str(dirs.output_file), "KIMI_SHARE_DIR": str(dirs.share)},
+        uid=None, gid=None, max_turn_seconds=30.0, max_steps_per_turn=50,
+        max_tokens_per_run=1000,
+    )
+    assert await runner.collect_trace() is None
+
+
+async def test_collect_trace_locates_and_gzips_the_session_journal(tmp_path: Path) -> None:
+    """The CLI's own layout: <share>/sessions/<workdir-basename>/<session-id
+    == run_id>/wire.jsonl — glob-located since the workdir-basename segment
+    is the CLI's choice, not ours."""
+    run_id = "r_00000000ffff"
+    dirs = prepare_run_dirs(tmp_path, run_id)
+    runner = RunRunner(
+        run_id=run_id, argv=(sys.executable, str(FAKE_WIRE)),
+        cwd=dirs.workspace,
+        env={"KIMI_WORKER_OUTPUT_FILE": str(dirs.output_file), "KIMI_SHARE_DIR": str(dirs.share)},
+        uid=None, gid=None, max_turn_seconds=30.0, max_steps_per_turn=50,
+        max_tokens_per_run=1000,
+    )
+    session_dir = dirs.share / "sessions" / "some-workdir-basename" / run_id
+    session_dir.mkdir(parents=True)
+    raw = b'{"type":"metadata"}\n{"type":"turn_begin"}\n'
+    (session_dir / "wire.jsonl").write_bytes(raw)
+
+    trace = await runner.collect_trace()
+    assert trace is not None
+    assert gzip.decompress(trace) == raw
 
 
 async def test_on_finished_fires_once(tmp_path: Path) -> None:

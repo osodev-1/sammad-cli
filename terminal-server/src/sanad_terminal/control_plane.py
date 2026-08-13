@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, ValidationError
 from pydantic.alias_generators import to_camel
 
@@ -100,6 +101,49 @@ class ControlPlaneClient:
             raise ControlPlaneError(
                 "redeem_failed", f"malformed redeem response: {exc}", resp.status_code
             ) from exc
+
+    async def report_run_completion(
+        self, run_id: str, agentd_token: str, payload: dict[str, Any]
+    ) -> None:
+        """POST a worker run's terminal outcome to `/api/v1/runs/{run_id}/complete`.
+
+        Authenticated with the machine's OWN bearer (the task-mode `AGENTD_TOKEN`,
+        the same credential every other `/internal/*` request on this machine
+        carries in reverse) — deliberately NOT the redeem-flow headers
+        `_redeem_headers` builds (`x-machine-token`/`x-terminal-secret`), which
+        authenticate the machine to the control plane for a *different*
+        purpose (ticket redemption) and aren't accepted by this endpoint.
+
+        Fire-and-forget semantics end-to-end: a missing token (railway mode,
+        or any machine that never got one) skips the call entirely rather than
+        sending a bearer-less request that could only ever 401; any other
+        failure (network error or a non-2xx response) is logged and
+        swallowed, never raised. The control plane's reaper is the backstop
+        for a machine that dies before a retry — see the P0 worker-panel
+        design note this method implements.
+        """
+        if not agentd_token:
+            logger.warning(
+                "run {} finished but no agentd token is configured; "
+                "skipping completion report (reaper will reap it)",
+                run_id,
+            )
+            return
+        try:
+            resp = await self._http.post(
+                f"/api/v1/runs/{run_id}/complete",
+                json=payload,
+                headers={"Authorization": f"Bearer {agentd_token}"},
+            )
+            if not resp.is_success:
+                logger.warning(
+                    "run completion report rejected run_id={} status={} body={}",
+                    run_id,
+                    resp.status_code,
+                    resp.text,
+                )
+        except httpx.HTTPError as exc:
+            logger.warning("run completion report failed run_id={}: {}", run_id, exc)
 
     async def aclose(self) -> None:
         await self._http.aclose()

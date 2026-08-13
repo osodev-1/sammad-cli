@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import json
 import pwd
+import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Annotated, Any
 
+import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from kimi_cli.exception import AgentSpecError
@@ -30,9 +33,11 @@ from kimi_cli.worker import (
     load_worker_spec,
     render_input_prompt,
 )
+from sanad_terminal.control_plane import ControlPlaneClient
 from sanad_terminal.routes_workspace import _settings, workspace_root
 from sanad_terminal.run_runner import (
     RUN_ID_RE,
+    RunDirs,
     RunRunner,
     drop_run,
     get_run,
@@ -90,15 +95,110 @@ class RunStartBody(BaseModel):
     model_config = {"populate_by_name": True}
 
 
-def make_on_finished(request: Request) -> Callable[[RunRunner], Awaitable[None]] | None:
-    """P0 placeholder: nothing observes a run's completion yet, so `RunRunner`
-    is handed no callback and its terminal-status hook stays dormant. Task 12
-    swaps this factory's body for one that uploads the trace and reports the
-    run's outcome to the control plane — the call site (`on_finished=
-    make_on_finished(request)`) doesn't change.
+def _map_terminal_status(
+    item: dict[str, Any] | None, output_file: Path
+) -> tuple[str, str | None, dict[str, Any] | None]:
+    """(status, errorCode, output) from a consumed turn's terminal journal
+    item + whether the run wrote its declared output file.
+
+    - `error` item: `failed`, carrying whatever `code` the journal has (the
+      wall-clock/step budget trips and a dead subprocess both land here;
+      the latter has no `code`, so `errorCode` comes back `None`).
+    - `end` item whose raw wire status is `cancelled` (an explicit
+      `/cancel` call, or the *second* item a token-budget trip produces —
+      `_trip_budget` journals the `error` first, then the wire's own `end`
+      follows once the cancel completes and becomes the true last item):
+      `cancelled`, no error code.
+    - `end` otherwise: the output file is the only signal of success a
+      one-way, afk run has — present means `succeeded`; missing means
+      `failed`/`no_output` and, per binding #P0, that is NOT nudged the way
+      `sanad dev` nudges a human — a cloud run just fails fast.
+    - No terminal item at all (should not happen; `on_finished` only fires
+      once a turn has ended) is treated the same as a missing output file
+      rather than raising, since the caller wraps everything anyway.
     """
-    del request
-    return None
+    if item is not None and item.get("kind") == "error":
+        return "failed", item.get("code"), None
+    if item is not None and item.get("kind") == "end" and item.get("status") == "cancelled":
+        return "cancelled", None, None
+    if output_file.exists():
+        try:
+            output = json.loads(output_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.exception("output file unreadable at {}", output_file)
+            return "failed", "no_output", None
+        return "succeeded", None, output
+    return "failed", "no_output", None
+
+
+def _make_on_finished(
+    dirs: RunDirs,
+    body: RunStartBody,
+    *,
+    agentd_token: str,
+    control_plane: ControlPlaneClient,
+    upload_transport: httpx.AsyncBaseTransport | None = None,
+) -> Callable[[RunRunner], Awaitable[None]]:
+    """Build the callback `RunRunner`'s terminal-status hook fires exactly
+    once, as a background task, after the NDJSON stream to the caller has
+    already ended (the `end`/`error` item is the last thing `follow()`
+    yields) — a slow trace upload or control-plane round trip here never
+    blocks a client.
+
+    Closes over the request-scoped `dirs`/`body` so the call site only needs
+    to build this once per `/runs` call; `upload_transport` is the test seam
+    (production always passes `None`, i.e. a real `httpx.AsyncClient`).
+    """
+
+    async def _on_finished(runner: RunRunner) -> None:
+        try:
+            status, error_code, output = _map_terminal_status(
+                runner.terminal_item(), dirs.output_file
+            )
+
+            trace_uploaded = False
+            trace_bytes = await runner.collect_trace()
+            if trace_bytes and body.trace_upload_url:
+                try:
+                    async with httpx.AsyncClient(transport=upload_transport) as client:
+                        resp = await client.put(body.trace_upload_url, content=trace_bytes)
+                    trace_uploaded = resp.is_success
+                    if not trace_uploaded:
+                        logger.warning(
+                            "trace upload rejected run_id={} status={}",
+                            runner.run_id,
+                            resp.status_code,
+                        )
+                except Exception:
+                    # Any failure here (network error, or anything else) must
+                    # not stop the completion report from going out — the
+                    # trace is best-effort, the status/usage report is not.
+                    logger.exception("trace upload failed run_id={}", runner.run_id)
+
+            payload: dict[str, Any] = {
+                "status": status,
+                "traceUploaded": trace_uploaded,
+                **runner.usage_totals(),
+            }
+            if error_code:
+                payload["errorCode"] = error_code
+            if output is not None:
+                payload["output"] = output
+            if not payload.get("modelAlias"):
+                payload.pop("modelAlias", None)
+
+            await control_plane.report_run_completion(runner.run_id, agentd_token, payload)
+
+            if status == "succeeded":
+                shutil.rmtree(dirs.root, ignore_errors=True)
+        except Exception:
+            # A reporting crash must never take the app down or leave a dead
+            # runner registered — `finally` below still runs `drop_run`.
+            logger.exception("on_finished crashed for run_id={}", runner.run_id)
+        finally:
+            await drop_run(runner.run_id)
+
+    return _on_finished
 
 
 def _turn_id(runner: RunRunner) -> str | None:
@@ -224,7 +324,12 @@ async def start_run(
         max_turn_seconds=min(body.budgets.max_turn_seconds, settings.worker_max_turn_seconds),
         max_steps_per_turn=min(body.budgets.max_steps_per_turn, settings.worker_max_steps_per_turn),
         max_tokens_per_run=min(body.budgets.max_tokens_per_run, settings.worker_max_tokens_per_run),
-        on_finished=make_on_finished(request),
+        on_finished=_make_on_finished(
+            dirs,
+            body,
+            agentd_token=settings.agentd_token,
+            control_plane=request.app.state.control_plane,
+        ),
     )
     try:
         await runner.start()
