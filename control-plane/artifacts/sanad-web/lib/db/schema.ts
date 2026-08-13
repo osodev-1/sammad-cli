@@ -232,7 +232,7 @@ export const deployments = pgTable("deployments", {
   agentId: text("agent_id").notNull().references(() => agents.id),
   agentVersionId: text("agent_version_id").notNull().references(() => agentVersions.id),
   env: text("env").notNull(), // "dev" | "prod"
-  status: text("status").default("active").notNull(), // "active" | "paused"
+  status: text("status").default("active").notNull(), // "active" | "paused" | "superseded"
   maxTurnSeconds: integer("max_turn_seconds").default(900).notNull(),
   maxStepsPerTurn: integer("max_steps_per_turn").default(100).notNull(),
   maxTokensPerRun: integer("max_tokens_per_run").default(2000000).notNull(),

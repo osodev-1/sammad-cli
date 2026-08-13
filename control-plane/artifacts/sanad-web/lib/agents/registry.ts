@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "../db";
 import { agents, agentVersions, deployments, workspaces } from "../db/schema";
 
@@ -39,13 +39,16 @@ export async function ensureWorkspace(
 }
 
 /**
- * Create an agent, or re-claim an existing one by (workspace, name).
+ * Create an agent, or return the existing one by (workspace, name).
  *
- * P0 has no separate "claim ownership" endpoint, so pushing to an existing
- * agent name transfers ownership to the caller and un-orphans it (mirrors a
- * `git push`-style deploy CLI: whoever pushes last owns it). Per-workspace
- * name uniqueness is enforced here with the same select-then-insert
- * assumption as ensureWorkspace above.
+ * Ownership is stable on upsert: re-pushing an existing agent name never
+ * changes who owns it — that transfer is explicitly out of P0 scope, so
+ * there is no "claim ownership" side effect here. `ownerUserId` only takes
+ * effect when the agent doesn't exist yet ("owner = caller" applies to
+ * creation, not to every push). The existing-row path only refreshes
+ * `description`, and only when the caller supplied one. Per-workspace name
+ * uniqueness is enforced with the same select-then-insert assumption as
+ * ensureWorkspace above.
  */
 export async function upsertAgent(p: {
   orgId: string;
@@ -63,14 +66,12 @@ export async function upsertAgent(p: {
     .limit(1);
 
   if (existing[0]) {
-    await db
-      .update(agents)
-      .set({
-        ownerUserId: p.ownerUserId,
-        status: "active",
-        ...(p.description !== undefined ? { description: p.description } : {}),
-      })
-      .where(eq(agents.id, existing[0].id));
+    if (p.description !== undefined) {
+      await db
+        .update(agents)
+        .set({ description: p.description })
+        .where(eq(agents.id, existing[0].id));
+    }
     return { id: existing[0].id };
   }
 
@@ -112,12 +113,29 @@ export async function createDeployment(p: {
   if (!agent) throw new Error("agent not found");
   if (agent.status === "orphaned") throw new OwnerRequiredError();
 
+  // At most one non-superseded deployment may exist per (agentId, env): retire
+  // whatever was active/paused before wiring in the new one. A blind
+  // conditional update is race-free enough here — single-replica control
+  // plane, same documented assumption as ensureInFlight in
+  // lib/compute/sessions.ts:286-291.
+  await db
+    .update(deployments)
+    .set({ status: "superseded", updatedAt: new Date() })
+    .where(
+      and(
+        eq(deployments.agentId, p.agentId),
+        eq(deployments.env, p.env),
+        inArray(deployments.status, ["active", "paused"])
+      )
+    );
+
   const id = `dp_${crypto.randomUUID()}`;
   await db.insert(deployments).values({
     id,
     agentId: p.agentId,
     agentVersionId: p.versionId,
     env: p.env,
+    status: "active",
   });
   return { id };
 }
@@ -127,10 +145,18 @@ export async function setDeploymentStatus(
   env: string,
   status: "active" | "paused"
 ): Promise<void> {
+  // Never resurrect a superseded row via pause/resume — only touch whatever
+  // is currently the live (active or paused) deployment for this env.
   await db
     .update(deployments)
     .set({ status, updatedAt: new Date() })
-    .where(and(eq(deployments.agentId, agentId), eq(deployments.env, env)));
+    .where(
+      and(
+        eq(deployments.agentId, agentId),
+        eq(deployments.env, env),
+        inArray(deployments.status, ["active", "paused"])
+      )
+    );
 }
 
 /** Resolve an agent by name, scoped to the org — never crosses org boundaries. */
@@ -152,7 +178,12 @@ export async function getAgentByName(orgId: string, name: string) {
   return rows[0] ?? null;
 }
 
-/** Most recently created active deployment for an agent+env, or null. */
+/**
+ * The live deployment for an agent+env, or null. Filters to status "active"
+ * only — createDeployment guarantees at most one such row per (agentId, env)
+ * exists at a time, so the createdAt ordering here is a defensive tiebreak,
+ * not the primary selection mechanism.
+ */
 export async function getActiveDeployment(agentId: string, env: string) {
   const rows = await db
     .select()
