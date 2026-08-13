@@ -3,12 +3,17 @@ clamping, NDJSON turn streaming, and same-runId+sendId replay."""
 
 import json
 import sys
+import time
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sanad_terminal.app import create_app
-from sanad_terminal.run_runner import RunRunner, get_run
+from sanad_terminal.control_plane import ControlPlaneClient
+from sanad_terminal.run_runner import RunRunner, get_run, put_run
 from sanad_terminal.settings import TerminalSettings
 from sanad_terminal.wire_runner import WireRunnerError
 
@@ -37,6 +42,20 @@ def _body(run_id: str = "r_aaaaaaaaaaaa") -> dict:
     }
 
 
+def _control_plane() -> ControlPlaneClient:
+    """A full worker turn now runs Task 12's `on_finished` for real, which
+    fires a background completion POST — `control_plane=None` here would let
+    `create_app` build a real client against the real `control_plane_url`
+    (defaulted to production), so a completed test turn would fire an actual
+    network request at the live control plane. Inject a mock transport
+    instead, same pattern as `test_routes_coder.py`'s `_control_plane`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {}})
+
+    return ControlPlaneClient("https://cp.test", "unused", transport=httpx.MockTransport(handler))
+
+
 def _make_client(tmp_path: Path, *, enabled: bool) -> TestClient:
     settings = TerminalSettings(
         mode="task",
@@ -46,10 +65,48 @@ def _make_client(tmp_path: Path, *, enabled: bool) -> TestClient:
         spawn_argv=(sys.executable, str(FAKE_WIRE)),
         worker_enabled=enabled,
     )
-    return TestClient(create_app(settings, control_plane=None))
+    return TestClient(create_app(settings, _control_plane()))
 
 
 AUTH = {"authorization": "Bearer tok"}
+
+
+class _StubRunner:
+    """A duck-typed stand-in for a still-registered `RunRunner`, used to test
+    `start_run`'s replay/busy-run branch in isolation from real subprocess
+    timing. Task 12 wired `on_finished` for real, and its `finally` clause
+    calls `drop_run` the instant a run's completion is reported — so a run
+    that finished via the real fake-wire subprocess is de-registered again
+    within microseconds, well before a second synchronous `TestClient.post`
+    call on the same test thread reliably lands (verified empirically: the
+    two-call-in-a-row version of these tests started flaking/failing once
+    `on_finished` stopped being a no-op). Only implements what `start_run`'s
+    `existing is not None` branch and `_stream`/`follow` touch."""
+
+    def __init__(
+        self, run_id: str, turn_id: str, send_id: str, items: list[dict[str, Any]]
+    ) -> None:
+        self.run_id = run_id
+        self._turn_id = turn_id
+        self._send_id = send_id
+        self._items = items
+
+    def turn_summary(self) -> dict[str, Any]:
+        return {"turnId": self._turn_id}
+
+    def get_turn(self, turn_id: str) -> Any:
+        if turn_id != self._turn_id:
+            return None
+        return type("S", (), {"send_id": self._send_id})()
+
+    async def follow(self, turn_id: str, from_seq: int = 0) -> AsyncIterator[dict[str, Any]]:
+        assert turn_id == self._turn_id
+        for item in self._items[from_seq:]:
+            yield item
+
+    async def stop(self) -> None:
+        """App-shutdown teardown (`create_app`'s lifespan) calls `drop_run`
+        on every still-registered run, which calls this."""
 
 
 def test_disabled_is_404(tmp_path: Path) -> None:
@@ -133,29 +190,77 @@ def test_bundle_conflicting_file_and_directory_keys_rejected(tmp_path: Path) -> 
         assert r.json()["error"]["code"] == "bad_bundle_path"
 
 
-def test_run_streams_ndjson_and_replays_by_send_id(tmp_path: Path) -> None:
+def test_run_streams_ndjson(tmp_path: Path) -> None:
     with _make_client(tmp_path, enabled=True) as c:
         r = c.post("/internal/worker/runs", json=_body(), headers=AUTH)
         assert r.status_code == 200
         items = [json.loads(line) for line in r.text.strip().splitlines()]
         assert items[0]["kind"] == "turn"
         assert items[-1]["kind"] in ("end", "error")
-        # replay: same runId+sendId re-follows instead of 409
-        r2 = c.post("/internal/worker/runs", json=_body(), headers=AUTH)
-        assert r2.status_code == 200
-        items2 = [json.loads(line) for line in r2.text.strip().splitlines()]
-        assert items2 == items
+
+
+def test_replay_reuses_existing_run_when_send_id_matches(tmp_path: Path) -> None:
+    """Same runId+sendId against a run that's STILL REGISTERED re-follows its
+    existing journal (`_stream(existing, turn_id)`) instead of re-running —
+    exercised directly against a stub runner rather than a real completed
+    run, since a real run is de-registered (`drop_run`, in `on_finished`'s
+    `finally`) within microseconds of finishing, well before a second
+    request from the same test can reliably observe it as still-registered
+    (see `_StubRunner`'s docstring)."""
+    with _make_client(tmp_path, enabled=True) as c:
+        items = [
+            {"seq": 0, "kind": "turn", "turnId": "t_stub"},
+            {"seq": 1, "kind": "event", "event": {"type": "TextPart"}},
+            {"seq": 2, "kind": "end", "status": "finished"},
+        ]
+        put_run(_StubRunner("r_aaaaaaaaaaaa", "t_stub", "r_aaaaaaaaaaaa", items))  # type: ignore[arg-type]
+        r = c.post("/internal/worker/runs", json=_body(), headers=AUTH)
+        assert r.status_code == 200
+        assert [json.loads(line) for line in r.text.strip().splitlines()] == items
 
 
 def test_different_send_id_for_existing_run_is_409(tmp_path: Path) -> None:
+    """A different sendId against a STILL REGISTERED run (its current turn's
+    sendId doesn't match) is a conflict — see `test_replay_...` above for why
+    this drives a stub runner rather than a real completed one."""
     with _make_client(tmp_path, enabled=True) as c:
-        r = c.post("/internal/worker/runs", json=_body(), headers=AUTH)
-        assert r.status_code == 200
+        put_run(_StubRunner("r_aaaaaaaaaaaa", "t_stub", "original-send-id", []))  # type: ignore[arg-type]
         body = _body()
         body["sendId"] = "different"
         r2 = c.post("/internal/worker/runs", json=body, headers=AUTH)
         assert r2.status_code == 409
         assert r2.json()["error"]["code"] == "busy_run"
+
+
+def test_repeat_request_after_completion_starts_a_fresh_run(tmp_path: Path) -> None:
+    """Documents the real, intentional P0 consequence of Task 12's immediate
+    `drop_run`: once a run has finished, uploaded its trace, and reported its
+    outcome, it's gone from the registry — a caller that repeats the exact
+    same runId+sendId afterward does NOT get 409 `busy_run` or a replay, it
+    just starts a brand new run under the same id (a fresh turnId; the P0
+    design accepts this because the original caller already received the
+    complete stream, including the terminal item, before `on_finished` (and
+    therefore `drop_run`) ever runs)."""
+    with _make_client(tmp_path, enabled=True) as c:
+        r1 = c.post("/internal/worker/runs", json=_body(), headers=AUTH)
+        assert r1.status_code == 200
+        turn1 = json.loads(r1.text.strip().splitlines()[0])["turnId"]
+        # `on_finished` (and therefore `drop_run`) runs as a background task
+        # AFTER the StreamingResponse above already finished — its landing
+        # isn't ordered against this test thread's next line, so wait for it
+        # deterministically instead of racing it (both directions of that
+        # race are exactly what broke the two tests above before they were
+        # rewritten onto `_StubRunner`).
+        for _ in range(200):
+            if get_run("r_aaaaaaaaaaaa") is None:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("run was never de-registered after completion")
+        r2 = c.post("/internal/worker/runs", json=_body(), headers=AUTH)
+        assert r2.status_code == 200
+        turn2 = json.loads(r2.text.strip().splitlines()[0])["turnId"]
+        assert turn1 != turn2
 
 
 def test_follow_unknown_run_is_404(tmp_path: Path) -> None:
