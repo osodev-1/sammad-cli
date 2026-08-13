@@ -83,6 +83,10 @@ def create_app(
         idle_stopper.add_probe(
             lambda: runners_hold_machine(resolved.idle_stop_seconds)
         )
+        # Worker-serving machines can opt out of scale-to-zero entirely (the
+        # control plane sets this per-workspace so a hot path never eats a
+        # cold-start latency hit).
+        idle_stopper.add_probe(lambda: resolved.keep_warm)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -122,6 +126,10 @@ def create_app(
         from sanad_terminal.coder_runner import shutdown_conversations
 
         await shutdown_conversations()
+        from sanad_terminal.run_runner import _runs, drop_run
+
+        for run_id in list(_runs):
+            await drop_run(run_id)
         await manager.shutdown()
         await cp.aclose()
 
@@ -156,6 +164,20 @@ def create_app(
         return JSONResponse(
             status_code=404,
             content={"error": {"code": "coder_disabled", "message": "coder panel is not enabled"}},
+        )
+
+    from sanad_terminal.routes_worker import WorkerDisabled
+    from sanad_terminal.routes_worker import router as worker_router
+
+    app.include_router(worker_router)
+
+    @app.exception_handler(WorkerDisabled)
+    async def _worker_disabled(request, exc):  # noqa: ANN001, ANN202
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": {"code": "worker_disabled", "message": "worker runs are not enabled"}
+            },
         )
 
     register_error_handlers(app)
