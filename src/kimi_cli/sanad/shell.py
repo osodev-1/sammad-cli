@@ -10,6 +10,7 @@ removed from the governed shell here so the upstream edit stays a one-line call.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Protocol
 
 # Upstream command *names* removed from the governed shell. The ``setup`` alias
@@ -18,10 +19,11 @@ SUPPRESSED_SLASH_COMMANDS = frozenset({"login", "logout"})
 
 
 class _NamedCommand(Protocol):
-    name: str
+    @property
+    def name(self) -> str: ...
 
 
-def suppress_governed_commands[C: _NamedCommand](commands: list[C]) -> list[C]:
+def suppress_governed_commands[C: _NamedCommand](commands: Sequence[C]) -> list[C]:
     """Drop the governance-suppressed slash commands from ``commands``.
 
     Filters by ``.name``; a command whose name is in

@@ -11,13 +11,14 @@ from __future__ import annotations
 from pydantic import SecretStr
 
 from kimi_cli.config import LLMModel, LLMProvider
+from kimi_cli.llm import ModelCapability
 from kimi_cli.sanad.models import MintResponse, ModelSettings
 
 PROVIDER_NAME = "sanad-gateway"
 
 # sanad model-capability names -> kimi ModelCapability names. "tool_use" is
 # inherent in kimi and is not a ModelCapability, so it is dropped.
-_CAPABILITY_MAP = {"thinking": "thinking"}
+_CAPABILITY_MAP: dict[str, ModelCapability] = {"thinking": "thinking"}
 
 
 def build_provider(mint: MintResponse) -> LLMProvider:
@@ -30,7 +31,9 @@ def build_provider(mint: MintResponse) -> LLMProvider:
 
 def build_model(settings: ModelSettings, *, provider_name: str = PROVIDER_NAME) -> LLMModel:
     """Build one ``LLMModel`` for a single alias from its server-authored settings."""
-    caps = {_CAPABILITY_MAP[c] for c in settings.capabilities if c in _CAPABILITY_MAP} or None
+    caps: set[ModelCapability] | None = {
+        _CAPABILITY_MAP[c] for c in settings.capabilities if c in _CAPABILITY_MAP
+    } or None
     return LLMModel(
         provider=provider_name,
         model=settings.name,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 import keyring
-from keyring.errors import KeyringError
+from keyring.errors import KeyringError, PasswordDeleteError
 
 from kimi_cli.sanad.errors import KeychainUnavailable
 from kimi_cli.sanad.settings import ENV_SESSION_TOKEN, KEYCHAIN_SERVICE
@@ -46,7 +46,7 @@ class KeychainStore:
     def delete(self) -> None:
         try:
             keyring.delete_password(self._service, self._account)
-        except keyring.errors.PasswordDeleteError:
+        except PasswordDeleteError:
             pass  # deleting a nonexistent credential is a no-op
         except KeyringError as exc:
             raise KeychainUnavailable(exc) from exc

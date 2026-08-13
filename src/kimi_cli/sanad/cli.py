@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import webbrowser
 from collections.abc import MutableMapping, Sequence
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import typer
 from rich.console import Console
@@ -49,7 +49,7 @@ sanad_app = typer.Typer(
 
 
 @sanad_app.callback()
-def _root(
+def _root(  # pyright: ignore[reportUnusedFunction]  # registered via typer decorator; invoked by the CLI framework, not by name
     version: Annotated[
         bool,
         typer.Option(
@@ -86,7 +86,7 @@ def _apply_governed_env(env: MutableMapping[str, str]) -> None:
         env.setdefault(key, value)
 
 
-def _fail(console: Console, exc: SanadError) -> None:
+def _fail(console: Console, exc: SanadError) -> NoReturn:
     console.print(f"✗ {exc.message}", style=f"bold {RUST}")
     raise typer.Exit(code=1)
 

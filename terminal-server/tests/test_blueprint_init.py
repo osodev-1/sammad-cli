@@ -23,7 +23,9 @@ def test_creates_a_valid_project_blueprint(tmp_path: Path):
     from sanad_blueprint.validate import validate_blueprint
 
     graph = compile_graph(index_blueprint(root / ".sanad")).to_dict()
-    assert any(n["id"] == "project:workspace" and n["kind"] == "Project" for n in graph["nodes"])
+    graph_nodes = graph["nodes"]
+    assert isinstance(graph_nodes, list)
+    assert any(n["id"] == "project:workspace" and n["kind"] == "Project" for n in graph_nodes)
     assert validate_blueprint(root / ".sanad").ok
 
 

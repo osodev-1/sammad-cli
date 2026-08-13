@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from typing import Any, cast
 
 import httpx
 
@@ -22,6 +23,20 @@ from kimi_cli.sanad.models import (
     UsageSummary,
 )
 from kimi_cli.sanad.settings import SanadSettings
+
+
+def _as_dict(value: object) -> dict[str, Any] | None:
+    """Narrow a decoded JSON value to a string-keyed dict, or ``None``.
+
+    Response envelopes are arbitrary JSON; every call site already treated a
+    non-dict payload the same way (fall through to its own default) via
+    ``isinstance(x, dict)`` checks. This just gives that narrowing a stable,
+    fully-typed return instead of the ``dict[Unknown, Unknown]`` pyright
+    infers from narrowing a bare ``object``.
+    """
+    if isinstance(value, dict):
+        return cast("dict[str, Any]", value)
+    return None
 
 
 class SanadClient:
@@ -76,9 +91,10 @@ class SanadClient:
                 payload = resp.json()
             except ValueError:
                 payload = None
+        payload_dict = _as_dict(payload)
         if resp.status_code >= 400:
-            err = payload.get("error") if isinstance(payload, dict) else None
-            if isinstance(err, dict):
+            err = _as_dict(payload_dict.get("error")) if payload_dict is not None else None
+            if err is not None:
                 raise SanadError(
                     str(err.get("code", "internal_error")),
                     str(err.get("message", "Request failed.")),
@@ -91,8 +107,8 @@ class SanadClient:
                 status=resp.status_code,
                 retryable=True,
             )
-        if isinstance(payload, dict) and "data" in payload:
-            return payload["data"]
+        if payload_dict is not None and "data" in payload_dict:
+            return payload_dict["data"]
         return payload
 
     def _request(
@@ -142,7 +158,8 @@ class SanadClient:
             json={"tokenId": token_id},
             session_token=session_token,
         )
-        return str(data["expiresAt"]) if isinstance(data, dict) else ""
+        data_dict = _as_dict(data)
+        return str(data_dict["expiresAt"]) if data_dict is not None else ""
 
     def revoke_runtime_token_family(self, session_token: str, family_id: str) -> None:
         self._request(
@@ -177,7 +194,8 @@ class SanadClient:
             json={"name": name, "workspace": workspace},
             session_token=session_token,
         )
-        agent_id = str(created["agentId"]) if isinstance(created, dict) else ""
+        created_dict = _as_dict(created)
+        agent_id = str(created_dict["agentId"]) if created_dict is not None else ""
 
         version = self._request(
             "POST",
@@ -185,8 +203,9 @@ class SanadClient:
             json={"files": files},
             session_token=session_token,
         )
-        version_id = str(version["versionId"]) if isinstance(version, dict) else ""
-        content_hash = str(version["contentHash"]) if isinstance(version, dict) else ""
+        version_dict = _as_dict(version)
+        version_id = str(version_dict["versionId"]) if version_dict is not None else ""
+        content_hash = str(version_dict["contentHash"]) if version_dict is not None else ""
 
         deployment = self._request(
             "POST",
@@ -194,7 +213,8 @@ class SanadClient:
             json={"versionId": version_id, "env": env},
             session_token=session_token,
         )
-        deployment_id = str(deployment["deploymentId"]) if isinstance(deployment, dict) else ""
+        deployment_dict = _as_dict(deployment)
+        deployment_id = str(deployment_dict["deploymentId"]) if deployment_dict is not None else ""
 
         return DeployResult(
             agent_id=agent_id,
@@ -228,12 +248,14 @@ class SanadClient:
         if env is not None:
             params["env"] = env
         data = self._request("GET", "/api/v1/runs", params=params, session_token=session_token)
-        rows = data.get("runs") if isinstance(data, dict) else None
-        return [RunRow.model_validate(row) for row in (rows or [])]
+        data_dict = _as_dict(data)
+        rows = data_dict.get("runs") if data_dict is not None else None
+        return [RunRow.model_validate(row) for row in (rows or cast("list[Any]", []))]
 
     def get_run(self, session_token: str, run_id: str) -> RunRow:
         data = self._request("GET", f"/api/v1/runs/{run_id}", session_token=session_token)
-        run = data.get("run") if isinstance(data, dict) else None
+        data_dict = _as_dict(data)
+        run = data_dict.get("run") if data_dict is not None else None
         return RunRow.model_validate(run)
 
     def get_run_trace_url(self, session_token: str, run_id: str) -> str:

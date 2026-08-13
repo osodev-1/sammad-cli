@@ -34,12 +34,19 @@ def test_plans_dir_is_under_dot_sanad():
 def test_skill_brand_dir_is_sanad_not_kimi():
     # The user + project brand skill search paths use .sanad/skills, never
     # .kimi/skills (the .claude / .codex borrow-dirs are kept).
+    from kaos.path import KaosPath
+
     from kimi_cli.skill import (
         _get_project_brand_skills_dir_candidates,
         _get_user_brand_skills_dir_candidates,
     )
 
     user = " ".join(str(p) for p in _get_user_brand_skills_dir_candidates())
-    proj = " ".join(str(p) for p in _get_project_brand_skills_dir_candidates(Path("/tmp/p")))
+    proj = " ".join(
+        str(p)
+        for p in _get_project_brand_skills_dir_candidates(
+            KaosPath.unsafe_from_local_path(Path("/tmp/p"))
+        )
+    )
     assert ".sanad/skills" in user and ".kimi" not in user
     assert ".sanad/skills" in proj and ".kimi" not in proj

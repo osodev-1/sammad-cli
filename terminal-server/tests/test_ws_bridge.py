@@ -1,5 +1,6 @@
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import httpx
@@ -25,7 +26,7 @@ def make_settings(tmp_path: Path, **overrides: object) -> TerminalSettings:
     return TerminalSettings(**defaults)  # type: ignore[arg-type]
 
 
-def make_control_plane(tickets: dict[str, dict[str, object]]) -> ControlPlaneClient:
+def make_control_plane(tickets: Mapping[str, Mapping[str, object]]) -> ControlPlaneClient:
     """Real client over MockTransport: known tickets redeem once, others 404."""
     seen: set[str] = set()
 

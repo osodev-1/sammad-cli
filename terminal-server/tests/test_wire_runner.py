@@ -262,6 +262,7 @@ async def test_pending_requests_survive_subprocess_crash(tmp_path):
                 break
             await asyncio.sleep(0.02)
         assert runner.pending_summaries()
+        assert runner._proc is not None
         runner._proc.kill()
         await asyncio.sleep(0.2)
     finally:
