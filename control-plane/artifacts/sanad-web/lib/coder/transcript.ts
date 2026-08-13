@@ -66,6 +66,14 @@ export function reduce(blocks: CoderBlock[], item: CoderItem): CoderBlock[] {
   }
 
   if (item.kind === "request") {
+    const idx = findRequestIndex(blocks, item.requestId);
+    if (idx !== -1) {
+      const existing = blocks[idx];
+      // LAST-WINS: a decided (resolved/cancelled) block is frozen — a stale
+      // replay of the original `request` item must never resurrect it as
+      // answerable, even without updating its payload.
+      if (existing.kind === "request" && existing.state !== "pending") return blocks;
+    }
     const block: RequestBlock = {
       kind: "request",
       requestId: item.requestId,
@@ -73,9 +81,9 @@ export function reduce(blocks: CoderBlock[], item: CoderItem): CoderBlock[] {
       payload: item.request as unknown as ApprovalPayload | QuestionPayload,
       state: "pending",
     };
-    const idx = findRequestIndex(blocks, item.requestId);
     if (idx === -1) return [...blocks, block];
-    // Journal replay of the same request — replace in place, preserve order.
+    // Journal replay of the same still-pending request — replace in place,
+    // preserve order.
     return [...blocks.slice(0, idx), block, ...blocks.slice(idx + 1)];
   }
 
