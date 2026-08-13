@@ -49,6 +49,7 @@ def _make_client(tmp_path: Path, *, enabled: bool) -> TestClient:
         coder_enabled=enabled,
         coder_max_turn_seconds=3600.0,
         coder_max_steps_per_turn=200,
+        coder_max_conversations=2,
     )
     app = create_app(settings, _control_plane({"tt_good": IDENTITY}))
     return TestClient(app)
@@ -241,3 +242,18 @@ def test_stop_drops_the_runner(client: TestClient):
         f"/internal/coder/conversations/{cid}/send", headers=HEADERS, json={"input": "hi"}
     )
     assert res.status_code == 409 and res.json()["error"]["code"] == "not_started"
+
+
+def test_conversation_cap_is_enforced(client: TestClient):
+    for _ in range(2):
+        assert (
+            client.post(
+                "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+            ).status_code
+            == 200
+        )
+    res = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    )
+    assert res.status_code == 409
+    assert res.json()["error"]["code"] == "conversation_limit"

@@ -81,3 +81,9 @@ def test_coder_flags_parse_from_env(base_env):
 def test_coder_enabled_requires_exactly_one(base_env):
     assert TerminalSettings.load(env={**base_env, "CODER_ENABLED": "true"}).coder_enabled is False
     assert TerminalSettings.load(env={**base_env, "CODER_ENABLED": "0"}).coder_enabled is False
+
+
+def test_coder_conversation_cap_defaults_and_parses(base_env):
+    assert TerminalSettings.load(env=base_env).coder_max_conversations == 3
+    s = TerminalSettings.load(env={**base_env, "CODER_MAX_CONVERSATIONS": "5"})
+    assert s.coder_max_conversations == 5
