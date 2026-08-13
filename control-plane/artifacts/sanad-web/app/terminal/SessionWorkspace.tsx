@@ -64,12 +64,14 @@ export default function SessionWorkspace({
   projectName,
   themeMode,
   onStatusPhase,
+  coderEnabled = false,
   projectControls,
 }: {
   sessionId?: string;
   projectName?: string;
   themeMode: ThemeMode;
   onStatusPhase?: (phase: TerminalPhase) => void;
+  coderEnabled?: boolean;
   projectControls?: ProjectControls;
 }) {
   const [entries, setEntries] = useState<WsEntry[]>([]);

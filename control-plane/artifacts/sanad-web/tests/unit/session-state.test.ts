@@ -54,7 +54,7 @@ describe("session UI state", () => {
             { kind: "tool", label: "BlueprintGraph" },
             {
               kind: "plan",
-              summary: "Create Skill “Code Review”",
+              summary: "Create Skill \"Code Review\"",
               files: 2,
               state: "applied",
               txId: "tx_1",
@@ -70,5 +70,62 @@ describe("session UI state", () => {
     expect(
       parseSessionState({ v: 1, architect: [{ role: "wizard" }] }),
     ).toEqual(EMPTY_SESSION_STATE);
+  });
+
+  it("carries a coder transcript; pre-P1b blobs parse without one", () => {
+    const withCoder = parseSessionState({
+      v: 1,
+      coder: {
+        conversationId: "coder-1",
+        transcript: [
+          { role: "user", text: "write a function" },
+          {
+            role: "assistant",
+            blocks: [
+              { kind: "text", text: "Here's the code." },
+              { kind: "tool", label: "FileWrite" },
+              {
+                kind: "request",
+                requestId: "req-1",
+                requestType: "approval",
+                summary: "Write to src/app.ts",
+                state: "resolved",
+                outcome: "approve",
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(withCoder.coder).toBeDefined();
+    expect(withCoder.coder?.transcript).toHaveLength(2);
+    // Pre-P1b blob: absent coder field stays absent, everything else intact.
+    expect(parseSessionState({ v: 1 }).coder).toBeUndefined();
+  });
+
+  it("rejects pending request blocks in coder transcript; entire blob degrades to EMPTY_SESSION_STATE", () => {
+    // A blob with a pending request MUST degrade completely (never-persist-pending invariant).
+    const withPending = parseSessionState({
+      v: 1,
+      fileTabs: [{ path: "src/app.ts" }],
+      coder: {
+        transcript: [
+          { role: "user", text: "write a function" },
+          {
+            role: "assistant",
+            blocks: [
+              {
+                kind: "request",
+                requestId: "req-1",
+                requestType: "approval",
+                summary: "Write to src/app.ts",
+                state: "pending",
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(withPending).toEqual(EMPTY_SESSION_STATE);
   });
 });
