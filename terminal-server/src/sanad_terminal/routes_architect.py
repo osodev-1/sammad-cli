@@ -91,7 +91,10 @@ async def start(root: Root, request: Request, body: StartBody) -> JSONResponse:
         )
 
     argv, env, uid, gid = _spawn_params(settings, root, identity.session_token)
-    runner = ArchitectRunner(argv=argv, cwd=root, env=env, uid=uid, gid=gid)
+    runner = ArchitectRunner(
+        argv=argv, cwd=root, env=env, uid=uid, gid=gid,
+        max_turn_seconds=settings.architect_max_turn_seconds,
+    )
     try:
         await runner.start()
     except ArchitectError as exc:

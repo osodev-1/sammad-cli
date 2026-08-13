@@ -31,7 +31,7 @@ __all__ = [
 
 
 class ArchitectRunner(WireRunner):
-    def __init__(self, *, argv, cwd, env, uid=None, gid=None) -> None:  # noqa: ANN001
+    def __init__(self, *, argv, cwd, env, uid=None, gid=None, max_turn_seconds=None) -> None:  # noqa: ANN001
         super().__init__(
             argv=argv,
             cwd=cwd,
@@ -40,6 +40,7 @@ class ArchitectRunner(WireRunner):
             gid=gid,
             client_name="sanad-architect-bridge",
             capabilities={"supports_question": False, "supports_plan_mode": False},
+            max_turn_seconds=max_turn_seconds,
         )
 
 

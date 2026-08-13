@@ -57,6 +57,11 @@ class TerminalSettings:
     coder_max_steps_per_turn: int = 200
     # Live runner cap per workspace; write-lease arrives in P6.
     coder_max_conversations: int = 3
+    # -- architect panel (P1) -------------------------------------------------
+    # Wall-clock bound on one architect turn — with idle probes holding the
+    # machine during turns, a hung turn must cancel rather than hold the
+    # machine forever.
+    architect_max_turn_seconds: float = 1800.0
 
     @classmethod
     def load(cls, env: Mapping[str, str] | None = None) -> TerminalSettings:
@@ -122,4 +127,5 @@ class TerminalSettings:
             coder_max_turn_seconds=float(e.get("CODER_MAX_TURN_SECONDS", "3600")),
             coder_max_steps_per_turn=int(e.get("CODER_MAX_STEPS_PER_TURN", "200")),
             coder_max_conversations=int(e.get("CODER_MAX_CONVERSATIONS", "3")),
+            architect_max_turn_seconds=float(e.get("ARCHITECT_MAX_TURN_SECONDS", "1800")),
         )
