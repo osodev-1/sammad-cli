@@ -3,18 +3,25 @@ WireRunner base. One runner per CONVERSATION (not per workspace): a
 conversation IS a kimi session id, which is what makes "one brain, two
 views" literal later (the TUI resumes the same id).
 
-P0 posture: capabilities are false/false and the base rejects every inbound
-request, so any gated tool call resolves as DENIED — the most-restrictive
-stance. P1's approvals bridge flips the capabilities and overrides
-`on_request`. Budgets are mandatory here (settings-driven), unlike the
-architect: a browser-driven turn can run unattended and must be bounded.
+P1 posture: capabilities are true/true and inbound ApprovalRequest /
+QuestionRequest frames are bridged — journaled into the turn and registered
+in a per-runner pending registry so the browser can see and answer them
+(`respond`, landing in the next commit, resolves them back onto the wire).
+ToolCallRequest and any other/unknown request type is still rejected, as is
+any request outside a running turn (the background lane — asking after the
+turn already ended — is P3/P4). Budgets are mandatory here (settings-driven),
+unlike the architect: a browser-driven turn can run unattended and must be
+bounded.
 """
 
 from __future__ import annotations
 
 import re
+import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from sanad_terminal.wire_runner import WireRunner, register_registry
 
@@ -24,6 +31,15 @@ CONVERSATION_ID_RE = re.compile(r"^c_[a-f0-9]{12}$")
 
 def new_conversation_id() -> str:
     return f"c_{uuid.uuid4().hex[:12]}"
+
+
+@dataclass
+class PendingRequest:
+    request_id: str
+    request_type: str  # "approval" | "question"
+    turn_id: str
+    created_at: float
+    request: dict[str, Any]
 
 
 class CoderRunner(WireRunner):
@@ -46,11 +62,82 @@ class CoderRunner(WireRunner):
             uid=uid,
             gid=gid,
             client_name="sanad-coder-bridge",
-            capabilities={"supports_question": False, "supports_plan_mode": False},
+            capabilities={"supports_question": True, "supports_plan_mode": True},
             max_turn_seconds=max_turn_seconds,
             max_steps_per_turn=max_steps_per_turn,
         )
         self.conversation_id = conversation_id
+        self._pending: dict[str, PendingRequest] = {}
+
+    # -- request bridge (P1) --------------------------------------------------
+
+    _BRIDGED_TYPES = {"ApprovalRequest": "approval", "QuestionRequest": "question"}
+
+    async def on_request(self, rid: Any, params: dict[str, Any]) -> bool:
+        request_type = self._BRIDGED_TYPES.get(str(params.get("type")))
+        payload = params.get("payload")
+        state = self._current
+        if (
+            request_type is None
+            or not isinstance(payload, dict)
+            or not isinstance(rid, str)
+            or state is None
+            or state.status != "running"
+        ):
+            # ToolCall/hook/unknown types, malformed frames, and requests
+            # outside a running turn (background lane = P3/P4) all reject.
+            return False
+        self._pending[rid] = PendingRequest(
+            request_id=rid,
+            request_type=request_type,
+            turn_id=state.turn_id,
+            created_at=time.time(),
+            request=payload,
+        )
+        await self._append(
+            state,
+            {
+                "kind": "request",
+                "requestType": request_type,
+                "requestId": rid,
+                "turnId": state.turn_id,
+                "request": payload,
+            },
+        )
+        return True
+
+    def pending_summaries(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "requestId": p.request_id,
+                "requestType": p.request_type,
+                "turnId": p.turn_id,
+                "createdAt": p.created_at,
+                "request": p.request,
+            }
+            for p in self._pending.values()
+        ]
+
+    async def _consume(self, state, queue) -> None:  # noqa: ANN001
+        try:
+            await super()._consume(state, queue)
+        finally:
+            await self._cancel_pending("turn_ended", state)
+
+    async def stop(self) -> None:
+        await super().stop()
+        state = self._current
+        if state is not None:
+            await self._cancel_pending("runner_stopped", state)
+        else:
+            self._pending.clear()
+
+    async def _cancel_pending(self, reason: str, state) -> None:  # noqa: ANN001
+        for rid in list(self._pending):
+            self._pending.pop(rid, None)
+            await self._append(
+                state, {"kind": "request_cancelled", "requestId": rid, "reason": reason}
+            )
 
 
 def _key(root: Path, conversation_id: str) -> str:

@@ -136,28 +136,114 @@ async def test_conversation_registry_roundtrip(tmp_path):
     await shutdown_conversations()
 
 
-@pytest.mark.asyncio
-async def test_coder_runner_speaks_wire_and_denies_requests(tmp_path):
-    """The P0 posture end to end on the coder class itself: turn streams,
-    inbound approval request is rejected (-32601), budgets are honored."""
-    runner = CoderRunner(
+def _coder(tmp_path, **kwargs):
+    return CoderRunner(
         conversation_id=new_conversation_id(),
         argv=(sys.executable, str(FAKE_WIRE)),
         cwd=tmp_path,
         env={},
         max_turn_seconds=3600.0,
         max_steps_per_turn=200,
+        **kwargs,
     )
+
+
+@pytest.mark.xfail(reason="respond lands in the next commit", strict=True)
+@pytest.mark.asyncio
+async def test_coder_bridges_approval_requests_into_journal_and_registry(tmp_path):
+    runner = _coder(tmp_path)
     await runner.start()
     try:
         state = await runner.start_turn("ASK_APPROVAL")
+        # Wait for the request to be journaled (the turn blocks on our answer).
+        for _ in range(100):
+            if runner.pending_summaries():
+                break
+            await asyncio.sleep(0.02)
+        pending = runner.pending_summaries()
+        assert len(pending) == 1
+        p = pending[0]
+        assert p["requestType"] == "approval"
+        assert p["requestId"] == "req_1"
+        assert p["turnId"] == state.turn_id
+        assert p["request"]["action"] == "run command"
+        kinds = [i.get("kind") for i in state.items]
+        assert "request" in kinds
+        # Turn is still running — the agent is waiting on us.
+        assert state.status == "running"
+        await runner.respond("req_1", {"response": "approve"})
         items = await asyncio.wait_for(_drain(runner, state.turn_id), timeout=5.0)
         outcomes = [
             i["event"]["payload"]["response"]
             for i in items
             if i.get("kind") == "event" and i["event"].get("type") == "RequestOutcome"
         ]
-        assert outcomes and outcomes[0]["error"]["code"] == -32601
+        assert outcomes[0]["result"]["response"] == "approve"
+        assert outcomes[0]["result"]["request_id"] == "req_1"
+        assert state.status == "finished"
+        assert runner.pending_summaries() == []
+        assert any(i.get("kind") == "request_resolved" for i in state.items)
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.xfail(reason="respond lands in the next commit", strict=True)
+@pytest.mark.asyncio
+async def test_coder_bridges_question_requests(tmp_path):
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        state = await runner.start_turn("ASK_QUESTION")
+        for _ in range(100):
+            if runner.pending_summaries():
+                break
+            await asyncio.sleep(0.02)
+        assert runner.pending_summaries()[0]["requestType"] == "question"
+        await runner.respond("q_1", {"answers": {"Which approach?": "A"}})
+        items = await asyncio.wait_for(_drain(runner, state.turn_id), timeout=5.0)
+        outcomes = [
+            i["event"]["payload"]["response"]
+            for i in items
+            if i.get("kind") == "event" and i["event"].get("type") == "RequestOutcome"
+        ]
+        assert outcomes[0]["result"]["answers"] == {"Which approach?": "A"}
         assert state.status == "finished"
     finally:
         await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_coder_rejects_unknown_request_types(tmp_path):
+    """ToolCallRequest (wire-executed tools) is not bridged — reject."""
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        state = await runner.start_turn("ASK_TOOLCALL")
+        items = await asyncio.wait_for(_drain(runner, state.turn_id), timeout=5.0)
+        outcomes = [
+            i["event"]["payload"]["response"]
+            for i in items
+            if i.get("kind") == "event" and i["event"].get("type") == "RequestOutcome"
+        ]
+        assert outcomes[0]["error"]["code"] == -32601
+        assert runner.pending_summaries() == []
+        assert state.status == "finished"
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_pending_requests_are_cancelled_on_stop(tmp_path):
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        state = await runner.start_turn("ASK_APPROVAL")
+        for _ in range(100):
+            if runner.pending_summaries():
+                break
+            await asyncio.sleep(0.02)
+        assert runner.pending_summaries()
+    finally:
+        await runner.stop()
+    assert runner.pending_summaries() == []
+    assert any(i.get("kind") == "request_cancelled" for i in state.items)
