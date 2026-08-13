@@ -329,6 +329,7 @@ async def start_run(
             body,
             agentd_token=settings.agentd_token,
             control_plane=request.app.state.control_plane,
+            upload_transport=request.app.state.worker_upload_transport,
         ),
     )
     try:

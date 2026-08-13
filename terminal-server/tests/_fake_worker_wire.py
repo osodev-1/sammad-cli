@@ -17,6 +17,15 @@ Modes are keyed on the prompt text:
                    otherwise race against (the "over-budget event was the
                    run's last one" case that must NOT retroactively mark a
                    successful run as budget-exceeded).
+- "WRITE_TRACE":   same as default (output file + finished), but ALSO writes
+                   a plausible `$KIMI_SHARE_DIR/sessions/<workdir-basename>/
+                   <session-id>/wire.jsonl` — the layout `RunRunner.
+                   collect_trace()` globs for — so a route-level test can
+                   exercise the real trace-upload PUT end to end instead of
+                   relying on the fixture's usual silence there (every OTHER
+                   mode deliberately writes nothing under KIMI_SHARE_DIR, so
+                   `collect_trace()` returns None for them by design — this
+                   is the one opt-in exception).
 """
 
 import json
@@ -65,6 +74,35 @@ def _write_output_file() -> None:
         return
     with open(path, "w") as f:
         json.dump({"answer": "fake"}, f)
+
+
+def _arg_after(flag: str) -> str | None:
+    argv = sys.argv
+    if flag in argv:
+        idx = argv.index(flag)
+        if idx + 1 < len(argv):
+            return argv[idx + 1]
+    return None
+
+
+def _write_trace_file() -> None:
+    """Mirror the real CLI's session-journal layout closely enough for
+    `RunRunner.collect_trace()`'s glob to find it: `$KIMI_SHARE_DIR/sessions/
+    <workdir-basename>/<session-id>/wire.jsonl`. `--session <id>` and
+    `--work-dir <path>` are both real argv `routes_worker.py` always passes
+    (see the `argv` list it builds), so this reads them back rather than
+    needing a dedicated env var just for the fixture."""
+    share_dir = os.environ.get("KIMI_SHARE_DIR")
+    session_id = _arg_after("--session")
+    if not share_dir or not session_id:
+        return
+    work_dir = _arg_after("--work-dir") or "workspace"
+    basename = os.path.basename(work_dir.rstrip("/")) or "workspace"
+    session_dir = os.path.join(share_dir, "sessions", basename, session_id)
+    os.makedirs(session_dir, exist_ok=True)
+    with open(os.path.join(session_dir, "wire.jsonl"), "w") as f:
+        f.write(json.dumps({"type": "metadata", "session_id": session_id}) + "\n")
+        f.write(json.dumps({"type": "turn_begin"}) + "\n")
 
 
 def main() -> None:
@@ -120,6 +158,11 @@ def main() -> None:
                 _hang_until_cancel(mid)
             elif "HANG" in user_input:
                 _hang_until_cancel(mid)
+            elif "WRITE_TRACE" in user_input:
+                _event("TextPart", {"type": "text", "text": "hello from worker"})
+                _write_output_file()
+                _write_trace_file()
+                _write({"jsonrpc": "2.0", "id": mid, "result": {"status": "finished"}})
             else:
                 _event("TextPart", {"type": "text", "text": "hello from worker"})
                 _write_output_file()

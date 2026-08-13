@@ -1,6 +1,7 @@
 """Worker runs P0: flag-gated /internal/worker/* — bundle containment, budget
 clamping, NDJSON turn streaming, and same-runId+sendId replay."""
 
+import gzip
 import json
 import sys
 import time
@@ -42,21 +43,53 @@ def _body(run_id: str = "r_aaaaaaaaaaaa") -> dict:
     }
 
 
-def _control_plane() -> ControlPlaneClient:
+def _control_plane(calls: list[tuple[str, dict]] | None = None) -> ControlPlaneClient:
     """A full worker turn now runs Task 12's `on_finished` for real, which
     fires a background completion POST — `control_plane=None` here would let
     `create_app` build a real client against the real `control_plane_url`
     (defaulted to production), so a completed test turn would fire an actual
     network request at the live control plane. Inject a mock transport
-    instead, same pattern as `test_routes_coder.py`'s `_control_plane`."""
+    instead, same pattern as `test_routes_coder.py`'s `_control_plane`.
+    Optionally records (url, json body) pairs into `calls` for tests that
+    want to inspect what got reported."""
+    sink = calls if calls is not None else []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else {}
+        sink.append((str(request.url), body))
         return httpx.Response(200, json={"data": {}})
 
     return ControlPlaneClient("https://cp.test", "unused", transport=httpx.MockTransport(handler))
 
 
-def _make_client(tmp_path: Path, *, enabled: bool) -> TestClient:
+def _upload_transport(calls: list[tuple[str, bytes]] | None = None) -> httpx.MockTransport:
+    """The trace-upload seam threaded through `create_app`'s
+    `worker_upload_transport` -> `app.state.worker_upload_transport` ->
+    `_make_on_finished`'s `upload_transport` param. Without this, a full
+    worker turn whose fake wire happened to write a trace file would PUT to
+    `body.trace_upload_url` (`https://s3.test/put` in `_body()`) over a REAL
+    `httpx.AsyncClient` — harmless only by fixture accident (the fake wire
+    never writes one, so `collect_trace()` returns `None`), not by any actual
+    seam. Every route test now gets a mock here regardless, so that accident
+    stops being load-bearing; `test_trace_upload_hits_the_injected_transport_
+    end_to_end` is the one test that deliberately makes the fake wire write a
+    trace, to exercise this for real."""
+    sink = calls if calls is not None else []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sink.append((str(request.url), request.content))
+        return httpx.Response(200, text="ok")
+
+    return httpx.MockTransport(handler)
+
+
+def _make_client(
+    tmp_path: Path,
+    *,
+    enabled: bool,
+    control_plane_calls: list[tuple[str, dict]] | None = None,
+    upload_calls: list[tuple[str, bytes]] | None = None,
+) -> TestClient:
     settings = TerminalSettings(
         mode="task",
         fixed_user="user_1",
@@ -65,7 +98,9 @@ def _make_client(tmp_path: Path, *, enabled: bool) -> TestClient:
         spawn_argv=(sys.executable, str(FAKE_WIRE)),
         worker_enabled=enabled,
     )
-    return TestClient(create_app(settings, _control_plane()))
+    return TestClient(
+        create_app(settings, _control_plane(control_plane_calls), _upload_transport(upload_calls))
+    )
 
 
 AUTH = {"authorization": "Bearer tok"}
@@ -197,6 +232,53 @@ def test_run_streams_ndjson(tmp_path: Path) -> None:
         items = [json.loads(line) for line in r.text.strip().splitlines()]
         assert items[0]["kind"] == "turn"
         assert items[-1]["kind"] in ("end", "error")
+
+
+def test_trace_upload_hits_the_injected_transport_end_to_end(tmp_path: Path) -> None:
+    """Positively tests the trace-upload seam (see `_upload_transport`'s
+    docstring for why it was only accidentally safe before): a real full
+    turn whose fake wire actually writes a `wire.jsonl` (`WRITE_TRACE` mode)
+    must PUT exactly once to the injected mock, with gzip-magic-byte content,
+    and the completion report must say `traceUploaded: true` — exercising
+    `RunRunner.collect_trace()` end to end through the real route, not just
+    through `_make_on_finished` called directly (as `test_run_completion.py`
+    does with a `FakeRunner`)."""
+    upload_calls: list[tuple[str, bytes]] = []
+    control_plane_calls: list[tuple[str, dict]] = []
+    with _make_client(
+        tmp_path,
+        enabled=True,
+        control_plane_calls=control_plane_calls,
+        upload_calls=upload_calls,
+    ) as c:
+        body = _body()
+        body["input"] = {"q": "WRITE_TRACE"}
+        r = c.post("/internal/worker/runs", json=body, headers=AUTH)
+        assert r.status_code == 200
+        items = [json.loads(line) for line in r.text.strip().splitlines()]
+        assert items[-1]["kind"] == "end"
+        assert items[-1]["status"] == "finished"
+
+        # `on_finished` (upload + report + drop) is a background task fired
+        # after the stream above already ended — wait for it deterministically
+        # (see `test_repeat_request_after_completion_starts_a_fresh_run`).
+        for _ in range(200):
+            if get_run("r_aaaaaaaaaaaa") is None:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("run was never de-registered after completion")
+
+        assert len(upload_calls) == 1
+        url, content = upload_calls[0]
+        assert url == "https://s3.test/put"
+        assert content[:2] == b"\x1f\x8b"  # gzip magic bytes — the object IS gzip
+        assert gzip.decompress(content).startswith(b'{"type": "metadata"')
+
+        posts = [call for call in control_plane_calls if "/complete" in call[0]]
+        assert len(posts) == 1
+        assert posts[0][1]["status"] == "succeeded"
+        assert posts[0][1]["traceUploaded"] is True
 
 
 def test_replay_reuses_existing_run_when_send_id_matches(tmp_path: Path) -> None:

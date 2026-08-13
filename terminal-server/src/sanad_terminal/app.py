@@ -9,6 +9,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import JSONResponse
 from loguru import logger
@@ -51,6 +52,7 @@ from sanad_terminal.workspace import (
 def create_app(
     settings: TerminalSettings | None = None,
     control_plane: ControlPlaneClient | None = None,
+    worker_upload_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     resolved = settings or TerminalSettings.load()
     cp = control_plane or ControlPlaneClient(
@@ -138,6 +140,12 @@ def create_app(
     app.state.control_plane = cp
     app.state.manager = manager
     app.state.idle_stopper = idle_stopper
+    # Test seam for worker runs' trace-upload client (routes_worker.py's
+    # `_make_on_finished` -> `httpx.AsyncClient(transport=...)`), threaded the
+    # same way `control_plane` is: production leaves this `None` (a real
+    # client); tests inject an `httpx.MockTransport` so a completed worker
+    # turn's trace PUT never reaches the network by accident.
+    app.state.worker_upload_transport = worker_upload_transport
 
     from sanad_terminal.routes_workspace import register_error_handlers, router
 
