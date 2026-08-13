@@ -55,6 +55,16 @@ class TerminalSettings:
     # 24h-token ceilings; a runaway browser-driven turn burns quota unattended.
     coder_max_turn_seconds: float = 3600.0
     coder_max_steps_per_turn: int = 200
+    # -- worker runs (P0) -------------------------------------------------------
+    # Default-off master switch for ephemeral worker runs; "1" is the only truthy.
+    worker_enabled: bool = False
+    # Per-run budgets — a worker run is afk (no attached browser can cancel it
+    # early), so these are the only backstop against a runaway subprocess.
+    worker_max_turn_seconds: float = 900.0
+    worker_max_steps_per_turn: int = 100
+    worker_max_tokens_per_run: int = 2_000_000
+    # Keep the underlying compute warm between runs instead of scaling to zero.
+    keep_warm: bool = False
 
     @classmethod
     def load(cls, env: Mapping[str, str] | None = None) -> TerminalSettings:
@@ -119,4 +129,9 @@ class TerminalSettings:
             coder_enabled=e.get("CODER_ENABLED", "") == "1",
             coder_max_turn_seconds=float(e.get("CODER_MAX_TURN_SECONDS", "3600")),
             coder_max_steps_per_turn=int(e.get("CODER_MAX_STEPS_PER_TURN", "200")),
+            worker_enabled=e.get("WORKER_ENABLED", "") == "1",
+            worker_max_turn_seconds=float(e.get("WORKER_MAX_TURN_SECONDS", "900")),
+            worker_max_steps_per_turn=int(e.get("WORKER_MAX_STEPS_PER_TURN", "100")),
+            worker_max_tokens_per_run=int(e.get("WORKER_MAX_TOKENS_PER_RUN", "2000000")),
+            keep_warm=e.get("KEEP_WARM", "") == "1",
         )

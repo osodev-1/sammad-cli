@@ -287,6 +287,8 @@ class WireRunner:
                 kind = item.get("kind")
                 if kind == "event":
                     event = item.get("event") or {}
+                    if isinstance(event, dict):
+                        self.observe_event(event)
                     if isinstance(event, dict) and event.get("type") == "StepBegin":
                         state.steps += 1
                         if (
@@ -330,6 +332,14 @@ class WireRunner:
                 self._trip_task.cancel()
                 self._trip_task = None
             self._touch()
+            # Terminal-status hook (RunRunner only — `_on_finished` doesn't
+            # exist on the base/coder runners, so this is a no-op for them):
+            # fire exactly once per turn, as a background task so a slow
+            # callback (upload + report) never blocks the journal.
+            on_finished = getattr(self, "_on_finished", None)
+            if on_finished is not None and not getattr(self, "_finished_fired", False):
+                self._finished_fired = True
+                self._finish_task = asyncio.create_task(on_finished(self))
             async with self._journal_cond:
                 self._journal_cond.notify_all()
 
@@ -488,6 +498,14 @@ class WireRunner:
         fut = self._pending.pop(mid, None)
         if fut is not None and not fut.done():
             fut.set_result(msg)
+
+    def observe_event(self, envelope: dict[str, Any]) -> None:
+        """Hook fired for every wire event, after it's journaled. Base: no-op.
+
+        Subclasses (RunRunner) override this to accumulate token usage from
+        StatusUpdate events and trip a token budget — a seam rather than a
+        base-class field so architect/coder behavior is untouched.
+        """
 
     def on_request(self, rid: Any, params: dict[str, Any]) -> bool:
         """Handle an inbound JSON-RPC request. Base: unhandled → caller rejects.
