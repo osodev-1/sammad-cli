@@ -261,9 +261,9 @@ export const runs = pgTable(
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => ({
-    idempotencyIndex: uniqueIndex("runs_deployment_idem_uq").on(table.deploymentId, table.idempotencyKey),
-  })
+  (table) => [
+    uniqueIndex("runs_deployment_idem_uq").on(table.deploymentId, table.idempotencyKey),
+  ]
 );
 
 export const invokeTokens = pgTable("invoke_tokens", {
