@@ -5,11 +5,12 @@
  * machine uses to upload/read a run's wire trace.
  */
 import { randomBytes } from "crypto";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, inArray } from "drizzle-orm";
 import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { db } from "../db";
-import { runs } from "../db/schema";
+import { agents, deployments, runs, workspaces } from "../db/schema";
+import { MODEL_PRICING } from "../models/catalog";
 
 export type RunRow = typeof runs.$inferSelect;
 
@@ -105,6 +106,134 @@ export async function markRunFailed(id: string, errorCode: string): Promise<void
     .update(runs)
     .set({ status: "failed", errorCode, finishedAt: new Date() })
     .where(eq(runs.id, id));
+}
+
+/**
+ * USD cost of a run's token usage, in micros (1 USD = 1_000_000 micros — the
+ * unit `runs.cost_usd_micros` is stored in). An alias missing from
+ * MODEL_PRICING (unpriced/experimental model, or null when the machine never
+ * reported one) costs 0 rather than throwing — pricing gaps must never block
+ * a run from completing.
+ *
+ * Note the cancellation: tokens/1e6 * usdPerMTok * 1e6micros = tokens *
+ * usdPerMTok — the 1e6s cancel, so this is just tokens * usdPerMTok with no
+ * division at all. Kept as a comment because the lack of any `/1e6` in the
+ * code reads like a bug without it.
+ */
+export function costUsdMicros(
+  alias: string | null,
+  tokensIn: number,
+  tokensOut: number
+): number {
+  const p = alias ? MODEL_PRICING[alias] : undefined;
+  if (!p) return 0;
+  return Math.round(tokensIn * p.inUsdPerMTok + tokensOut * p.outUsdPerMTok);
+}
+
+/**
+ * Flip a run to its terminal state — the machine's out-of-band completion
+ * report (POST .../runs/{id}/complete), consumed by the invoke route's
+ * ?wait=1 poll (pollRunSettled) and the read APIs. A single conditional
+ * UPDATE (status IN ("queued","running") in the WHERE clause, not a
+ * separate SELECT beforehand) so the flip is atomic: completing a run
+ * that's already left "queued"/"running" (retried completion POST, or one
+ * that lands after the reaper already marked the run "lost") is a no-op —
+ * zero rows match and nothing is clobbered. Callers that need the
+ * post-call status (the route's `{runId, status}` response) re-read the row
+ * with getRun after calling this.
+ */
+export async function completeRun(
+  runId: string,
+  p: {
+    status: "succeeded" | "failed" | "cancelled";
+    errorCode?: string;
+    output?: unknown;
+    tokensIn: number;
+    tokensOut: number;
+    modelAlias?: string;
+    traceUploaded: boolean;
+  }
+): Promise<void> {
+  const modelAlias = p.modelAlias ?? null;
+  await db
+    .update(runs)
+    .set({
+      status: p.status,
+      errorCode: p.errorCode ?? null,
+      output: p.output ?? null,
+      tokensIn: p.tokensIn,
+      tokensOut: p.tokensOut,
+      modelAlias,
+      costUsdMicros: costUsdMicros(modelAlias, p.tokensIn, p.tokensOut),
+      traceUploaded: p.traceUploaded,
+      finishedAt: new Date(),
+    })
+    .where(and(eq(runs.id, runId), inArray(runs.status, ["queued", "running"])));
+}
+
+// -- read APIs ------------------------------------------------------------
+// Every read below joins runs -> deployments -> agents -> workspaces and
+// filters on workspaces.orgId — the established information-hiding rule
+// (see lib/agents/registry.ts's getAgentByName): a run id belonging to
+// another org must 404 exactly like one that doesn't exist at all, never
+// leak via a 403.
+
+/** JSON-safe projection of a run row for the read APIs. */
+export function serializeRun(row: RunRow) {
+  return {
+    id: row.id,
+    deploymentId: row.deploymentId,
+    agentVersionId: row.agentVersionId,
+    status: row.status,
+    errorCode: row.errorCode,
+    triggerPrincipal: row.triggerPrincipal,
+    output: row.output,
+    tokensIn: row.tokensIn,
+    tokensOut: row.tokensOut,
+    costUsdMicros: row.costUsdMicros,
+    modelAlias: row.modelAlias,
+    traceUploaded: row.traceUploaded,
+    startedAt: row.startedAt,
+    finishedAt: row.finishedAt,
+    createdAt: row.createdAt,
+  };
+}
+
+/** A single run, scoped to the org — a foreign or unknown run id both return null. */
+export async function getRunForOrg(runId: string, orgId: string): Promise<RunRow | null> {
+  const rows = await db
+    .select(getTableColumns(runs))
+    .from(runs)
+    .innerJoin(deployments, eq(runs.deploymentId, deployments.id))
+    .innerJoin(agents, eq(deployments.agentId, agents.id))
+    .innerJoin(workspaces, eq(agents.workspaceId, workspaces.id))
+    .where(and(eq(runs.id, runId), eq(workspaces.orgId, orgId)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/** Org-scoped run list for `GET /api/v1/runs`, newest-first. */
+export async function listRuns(p: {
+  orgId: string;
+  agentId?: string;
+  env?: string;
+  status?: string;
+  limit: number;
+}): Promise<RunRow[]> {
+  const conditions = [eq(workspaces.orgId, p.orgId)];
+  if (p.agentId) conditions.push(eq(agents.id, p.agentId));
+  if (p.env) conditions.push(eq(deployments.env, p.env));
+  if (p.status) conditions.push(eq(runs.status, p.status));
+
+  return db
+    .select(getTableColumns(runs))
+    .from(runs)
+    .innerJoin(deployments, eq(runs.deploymentId, deployments.id))
+    .innerJoin(agents, eq(deployments.agentId, agents.id))
+    .innerJoin(workspaces, eq(agents.workspaceId, workspaces.id))
+    .where(and(...conditions))
+    .orderBy(desc(runs.createdAt))
+    .limit(p.limit);
 }
 
 // -- trace presigner ----------------------------------------------------

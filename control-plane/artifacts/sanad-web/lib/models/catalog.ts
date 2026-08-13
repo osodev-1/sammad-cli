@@ -7,3 +7,11 @@ export const MODEL_CATALOG = [
 ] as const;
 
 export const DEFAULT_MODEL_ALIAS = "kimi-k3";
+
+// Placeholder pricing (USD per million tokens) — flagged for Omar's sign-off
+// before GA. An alias missing from this map is NOT an error: costUsdMicros
+// (lib/runs/store.ts) treats it as free (cost 0) rather than throwing, so an
+// unpriced/experimental model never blocks a run from completing.
+export const MODEL_PRICING: Record<string, { inUsdPerMTok: number; outUsdPerMTok: number }> = {
+  "kimi-k3": { inUsdPerMTok: 0.6, outUsdPerMTok: 2.5 },
+};

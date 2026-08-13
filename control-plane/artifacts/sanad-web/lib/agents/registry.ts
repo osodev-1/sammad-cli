@@ -290,6 +290,24 @@ export async function getWorkspaceById(id: string) {
   return rows[0] ?? null;
 }
 
+/**
+ * Fetch an agent row by id. Unlike getAgentByName, not org-scoped — used by
+ * the run-completion route's machine-auth path, which resolves
+ * run.deploymentId -> deployment.agentId -> agent.workspaceId to recompute
+ * the expected agentd token; the caller there is a machine bearer token,
+ * not a session, so there is no orgId to scope by yet.
+ */
+export async function getAgentById(id: string) {
+  const rows = await db.select().from(agents).where(eq(agents.id, id)).limit(1);
+  return rows[0] ?? null;
+}
+
+/** Fetch a deployment row by id — same machine-auth path as getAgentById above. */
+export async function getDeploymentById(id: string) {
+  const rows = await db.select().from(deployments).where(eq(deployments.id, id)).limit(1);
+  return rows[0] ?? null;
+}
+
 /** List every agent in the org, across all its workspaces. */
 export async function listAgentsForOrg(orgId: string) {
   return db

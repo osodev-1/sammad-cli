@@ -12,7 +12,7 @@
  * exported from there for this reuse.
  */
 import { createHash } from "crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db } from "../db";
 import { workspaceMachines } from "../db/schema";
 import {
@@ -233,6 +233,23 @@ async function ensureInner(
     agentdToken,
     coldStart: true,
   };
+}
+
+/**
+ * Fetch a workspace machine row by (workspaceId, env) — the run-completion
+ * route's machine-auth path needs this to recompute the expected agentd
+ * token (deriveMachineToken(workspaceId, machine.runNonce)) for the run's
+ * deployment env. A missing row (or a row with no runNonce yet — never
+ * finished its first RunTask) both mean "no credential to check against",
+ * handled by the caller as a 401.
+ */
+export async function getMachineByWorkspaceEnv(workspaceId: string, env: string): Promise<MachineRow | null> {
+  const [row] = await db
+    .select()
+    .from(workspaceMachines)
+    .where(and(eq(workspaceMachines.workspaceId, workspaceId), eq(workspaceMachines.env, env)))
+    .limit(1);
+  return row ?? null;
 }
 
 /** Router route lookup: hash12 → task IP, for workspace machines. */
