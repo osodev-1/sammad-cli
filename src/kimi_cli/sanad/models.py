@@ -90,3 +90,30 @@ class UsageSummary(_Camel):
     limit: int
     period_end: str | None = None
     by_model: list[UsageByModel] = []
+
+
+class DeployResult(_Camel):
+    """Result of the three-call ``deploy_agent`` flow (agent upsert → version → deployment).
+
+    Not parsed from a single server envelope — the client assembles it from
+    the three POST responses — but it shares ``_Camel``'s alias generator so
+    the CLI can print it ``by_alias=True`` in the camelCase shape the server
+    itself uses (``agentId``/``versionId``/``deploymentId``/``contentHash``).
+    """
+
+    agent_id: str
+    version_id: str
+    deployment_id: str
+    content_hash: str
+
+
+class RunRow(_Camel):
+    """One row from ``GET /api/v1/runs`` or ``GET /api/v1/runs/{id}``."""
+
+    id: str
+    status: str
+    error_code: str | None = None
+    created_at: str
+    cost_usd_micros: int
+    tokens_in: int
+    tokens_out: int
