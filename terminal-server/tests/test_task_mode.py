@@ -2,6 +2,7 @@
 
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import httpx
@@ -39,7 +40,7 @@ def task_settings(tmp_path: Path, **overrides: object) -> TerminalSettings:
     return TerminalSettings(**defaults)  # type: ignore[arg-type]
 
 
-def machine_control_plane(tickets: dict[str, dict[str, object]]) -> ControlPlaneClient:
+def machine_control_plane(tickets: Mapping[str, Mapping[str, object]]) -> ControlPlaneClient:
     """Verifies the machine-credential headers on every redeem."""
     seen: set[str] = set()
 

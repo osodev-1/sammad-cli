@@ -65,6 +65,7 @@ def test_device_start_and_poll_pending_then_complete():
     result = client.poll_until_complete(start, sleep=lambda _s: None)
     assert result.status == "complete"
     assert result.cli_session_token == "sess-xyz"
+    assert result.organization is not None
     assert result.organization.name == "Northwind"
     assert calls["poll"] == 2
 

@@ -59,6 +59,7 @@ async def test_resize_reaches_the_child(tmp_path: Path):
 
     pty.resize(150, 50)
     # Verify via TIOCGWINSZ readback on the master side.
+    assert pty._master_fd is not None
     packed = fcntl.ioctl(pty._master_fd, termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0))
     rows, cols, _, _ = struct.unpack("HHHH", packed)
     assert (cols, rows) == (150, 50)

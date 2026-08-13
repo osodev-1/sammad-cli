@@ -131,7 +131,10 @@ class CoderRunner(WireRunner):
         if pending.request_type == "approval":
             response = payload.get("response")
             if response not in self._APPROVAL_KINDS:
-                raise WireRunnerError("invalid_response", "response must be approve|approve_for_session|reject")
+                raise WireRunnerError(
+                    "invalid_response",
+                    "response must be approve|approve_for_session|reject",
+                )
             feedback = payload.get("feedback", "")
             if not isinstance(feedback, str):
                 raise WireRunnerError("invalid_response", "feedback must be a string")

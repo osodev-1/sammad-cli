@@ -273,7 +273,8 @@ class GitRepo:
         if not await self.is_repo():
             return []
         sep = "\x1f"
-        args = ["log", f"--max-count={max(1, min(limit, 200))}", f"--format=%h{sep}%an{sep}%aI{sep}%s"]
+        fmt = f"%h{sep}%an{sep}%aI{sep}%s"
+        args = ["log", f"--max-count={max(1, min(limit, 200))}", f"--format={fmt}"]
         if path:
             args += ["--", path]
         rc, out, _ = await self._run(*args, check=False)
@@ -284,7 +285,12 @@ class GitRepo:
             parts = line.split(sep)
             if len(parts) == 4:
                 entries.append(
-                    {"hash": parts[0], "authorName": parts[1], "date": parts[2], "subject": parts[3]}
+                    {
+                        "hash": parts[0],
+                        "authorName": parts[1],
+                        "date": parts[2],
+                        "subject": parts[3],
+                    }
                 )
         return entries
 

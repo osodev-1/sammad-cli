@@ -145,8 +145,6 @@ def test_failed_turn_recycles_the_runner(client: TestClient):
     """A turn that ends without "finished" (dead auth, crashed provider) must
     emit turn_failed AND drop the runner — otherwise the idempotent start keeps
     handing back a zombie whose every LLM call 401s."""
-    from sanad_terminal.architect_runner import get_runner
-    from sanad_terminal.routes_workspace import workspace_root
 
     assert (
         client.post(
@@ -155,9 +153,7 @@ def test_failed_turn_recycles_the_runner(client: TestClient):
         == 200
     )
 
-    res = client.post(
-        "/internal/architect/ask", headers=HEADERS, json={"input": "FAIL this turn"}
-    )
+    res = client.post("/internal/architect/ask", headers=HEADERS, json={"input": "FAIL this turn"})
     assert res.status_code == 200
     items = _lines(res.text)
     assert any(i.get("code") == "turn_failed" for i in items if i["kind"] == "error")
@@ -216,14 +212,11 @@ def test_turn_journal_survives_disconnected_clients(client: TestClient):
     assert items[-1]["status"] == "finished"
 
     # Late re-attach from seq 0: full replay, identical content, then EOF.
-    replay = client.get(
-        f"/internal/architect/follow?turnId={turn_id}&from_seq=0", headers=HEADERS
-    )
+    replay = client.get(f"/internal/architect/follow?turnId={turn_id}&from_seq=0", headers=HEADERS)
     replay_items = _lines(replay.text)
     assert replay_items == items
     assert any(
-        i["kind"] == "event" and i["event"].get("type") == "ToolResult"
-        for i in replay_items
+        i["kind"] == "event" and i["event"].get("type") == "ToolResult" for i in replay_items
     )
 
     # Partial re-attach: only the gap comes back.

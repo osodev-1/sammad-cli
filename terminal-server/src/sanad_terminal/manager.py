@@ -143,9 +143,7 @@ class SessionManager:
         """
         async with self._lock:
             targets = [
-                s
-                for s in self._sessions.values()
-                if s.user_id == user_id and s.kind == kind
+                s for s in self._sessions.values() if s.user_id == user_id and s.kind == kind
             ]
             for s in targets:
                 del self._sessions[s.conn_id]

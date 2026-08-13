@@ -212,9 +212,7 @@ async def _ndjson(items: AsyncIterator[dict[str, Any]]) -> AsyncIterator[bytes]:
             yield json.dumps(item).encode("utf-8") + b"\n"
     except WireRunnerError as exc:
         yield (
-            json.dumps({"kind": "error", "code": exc.code, "message": exc.message}).encode(
-                "utf-8"
-            )
+            json.dumps({"kind": "error", "code": exc.code, "message": exc.message}).encode("utf-8")
             + b"\n"
         )
 

@@ -21,8 +21,11 @@ def _runner(tmp_path: Path, run_id: str = "r_aaaaaaaaaaaa") -> RunRunner:
         argv=(sys.executable, str(FAKE_WIRE)),
         cwd=dirs.workspace,
         env={"KIMI_WORKER_OUTPUT_FILE": str(dirs.output_file)},
-        uid=None, gid=None,
-        max_turn_seconds=30.0, max_steps_per_turn=50, max_tokens_per_run=1000,
+        uid=None,
+        gid=None,
+        max_turn_seconds=30.0,
+        max_steps_per_turn=50,
+        max_tokens_per_run=1000,
     )
 
 
@@ -69,9 +72,14 @@ async def test_token_budget_trips_and_journals(tmp_path: Path) -> None:
     run_id = "r_dddddddddddd"
     dirs = prepare_run_dirs(tmp_path, run_id)
     runner = RunRunner(
-        run_id=run_id, argv=(sys.executable, str(FAKE_WIRE)),
-        cwd=dirs.workspace, env={"KIMI_WORKER_OUTPUT_FILE": str(dirs.output_file)},
-        uid=None, gid=None, max_turn_seconds=30.0, max_steps_per_turn=50,
+        run_id=run_id,
+        argv=(sys.executable, str(FAKE_WIRE)),
+        cwd=dirs.workspace,
+        env={"KIMI_WORKER_OUTPUT_FILE": str(dirs.output_file)},
+        uid=None,
+        gid=None,
+        max_turn_seconds=30.0,
+        max_steps_per_turn=50,
         max_tokens_per_run=100,
     )
     await runner.start()
@@ -97,9 +105,14 @@ async def test_token_budget_does_not_corrupt_a_natural_finish(tmp_path: Path) ->
     run_id = "r_eeeeeeeeeeee"
     dirs = prepare_run_dirs(tmp_path, run_id)
     runner = RunRunner(
-        run_id=run_id, argv=(sys.executable, str(FAKE_WIRE)),
-        cwd=dirs.workspace, env={"KIMI_WORKER_OUTPUT_FILE": str(dirs.output_file)},
-        uid=None, gid=None, max_turn_seconds=30.0, max_steps_per_turn=50,
+        run_id=run_id,
+        argv=(sys.executable, str(FAKE_WIRE)),
+        cwd=dirs.workspace,
+        env={"KIMI_WORKER_OUTPUT_FILE": str(dirs.output_file)},
+        uid=None,
+        gid=None,
+        max_turn_seconds=30.0,
+        max_steps_per_turn=50,
         max_tokens_per_run=100,
     )
     await runner.start()
@@ -145,10 +158,14 @@ async def test_collect_trace_none_when_wire_jsonl_missing(tmp_path: Path) -> Non
     run_id = "r_ffffffffffff"
     dirs = prepare_run_dirs(tmp_path, run_id)
     runner = RunRunner(
-        run_id=run_id, argv=(sys.executable, str(FAKE_WIRE)),
+        run_id=run_id,
+        argv=(sys.executable, str(FAKE_WIRE)),
         cwd=dirs.workspace,
         env={"KIMI_WORKER_OUTPUT_FILE": str(dirs.output_file), "KIMI_SHARE_DIR": str(dirs.share)},
-        uid=None, gid=None, max_turn_seconds=30.0, max_steps_per_turn=50,
+        uid=None,
+        gid=None,
+        max_turn_seconds=30.0,
+        max_steps_per_turn=50,
         max_tokens_per_run=1000,
     )
     assert await runner.collect_trace() is None
@@ -161,10 +178,14 @@ async def test_collect_trace_locates_and_gzips_the_session_journal(tmp_path: Pat
     run_id = "r_00000000ffff"
     dirs = prepare_run_dirs(tmp_path, run_id)
     runner = RunRunner(
-        run_id=run_id, argv=(sys.executable, str(FAKE_WIRE)),
+        run_id=run_id,
+        argv=(sys.executable, str(FAKE_WIRE)),
         cwd=dirs.workspace,
         env={"KIMI_WORKER_OUTPUT_FILE": str(dirs.output_file), "KIMI_SHARE_DIR": str(dirs.share)},
-        uid=None, gid=None, max_turn_seconds=30.0, max_steps_per_turn=50,
+        uid=None,
+        gid=None,
+        max_turn_seconds=30.0,
+        max_steps_per_turn=50,
         max_tokens_per_run=1000,
     )
     session_dir = dirs.share / "sessions" / "some-workdir-basename" / run_id
@@ -185,10 +206,16 @@ async def test_on_finished_fires_once(tmp_path: Path) -> None:
 
     dirs = prepare_run_dirs(tmp_path, "r_bbbbbbbbbbbb")
     runner = RunRunner(
-        run_id="r_bbbbbbbbbbbb", argv=(sys.executable, str(FAKE_WIRE)),
-        cwd=dirs.workspace, env={"KIMI_WORKER_OUTPUT_FILE": str(dirs.output_file)},
-        uid=None, gid=None, max_turn_seconds=30.0, max_steps_per_turn=50,
-        max_tokens_per_run=1000, on_finished=on_finished,
+        run_id="r_bbbbbbbbbbbb",
+        argv=(sys.executable, str(FAKE_WIRE)),
+        cwd=dirs.workspace,
+        env={"KIMI_WORKER_OUTPUT_FILE": str(dirs.output_file)},
+        uid=None,
+        gid=None,
+        max_turn_seconds=30.0,
+        max_steps_per_turn=50,
+        max_tokens_per_run=1000,
+        on_finished=on_finished,
     )
     await runner.start()
     state = await runner.start_turn("go")

@@ -4,3 +4,11 @@
 # keep upstream's CI signal about upstream's code.
 [files]
 extend-exclude = ["control-plane/"]
+
+# Legitimate identifiers the dictionary misreads: `datas` is PyInstaller's API
+# name (kimi.spec), `iterm` is the iTerm app id (web/ open-in feature), and
+# `seeked` is the HTML5 media event (web/ video thumbnail hook).
+[default.extend-words]
+datas = "datas"
+iterm = "iterm"
+seeked = "seeked"

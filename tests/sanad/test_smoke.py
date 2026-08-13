@@ -38,6 +38,9 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_mint_and_stream_through_real_foundry_gateway():
+    # Module-level skipif above guarantees both are set whenever this body runs.
+    assert API is not None
+    assert SESSION_TOKEN is not None
     client = SanadClient(SanadSettings(api_base_url=API))
 
     # The supplied session token must be valid (proves the control plane is reachable).

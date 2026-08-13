@@ -184,7 +184,14 @@ def test_write_files_stale_disk_fails_apply(tmp_path: Path):
     sanad = _sanad(tmp_path)
     plan = plan_write_files(
         index_blueprint(sanad),
-        [(".sanad/agents/primary/agent.yaml", SKILL_MANIFEST.replace("skill:code-review", "agent:primary").replace("kind: Skill", "kind: Agent"))],
+        [
+            (
+                ".sanad/agents/primary/agent.yaml",
+                SKILL_MANIFEST.replace("skill:code-review", "agent:primary").replace(
+                    "kind: Skill", "kind: Agent"
+                ),
+            )
+        ],
         "Edit",
     )
     (tmp_path / ".sanad/agents/primary/agent.yaml").write_text("changed: behind-your-back\n")
@@ -207,14 +214,28 @@ def test_write_files_rejects_escape_and_bad_manifests(tmp_path: Path):
     with pytest.raises(PlanError) as e:
         plan_write_files(
             index,
-            [(".sanad/agents/other/agent.yaml", SKILL_MANIFEST.replace("kind: Skill", "kind: Agent").replace("skill:code-review", "agent:primary"))],
+            [
+                (
+                    ".sanad/agents/other/agent.yaml",
+                    SKILL_MANIFEST.replace("kind: Skill", "kind: Agent").replace(
+                        "skill:code-review", "agent:primary"
+                    ),
+                )
+            ],
             "s",
         )
     assert e.value.code == "duplicate_id"
     with pytest.raises(PlanError) as e:
         plan_write_files(
             index,
-            [(".sanad/agents/primary/agent.yaml", SKILL_MANIFEST.replace("kind: Skill", "kind: Agent").replace("skill:code-review", "agent:renamed"))],
+            [
+                (
+                    ".sanad/agents/primary/agent.yaml",
+                    SKILL_MANIFEST.replace("kind: Skill", "kind: Agent").replace(
+                        "skill:code-review", "agent:renamed"
+                    ),
+                )
+            ],
             "s",
         )
     assert e.value.code == "id_changed"

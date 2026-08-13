@@ -36,10 +36,13 @@ BUNDLE = {
 
 def _body(run_id: str = "r_aaaaaaaaaaaa") -> dict:
     return {
-        "runId": run_id, "sendId": run_id, "input": {"q": "hi"},
+        "runId": run_id,
+        "sendId": run_id,
+        "input": {"q": "hi"},
         "bundle": {"files": BUNDLE},
         "budgets": {"maxTurnSeconds": 30, "maxStepsPerTurn": 50, "maxTokensPerRun": 100000},
-        "sessionToken": "sess_x", "traceUploadUrl": "https://s3.test/put",
+        "sessionToken": "sess_x",
+        "traceUploadUrl": "https://s3.test/put",
     }
 
 
@@ -215,7 +218,7 @@ def test_bundle_key_normalizing_to_bundle_root_rejected(tmp_path: Path, key: str
 
 
 def test_bundle_conflicting_file_and_directory_keys_rejected(tmp_path: Path) -> None:
-    """"a" wants to be a file; "a/b.txt" wants "a" to be a directory — must
+    """ "a" wants to be a file; "a/b.txt" wants "a" to be a directory — must
     400, not crash `mkdir`/`write_text` with an unhandled OSError."""
     body = _body()
     body["bundle"]["files"] = {"a": "x", "a/b.txt": "y", **BUNDLE}

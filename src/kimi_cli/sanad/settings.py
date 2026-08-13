@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 # www, not the apex: the apex has no A/AAAA record at the registrar (GoDaddy
@@ -22,7 +23,7 @@ class SanadSettings:
     request_timeout: float = 30.0
 
     @classmethod
-    def load(cls, env: dict[str, str] | os._Environ[str] | None = None) -> SanadSettings:
+    def load(cls, env: Mapping[str, str] | None = None) -> SanadSettings:
         e = os.environ if env is None else env
         return cls(
             api_base_url=e.get("SANAD_API_BASE_URL", DEFAULT_API_BASE_URL).rstrip("/"),

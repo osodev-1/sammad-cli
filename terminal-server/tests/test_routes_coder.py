@@ -67,22 +67,20 @@ def _lines(text: str) -> list[dict]:
 
 def test_flag_off_hides_every_route(tmp_path: Path):
     with _make_client(tmp_path, enabled=False) as c:
-        res = c.post(
-            "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
-        )
+        res = c.post("/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"})
         assert res.status_code == 404
         assert res.json()["error"]["code"] == "coder_disabled"
         assert c.get("/internal/coder/conversations", headers=HEADERS).status_code == 404
 
 
 def test_create_requires_credentials(client: TestClient):
-    assert client.post("/internal/coder/conversations", json={"ticket": "tt_good"}).status_code == 401
+    assert (
+        client.post("/internal/coder/conversations", json={"ticket": "tt_good"}).status_code == 401
+    )
 
 
 def test_create_rejects_bad_ticket(client: TestClient):
-    res = client.post(
-        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_nope"}
-    )
+    res = client.post("/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_nope"})
     assert res.status_code == 401
 
 
@@ -128,9 +126,7 @@ def test_malformed_conversation_id_is_400(client: TestClient):
 def _respond_when_pending(client, cid: str, body: dict, out: dict):
     """Poll /turn until a pending request appears, then respond."""
     for _ in range(200):
-        turn = client.get(
-            f"/internal/coder/conversations/{cid}/turn", headers=HEADERS
-        ).json()
+        turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
         pending = turn.get("pendingRequests") or []
         if pending:
             out["pending"] = pending
@@ -201,9 +197,7 @@ def test_turn_exposes_pending_requests_field(client: TestClient):
     cid = client.post(
         "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
     ).json()["conversationId"]
-    turn = client.get(
-        f"/internal/coder/conversations/{cid}/turn", headers=HEADERS
-    ).json()
+    turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
     assert turn["pendingRequests"] == []
 
 
@@ -233,10 +227,7 @@ def test_stop_drops_the_runner(client: TestClient):
         "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
     ).json()["conversationId"]
     assert (
-        client.post(
-            f"/internal/coder/conversations/{cid}/stop", headers=HEADERS
-        ).status_code
-        == 200
+        client.post(f"/internal/coder/conversations/{cid}/stop", headers=HEADERS).status_code == 200
     )
     res = client.post(
         f"/internal/coder/conversations/{cid}/send", headers=HEADERS, json={"input": "hi"}
@@ -252,9 +243,7 @@ def test_conversation_cap_is_enforced(client: TestClient):
             ).status_code
             == 200
         )
-    res = client.post(
-        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
-    )
+    res = client.post("/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"})
     assert res.status_code == 409
     assert res.json()["error"]["code"] == "conversation_limit"
 
@@ -269,9 +258,7 @@ def test_open_existing_id_also_hits_the_cap(client: TestClient):
     ]
     stopped = cids[0]
     assert (
-        client.post(
-            f"/internal/coder/conversations/{stopped}/stop", headers=HEADERS
-        ).status_code
+        client.post(f"/internal/coder/conversations/{stopped}/stop", headers=HEADERS).status_code
         == 200
     )
     third = client.post(

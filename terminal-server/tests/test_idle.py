@@ -2,9 +2,11 @@
 a live PTY session; a crashing probe fails SAFE (machine stays up)."""
 
 import asyncio
+from typing import cast
 
 import pytest
 from sanad_terminal.idle import IdleStopper
+from sanad_terminal.manager import SessionManager
 
 
 class _FakeManager:
@@ -13,7 +15,10 @@ class _FakeManager:
 
 
 def _stopper(manager: _FakeManager) -> tuple[IdleStopper, asyncio.Event]:
-    stopper = IdleStopper(manager, idle_stop_seconds=0.05, tick_seconds=0.01)
+    # IdleStopper only ever reads `.count` off the manager (see idle.py); the
+    # fake provides exactly that. Cast rather than subclass SessionManager so
+    # the test double stays a minimal, dependency-free stand-in.
+    stopper = IdleStopper(cast(SessionManager, manager), idle_stop_seconds=0.05, tick_seconds=0.01)
     stopped = asyncio.Event()
     stopper._stop_machine = stopped.set  # type: ignore[method-assign]
     return stopper, stopped

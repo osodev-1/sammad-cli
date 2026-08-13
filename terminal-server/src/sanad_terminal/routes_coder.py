@@ -188,9 +188,12 @@ def _recycling_stream(
                 yield json.dumps(item).encode("utf-8") + b"\n"
         except WireRunnerError as exc:
             failed = True
-            yield json.dumps(
-                {"kind": "error", "code": "turn_failed", "message": exc.message}
-            ).encode("utf-8") + b"\n"
+            yield (
+                json.dumps({"kind": "error", "code": "turn_failed", "message": exc.message}).encode(
+                    "utf-8"
+                )
+                + b"\n"
+            )
         if failed or not runner.alive:
             await drop_conversation(root, runner.conversation_id)
 
@@ -198,9 +201,7 @@ def _recycling_stream(
 
 
 @router.post("/conversations/{cid}/send", response_model=None)
-async def send(
-    _: Gated, root: Root, cid: str, body: SendBody
-) -> StreamingResponse | JSONResponse:
+async def send(_: Gated, root: Root, cid: str, body: SendBody) -> StreamingResponse | JSONResponse:
     if bad := _bad_cid(cid):
         return bad
     runner = get_conversation(root, cid)

@@ -222,9 +222,9 @@ async def test_draft_delete_resource_cascades(workspace: Path):
     assert not res.is_error
     plan = _plan(res)
     assert plan["graphDelta"]["nodesRemoved"] == ["skill:review"]
-    assert {"from": "agent:primary", "type": "uses", "to": "skill:review"} in plan[
-        "graphDelta"
-    ]["edgesRemoved"]
+    assert {"from": "agent:primary", "type": "uses", "to": "skill:review"} in plan["graphDelta"][
+        "edgesRemoved"
+    ]
     ops = {(o["op"], o["path"]) for o in plan["operations"]}
     assert ("delete", ".sanad/skills/review/skill.yaml") in ops
     assert ("update", ".sanad/agents/primary/agent.yaml") in ops
@@ -260,9 +260,7 @@ async def test_draft_write_files_refuses_escape(workspace: Path):
     )
     assert res.is_error and res.brief == "invalid_path"
 
-    missing = await DraftBlueprintChange(_rt(workspace)).__call__(
-        DraftParams(action="writeFiles")
-    )
+    missing = await DraftBlueprintChange(_rt(workspace)).__call__(DraftParams(action="writeFiles"))
     assert missing.is_error
 
 

@@ -23,6 +23,8 @@ pytestmark = pytest.mark.skipif(not API, reason="SANAD_DEMO_API_BASE_URL not set
 
 
 def test_full_flow_against_demo_backend():
+    # Module-level skipif above guarantees API is set whenever this body runs.
+    assert API is not None
     client = SanadClient(SanadSettings(api_base_url=API))
 
     # device flow — the demo IdP auto-approves

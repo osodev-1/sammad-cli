@@ -5,7 +5,8 @@ task and billing with it. "Nobody needs it" = zero sessions (live OR detached
 — detached sessions carry their own grace and count as needed) AND no
 internal/workspace API traffic for `idle_stop_seconds`. The health check path
 is excluded from activity so load-balancer probes can never keep a machine
-alive forever. Runner activity (architect/coder turns) registers as probes — a machine mid-turn is needed even with zero PTY sessions and zero HTTP traffic.
+alive forever. Runner activity (architect/coder turns) registers as probes —
+a machine mid-turn is needed even with zero PTY sessions and zero HTTP traffic.
 """
 
 from __future__ import annotations

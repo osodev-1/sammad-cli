@@ -57,9 +57,7 @@ def _body(trace_upload_url: str = "https://s3.test/put") -> Any:
     # Duck-typed stand-in for RunStartBody — only the two attributes
     # `_make_on_finished` actually reads, named the way a real RunStartBody
     # instance exposes them (its own field names, not the wire aliases).
-    return type(
-        "B", (), {"trace_upload_url": trace_upload_url, "run_id": FakeRunner.run_id}
-    )()
+    return type("B", (), {"trace_upload_url": trace_upload_url, "run_id": FakeRunner.run_id})()
 
 
 def _mock_transport(

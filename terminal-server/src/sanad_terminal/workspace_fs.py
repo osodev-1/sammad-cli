@@ -19,7 +19,7 @@ import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Literal
+from typing import IO, Literal
 
 # Directories that are never listed, snapshotted, searched, or archived.
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", ".uv-cache"}
@@ -257,7 +257,7 @@ def sanitize_filename(name: str) -> str:
     return base
 
 
-def build_zip(root: Path, rel: str) -> BinaryIO:
+def build_zip(root: Path, rel: str) -> IO[bytes]:
     """ZIP a file/directory ('' = whole workspace) into a spooled temp file.
 
     Returns the file object positioned at 0, ready to stream; the caller owns
@@ -270,7 +270,7 @@ def build_zip(root: Path, rel: str) -> BinaryIO:
 
     # SIM115 suppressed: the spool intentionally outlives this function — the
     # streaming response reads it and closes it in its finally block.
-    spool: BinaryIO = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024)  # noqa: SIM115
+    spool: IO[bytes] = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024)  # noqa: SIM115
     root_resolved = root.resolve()
     arc_base = target.relative_to(root_resolved).as_posix() if target != root_resolved else ""
 
