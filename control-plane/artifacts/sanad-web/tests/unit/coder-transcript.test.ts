@@ -116,6 +116,30 @@ describe("coder transcript fold (reduce)", () => {
     expect(blocks[0].kind === "request" && blocks[0].state).toBe("pending");
   });
 
+  it("`request` replay after request_resolved is ignored — decided block stays frozen", () => {
+    let blocks: CoderBlock[] = reduce([], approvalRequest("r1"));
+    blocks = reduce(blocks, {
+      kind: "request_resolved",
+      requestId: "r1",
+      requestType: "approval",
+      resolution: { response: "approve" },
+    });
+    const before = blocks;
+    blocks = reduce(blocks, approvalRequest("r1")); // stale journal replay of the original request
+    expect(blocks).toEqual(before);
+    expect(blocks[0].kind === "request" && blocks[0].state).toBe("resolved");
+    expect(blocks[0].kind === "request" && blocks[0].resolution).toEqual({ response: "approve" });
+  });
+
+  it("`request` replay after request_cancelled is ignored — cancelled block stays frozen", () => {
+    let blocks: CoderBlock[] = reduce([], approvalRequest("r1"));
+    blocks = reduce(blocks, { kind: "request_cancelled", requestId: "r1", reason: "turn cancelled" });
+    const before = blocks;
+    blocks = reduce(blocks, approvalRequest("r1")); // stale journal replay of the original request
+    expect(blocks).toEqual(before);
+    expect(blocks[0].kind === "request" && blocks[0].state).toBe("cancelled");
+  });
+
   it("unknown requestId on resolve/cancel appends nothing, returns blocks unchanged", () => {
     const blocks: CoderBlock[] = reduce([], approvalRequest("r1"));
     const afterResolve = reduce(blocks, {
