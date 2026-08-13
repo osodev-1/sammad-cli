@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sanad_terminal.wire_runner import WireRunner, register_registry
+from sanad_terminal.wire_runner import WireRunner, WireRunnerError, register_registry
 
 # Server-minted only (P0); the shape keeps ids path- and shell-safe.
 CONVERSATION_ID_RE = re.compile(r"^c_[a-f0-9]{12}$")
@@ -117,6 +117,49 @@ class CoderRunner(WireRunner):
             }
             for p in self._pending_requests.values()
         ]
+
+    _APPROVAL_KINDS = {"approve", "approve_for_session", "reject"}
+
+    async def respond(self, request_id: str, payload: dict[str, Any]) -> None:
+        """Answer a pending approval/question. Fail closed: the request must
+        be pending on THIS runner (strict check — never rely on the wire
+        layer's lenient id match), and the payload must validate for its
+        type. A bad payload leaves the request pending."""
+        pending = self._pending_requests.get(request_id)
+        if pending is None:
+            raise WireRunnerError("request_gone", "no such pending request")
+        if pending.request_type == "approval":
+            response = payload.get("response")
+            if response not in self._APPROVAL_KINDS:
+                raise WireRunnerError("invalid_response", "response must be approve|approve_for_session|reject")
+            feedback = payload.get("feedback", "")
+            if not isinstance(feedback, str):
+                raise WireRunnerError("invalid_response", "feedback must be a string")
+            result: dict[str, Any] = {
+                "request_id": request_id,
+                "response": response,
+                "feedback": feedback,
+            }
+        else:
+            answers = payload.get("answers")
+            if not isinstance(answers, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in answers.items()
+            ):
+                raise WireRunnerError("invalid_response", "answers must be a str→str map")
+            result = {"request_id": request_id, "answers": answers}
+        await self._send({"jsonrpc": "2.0", "id": request_id, "result": result})
+        self._pending_requests.pop(request_id, None)
+        state = self.get_turn(pending.turn_id)
+        if state is not None:
+            await self._append(
+                state,
+                {
+                    "kind": "request_resolved",
+                    "requestId": request_id,
+                    "requestType": pending.request_type,
+                    "resolution": result,
+                },
+            )
 
     async def _consume(self, state, queue) -> None:  # noqa: ANN001
         try:
