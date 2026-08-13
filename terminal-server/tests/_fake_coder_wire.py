@@ -9,6 +9,13 @@ Modes are keyed on the prompt text:
                   for the client's response line, echoes it back as a
                   RequestOutcome event, then finishes — the deny-by-default
                   round-trip proof.
+- "ASK_TOOLCALL": emits a JSON-RPC `request` (ToolCallRequest shape) — the
+                  bridge does not handle this type, so it proves the
+                  reject-unknown-types path even once approvals are bridged.
+- "ASK_QUESTION": emits a JSON-RPC `request` (QuestionRequest shape), waits
+                  for the client's response line, echoes it back as a
+                  RequestOutcome event, then finishes — the question bridge
+                  round-trip proof.
 """
 
 import json
@@ -79,6 +86,21 @@ def main() -> None:
                 _hang_until_cancel(mid)
             elif "HANG" in user_input:
                 _hang_until_cancel(mid)
+            elif "ASK_TOOLCALL" in user_input:
+                _write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "tc_1",
+                        "method": "request",
+                        "params": {
+                            "type": "ToolCallRequest",
+                            "payload": {"id": "tc_1", "name": "external", "arguments": "{}"},
+                        },
+                    }
+                )
+                response = _read()
+                _event("RequestOutcome", {"response": response})
+                _write({"jsonrpc": "2.0", "id": mid, "result": {"status": "finished"}})
             elif "ASK_APPROVAL" in user_input:
                 _write(
                     {
@@ -94,6 +116,35 @@ def main() -> None:
                                 "action": "run command",
                                 "description": "ls -la",
                                 "display": [],
+                            },
+                        },
+                    }
+                )
+                response = _read()
+                _event("RequestOutcome", {"response": response})
+                _write({"jsonrpc": "2.0", "id": mid, "result": {"status": "finished"}})
+            elif "ASK_QUESTION" in user_input:
+                _write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "q_1",
+                        "method": "request",
+                        "params": {
+                            "type": "QuestionRequest",
+                            "payload": {
+                                "id": "q_1",
+                                "tool_call_id": "call_q",
+                                "questions": [
+                                    {
+                                        "question": "Which approach?",
+                                        "header": "Approach",
+                                        "options": [
+                                            {"label": "A", "description": "first"},
+                                            {"label": "B", "description": "second"},
+                                        ],
+                                        "multi_select": False,
+                                    }
+                                ],
                             },
                         },
                     }

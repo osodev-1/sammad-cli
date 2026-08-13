@@ -55,6 +55,13 @@ class TerminalSettings:
     # 24h-token ceilings; a runaway browser-driven turn burns quota unattended.
     coder_max_turn_seconds: float = 3600.0
     coder_max_steps_per_turn: int = 200
+    # Live runner cap per workspace; write-lease arrives in P6.
+    coder_max_conversations: int = 3
+    # -- architect panel (P1) -------------------------------------------------
+    # Wall-clock bound on one architect turn — with idle probes holding the
+    # machine during turns, a hung turn must cancel rather than hold the
+    # machine forever.
+    architect_max_turn_seconds: float = 1800.0
     # -- worker runs (P0) -------------------------------------------------------
     # Default-off master switch for ephemeral worker runs; "1" is the only truthy.
     worker_enabled: bool = False
@@ -129,6 +136,8 @@ class TerminalSettings:
             coder_enabled=e.get("CODER_ENABLED", "") == "1",
             coder_max_turn_seconds=float(e.get("CODER_MAX_TURN_SECONDS", "3600")),
             coder_max_steps_per_turn=int(e.get("CODER_MAX_STEPS_PER_TURN", "200")),
+            coder_max_conversations=int(e.get("CODER_MAX_CONVERSATIONS", "3")),
+            architect_max_turn_seconds=float(e.get("ARCHITECT_MAX_TURN_SECONDS", "1800")),
             worker_enabled=e.get("WORKER_ENABLED", "") == "1",
             worker_max_turn_seconds=float(e.get("WORKER_MAX_TURN_SECONDS", "900")),
             worker_max_steps_per_turn=int(e.get("WORKER_MAX_STEPS_PER_TURN", "100")),

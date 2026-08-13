@@ -22,7 +22,7 @@ import {
  * pane (files, terminals, previews, artifacts) mounts keyed by session id;
  * switching sessions swaps the whole pane.
  */
-export default function WorkspaceClient({ plan }: { plan: string }) {
+export default function WorkspaceClient({ plan, coderEnabled = false }: { plan: string; coderEnabled?: boolean }) {
   /* SSR renders light; the stored/OS preference applies right after mount
      (before first paint of the terminal, which loads async anyway). */
   const [themeMode, setThemeMode] = useState<ThemeMode>("light");
@@ -201,6 +201,7 @@ export default function WorkspaceClient({ plan }: { plan: string }) {
           projectName={sessions.find((x) => x.id === activeSessionId)?.name}
           themeMode={themeMode}
           onStatusPhase={onStatusPhase}
+          coderEnabled={coderEnabled}
           projectControls={{
             projects: sessions,
             activeId: activeSessionId,

@@ -1,8 +1,11 @@
-"""Coder bridge P0: flag-gated conversation lifecycle, NDJSON turn streaming,
-and the deny-by-default approval round-trip through the HTTP surface."""
+"""Coder bridge: flag-gated conversation lifecycle, NDJSON turn streaming,
+and the approval round-trip (request → respond → resolution) through the
+HTTP surface."""
 
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -46,6 +49,7 @@ def _make_client(tmp_path: Path, *, enabled: bool) -> TestClient:
         coder_enabled=enabled,
         coder_max_turn_seconds=3600.0,
         coder_max_steps_per_turn=200,
+        coder_max_conversations=2,
     )
     app = create_app(settings, _control_plane({"tt_good": IDENTITY}))
     return TestClient(app)
@@ -121,26 +125,86 @@ def test_malformed_conversation_id_is_400(client: TestClient):
     assert res.status_code in (400, 404)  # 400 from our guard; 404 if routing rejects first
 
 
-def test_gated_tool_call_is_denied_by_default(client: TestClient):
-    """P0 HTTP-level golden test: an ApprovalRequest surfaced by the agent is
-    rejected (-32601) with no respond endpoint in sight, and the turn ends."""
+def _respond_when_pending(client, cid: str, body: dict, out: dict):
+    """Poll /turn until a pending request appears, then respond."""
+    for _ in range(200):
+        turn = client.get(
+            f"/internal/coder/conversations/{cid}/turn", headers=HEADERS
+        ).json()
+        pending = turn.get("pendingRequests") or []
+        if pending:
+            out["pending"] = pending
+            out["response"] = client.post(
+                f"/internal/coder/conversations/{cid}/respond",
+                headers=HEADERS,
+                json={"requestId": pending[0]["requestId"], **body},
+            )
+            return
+        time.sleep(0.02)
+    out["response"] = None
+
+
+def test_approval_round_trip_over_http(client: TestClient):
     cid = client.post(
         "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
     ).json()["conversationId"]
+    out: dict = {}
+    t = threading.Thread(
+        target=_respond_when_pending, args=(client, cid, {"response": "approve"}, out)
+    )
+    t.start()
     res = client.post(
         f"/internal/coder/conversations/{cid}/send",
         headers=HEADERS,
         json={"input": "ASK_APPROVAL"},
     )
+    t.join(timeout=10)
     assert res.status_code == 200
+    assert out["response"] is not None and out["response"].status_code == 200
+    assert out["pending"][0]["requestType"] == "approval"
     items = _lines(res.text)
+    kinds = [i.get("kind") for i in items]
+    assert "request" in kinds and "request_resolved" in kinds
     outcomes = [
         i["event"]["payload"]["response"]
         for i in items
-        if i["kind"] == "event" and i["event"]["type"] == "RequestOutcome"
+        if i.get("kind") == "event" and i["event"].get("type") == "RequestOutcome"
     ]
-    assert outcomes and outcomes[0]["error"]["code"] == -32601
+    assert outcomes[0]["result"]["response"] == "approve"
     assert items[-1]["kind"] == "end" and items[-1]["status"] == "finished"
+
+
+def test_respond_unknown_request_is_410(client: TestClient):
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    res = client.post(
+        f"/internal/coder/conversations/{cid}/respond",
+        headers=HEADERS,
+        json={"requestId": "req_nope", "response": "approve"},
+    )
+    assert res.status_code == 410
+    assert res.json()["error"]["code"] == "request_gone"
+
+
+def test_respond_without_runner_is_409(client: TestClient):
+    res = client.post(
+        "/internal/coder/conversations/c_000000000000/respond",
+        headers=HEADERS,
+        json={"requestId": "r", "response": "approve"},
+    )
+    assert res.status_code == 409
+    assert res.json()["error"]["code"] == "not_started"
+
+
+def test_turn_exposes_pending_requests_field(client: TestClient):
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    turn = client.get(
+        f"/internal/coder/conversations/{cid}/turn", headers=HEADERS
+    ).json()
+    assert turn["pendingRequests"] == []
 
 
 def test_follow_replays_a_finished_turn(client: TestClient):
@@ -178,3 +242,46 @@ def test_stop_drops_the_runner(client: TestClient):
         f"/internal/coder/conversations/{cid}/send", headers=HEADERS, json={"input": "hi"}
     )
     assert res.status_code == 409 and res.json()["error"]["code"] == "not_started"
+
+
+def test_conversation_cap_is_enforced(client: TestClient):
+    for _ in range(2):
+        assert (
+            client.post(
+                "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+            ).status_code
+            == 200
+        )
+    res = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    )
+    assert res.status_code == 409
+    assert res.json()["error"]["code"] == "conversation_limit"
+
+
+def test_open_existing_id_also_hits_the_cap(client: TestClient):
+    """`open` consumes a live-process slot exactly like create (controller ruling, P1a)."""
+    cids = [
+        client.post(
+            "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+        ).json()["conversationId"]
+        for _ in range(2)
+    ]
+    stopped = cids[0]
+    assert (
+        client.post(
+            f"/internal/coder/conversations/{stopped}/stop", headers=HEADERS
+        ).status_code
+        == 200
+    )
+    third = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    )
+    assert third.status_code == 200  # slot freed by stop
+    reopen = client.post(
+        f"/internal/coder/conversations/{stopped}/open",
+        headers=HEADERS,
+        json={"ticket": "tt_good"},
+    )
+    assert reopen.status_code == 409
+    assert reopen.json()["error"]["code"] == "conversation_limit"

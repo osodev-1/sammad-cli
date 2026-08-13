@@ -10,6 +10,7 @@ import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import { err } from "../http/envelope";
 import { isTerminalAllowed } from "../auth/terminal";
+import { isCoderPanelAllowed } from "../auth/coder";
 
 export type WorkspaceAuth = { ok: true; userId: string } | { ok: false; response: NextResponse };
 
@@ -28,6 +29,41 @@ export async function authenticateWorkspace(): Promise<WorkspaceAuth> {
         403,
         "terminal_not_enabled",
         "The web workspace is not enabled for this account"
+      ),
+    };
+  }
+  return { ok: true, userId };
+}
+
+/**
+ * Coder-panel gate: workspace access (Clerk + SANAD_TERMINAL_EMAILS) plus the
+ * stricter SANAD_CODER_PANEL_EMAILS allowlist — write-capable agent access is
+ * grantable to a subset of workspace users. Both fail closed.
+ */
+export async function authenticateCoderPanel(): Promise<WorkspaceAuth> {
+  const { userId } = await auth();
+  if (!userId) {
+    return { ok: false, response: err(401, "unauthorized", "Must be signed in") };
+  }
+  const clerkUser = await currentUser();
+  const email = clerkUser?.emailAddresses[0]?.emailAddress ?? "";
+  if (!isTerminalAllowed(email)) {
+    return {
+      ok: false,
+      response: err(
+        403,
+        "terminal_not_enabled",
+        "The web workspace is not enabled for this account"
+      ),
+    };
+  }
+  if (!isCoderPanelAllowed(email)) {
+    return {
+      ok: false,
+      response: err(
+        403,
+        "coder_not_enabled",
+        "The coding agent is not enabled for this account"
       ),
     };
   }

@@ -472,15 +472,10 @@ class WireRunner:
         if method == "request":
             rid = msg.get("id")
             params = msg.get("params")
-            handled = False
             if rid is not None:
-                try:
-                    handled = self.on_request(rid, params if isinstance(params, dict) else {})
-                except Exception:
-                    logger.exception("on_request hook failed; rejecting")
-                    handled = False
-            if rid is not None and not handled:
-                asyncio.ensure_future(self._reject(rid))
+                asyncio.ensure_future(
+                    self._handle_request(rid, params if isinstance(params, dict) else {})
+                )
             return
         # Otherwise a response to one of our requests (initialize / prompt / cancel).
         raw_id = msg.get("id")
@@ -507,12 +502,21 @@ class WireRunner:
         base-class field so architect/coder behavior is untouched.
         """
 
-    def on_request(self, rid: Any, params: dict[str, Any]) -> bool:
-        """Handle an inbound JSON-RPC request. Base: unhandled → caller rejects.
+    async def _handle_request(self, rid: Any, params: dict[str, Any]) -> None:
+        try:
+            handled = await self.on_request(rid, params)
+        except Exception:
+            logger.exception("on_request hook failed; rejecting")
+            handled = False
+        if not handled:
+            await self._reject(rid)
 
-        Subclasses that negotiate supports_question/plan_mode override this
-        (P1's approvals bridge). Returning False keeps today's defensive
-        reject so a stray request can never wedge the subprocess.
+    async def on_request(self, rid: Any, params: dict[str, Any]) -> bool:
+        """Handle an inbound JSON-RPC request. Base: unhandled → reject.
+
+        Async so a subclass can journal/register before returning (P1's
+        approvals bridge). Returning False keeps the defensive reject so a
+        stray request can never wedge the subprocess.
         """
         return False
 

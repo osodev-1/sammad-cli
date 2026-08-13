@@ -5,6 +5,7 @@ import type { CSSProperties, ReactNode } from "react";
 import {
   CrossOutlineIcon,
   DownloadIcon,
+  FileCodeIcon,
   GlobeIcon,
   GraphIcon,
 } from "../ui/icons";
@@ -21,6 +22,9 @@ import { withSession } from "@/lib/terminal/workspace-model";
 
 /** The Blueprint graph is a singleton tab with a fixed active id. */
 export const GRAPH_TAB_ID = "graph";
+
+/** The Coder chat is a singleton tab with a fixed active id (P1b). */
+export const CODER_TAB_ID = "coder";
 
 /* ------------------------------------------------------------- tabs bar --- */
 
@@ -46,24 +50,28 @@ export function TabsBar({
   fileTabs,
   active,
   canAddTerminal,
+  showCoder,
   onSelect,
   onCloseFile,
   onCloseTerminal,
   onCloseView,
   onNewTerminal,
   onOpenGraph,
+  onOpenCoder,
 }: {
   terminals: TerminalTabInfo[];
   viewTabs: BrowserTab[];
   fileTabs: WorkspaceTab[];
   active: string;
   canAddTerminal: boolean;
+  showCoder: boolean;
   onSelect: (id: string) => void;
   onCloseFile: (path: string) => void;
   onCloseTerminal: (id: string) => void;
   onCloseView: (id: string) => void;
   onNewTerminal: () => void;
   onOpenGraph: () => void;
+  onOpenCoder: () => void;
 }) {
   return (
     <div style={s.tabsBar}>
@@ -84,6 +92,14 @@ export function TabsBar({
         active={active === GRAPH_TAB_ID}
         onSelect={onOpenGraph}
       />
+      {showCoder && (
+        <Tab
+          label="Coder"
+          icon={<FileCodeIcon size={12} strokeWidth={1.8} />}
+          active={active === CODER_TAB_ID}
+          onSelect={onOpenCoder}
+        />
+      )}
       {canAddTerminal && (
         <button
           style={s.addTerminal}

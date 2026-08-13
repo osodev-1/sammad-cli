@@ -58,6 +58,41 @@ export const architectMessageState = z.union([
 
 export type StoredArchitectMessage = z.infer<typeof architectMessageState>;
 
+/**
+ * Persisted Coder transcript (P1b). A RECORD of the conversation, not a
+ * live draft store: text is truncated, and request blocks keep only summary +
+ * outcome — a pending request from a dead session is never persisted (only
+ * resolved/cancelled requests survive a restore). Sizes are capped so the
+ * uiState blob stays small.
+ */
+export const coderBlockState = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("text"), text: z.string().max(6000) }),
+  z.object({ kind: z.literal("tool"), label: z.string().max(200) }),
+  z.object({
+    kind: z.literal("request"),
+    requestId: z.string().max(128),
+    requestType: z.enum(["approval", "question"]),
+    summary: z.string().max(300),
+    state: z.enum(["resolved", "cancelled"]),
+    outcome: z.string().max(200).optional(),
+  }),
+]);
+
+export const coderMessageState = z.union([
+  z.object({
+    role: z.literal("user"),
+    text: z.string().max(8000),
+    at: z.number().optional(),
+  }),
+  z.object({
+    role: z.literal("assistant"),
+    blocks: z.array(coderBlockState).max(80),
+    at: z.number().optional(),
+  }),
+]);
+
+export type StoredCoderMessage = z.infer<typeof coderMessageState>;
+
 export const sessionUiState = z.object({
   v: z.literal(SESSION_STATE_VERSION),
   terminals: z.array(terminalTabState).max(16).default([]),
@@ -71,6 +106,11 @@ export const sessionUiState = z.object({
   architect: z.array(architectMessageState).max(60).optional(),
   // Context dock visibility (R4) — optional; absent = open.
   dockOpen: z.boolean().optional(),
+  // Coder chat transcript (P1b) — optional so pre-P1b blobs parse unchanged.
+  coder: z.object({
+    conversationId: z.string().max(64).optional(),
+    transcript: z.array(coderMessageState).max(60).optional(),
+  }).optional(),
 });
 
 export type SessionUiState = z.infer<typeof sessionUiState>;

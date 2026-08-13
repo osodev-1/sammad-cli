@@ -1,0 +1,279 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  ensureConversation,
+  sendCoder,
+  fetchCoderTurn,
+  respondCoder,
+  textFromEvent,
+  thinkFromEvent,
+  toolLabel,
+} from "@/lib/coder/client";
+import type { CoderItem } from "@/lib/coder/types";
+
+function streamOf(...chunks: string[]): Response {
+  const enc = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      for (const ch of chunks) c.enqueue(enc.encode(ch));
+      c.close();
+    },
+  });
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "application/x-ndjson" },
+  });
+}
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe("sendCoder stream parsing", () => {
+  it("reassembles NDJSON across chunk boundaries and surfaces request/request_resolved in order", async () => {
+    // The TextPart line is deliberately cut mid-JSON between the two chunks.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        streamOf(
+          '{"kind":"turn","turnId":"t_1"}\n{"kind":"event","event":{"type":"TextPart","payload":{"text":"Hel',
+          'lo"}}}\n{"kind":"request","requestType":"approval","requestId":"r_1","turnId":"t_1","request":{"id":"r_1","action":"Shell"}}\n{"kind":"request_resolved","requestId":"r_1","requestType":"approval","resolution":{"response":"approve"}}\n{"kind":"end","status":"finished"}\n',
+        ),
+      ),
+    );
+    const items: CoderItem[] = [];
+    await sendCoder("c_1", "hi", undefined, "sess1", (i: CoderItem) =>
+      items.push(i),
+    );
+
+    expect(items).toHaveLength(5);
+    expect(items[0]).toEqual({ kind: "turn", turnId: "t_1" });
+    expect(textFromEvent(items[1])).toBe("Hello");
+    expect(items[2]).toEqual({
+      kind: "request",
+      requestType: "approval",
+      requestId: "r_1",
+      turnId: "t_1",
+      request: { id: "r_1", action: "Shell" },
+    });
+    expect(items[3]).toEqual({
+      kind: "request_resolved",
+      requestId: "r_1",
+      requestType: "approval",
+      resolution: { response: "approve" },
+    });
+    expect(items[4]).toEqual({ kind: "end", status: "finished" });
+  });
+
+  it("maps a busy 409 to a single error item carrying the turnId", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(409, { error: { code: "busy", turnId: "t_1" } }),
+      ),
+    );
+    const items: CoderItem[] = [];
+    await sendCoder("c_1", "hi", undefined, "sess1", (i: CoderItem) =>
+      items.push(i),
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "error",
+      code: "busy",
+      turnId: "t_1",
+    });
+  });
+});
+
+describe("fetchCoderTurn", () => {
+  it("unwraps the double envelope {data:{turn,alive,pendingRequests}}", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          data: {
+            turn: {
+              turnId: "t_1",
+              status: "running",
+              userInput: "hi",
+              lastSeq: 3,
+              startedAt: 100,
+            },
+            alive: true,
+            pendingRequests: [
+              {
+                requestId: "r_1",
+                requestType: "question",
+                turnId: "t_1",
+                createdAt: 5,
+                request: {},
+              },
+            ],
+          },
+          meta: { requestId: "req_1" },
+        }),
+      ),
+    );
+    const state = await fetchCoderTurn("c_1", "sess1");
+    expect(state?.turn?.turnId).toBe("t_1");
+    expect(state?.alive).toBe(true);
+    expect(state?.pendingRequests).toHaveLength(1);
+    expect(state?.pendingRequests[0].requestId).toBe("r_1");
+  });
+
+  it("tolerates the bare (non-double-wrapped) shape, defaulting missing pendingRequests to []", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(200, { turn: null, alive: false })),
+    );
+    const state = await fetchCoderTurn("c_1", "sess1");
+    expect(state).toEqual({ turn: null, alive: false, pendingRequests: [] });
+  });
+});
+
+describe("ensureConversation", () => {
+  it("happy-create: mints a ticket then creates, ticket flows into the create body", async () => {
+    const fetchMock = vi.fn();
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { data: { ticket: "tk_1", wsUrl: "wss://x" } }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, { data: { conversationId: "c_1" } }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await ensureConversation(undefined, "sess1");
+
+    expect(result).toEqual({ ok: true, conversationId: "c_1" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [mintUrl] = fetchMock.mock.calls[0];
+    expect(mintUrl).toBe("/api/terminal/session");
+    const [createUrl, createInit] = fetchMock.mock.calls[1];
+    expect(String(createUrl)).toContain("/api/coder/conversations");
+    expect(JSON.parse(createInit.body)).toEqual({ ticket: "tk_1" });
+  });
+
+  it("open-falls-through-to-create: invalid_conversation on open mints a SECOND (one-time) ticket for create", async () => {
+    const fetchMock = vi.fn();
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { data: { ticket: "tk_1", wsUrl: "wss://x" } }),
+      ) // mint #1
+      .mockResolvedValueOnce(
+        jsonResponse(400, {
+          error: { code: "invalid_conversation", message: "malformed conversation id" },
+        }),
+      ) // open fails
+      .mockResolvedValueOnce(
+        jsonResponse(200, { data: { ticket: "tk_2", wsUrl: "wss://x" } }),
+      ) // mint #2
+      .mockResolvedValueOnce(
+        jsonResponse(200, { data: { conversationId: "c_new" } }),
+      ); // create succeeds
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await ensureConversation("c_old", "sess1");
+
+    expect(result).toEqual({ ok: true, conversationId: "c_new" });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const mintCalls = fetchMock.mock.calls.filter(
+      (call: unknown[]) => call[0] === "/api/terminal/session",
+    );
+    expect(mintCalls).toHaveLength(2);
+    const [, openInit] = fetchMock.mock.calls[1];
+    expect(JSON.parse(openInit.body)).toEqual({ ticket: "tk_1" });
+    const [, createInit] = fetchMock.mock.calls[3];
+    expect(JSON.parse(createInit.body)).toEqual({ ticket: "tk_2" });
+  });
+
+  it("surfaces coder_not_enabled distinctly", async () => {
+    const fetchMock = vi.fn();
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { data: { ticket: "tk_1", wsUrl: "wss://x" } }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(403, {
+          error: {
+            code: "coder_not_enabled",
+            message: "The coding agent is not enabled for this account",
+          },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await ensureConversation(undefined, "sess1");
+
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe("coder_not_enabled");
+    expect(result.error).toBe("The coding agent is not enabled for this account");
+  });
+});
+
+describe("respondCoder", () => {
+  it("maps a 410 to {ok:false, code:'request_gone'}", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(410, {
+          error: { code: "request_gone", message: "no such pending request" },
+        }),
+      ),
+    );
+    const result = await respondCoder(
+      "c_1",
+      "r_1",
+      { response: "approve" },
+      "sess1",
+    );
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("request_gone");
+  });
+});
+
+describe("coder event extractors", () => {
+  it("labels coder tool calls with the coder toolset map", () => {
+    expect(
+      toolLabel({
+        kind: "event",
+        event: { type: "ToolCall", payload: { function: { name: "Shell" } } },
+      }),
+    ).toBe("Running a command");
+    expect(
+      toolLabel({
+        kind: "event",
+        event: { type: "ToolCall", payload: { function: { name: "Mystery" } } },
+      }),
+    ).toBe("Running Mystery");
+    expect(toolLabel({ kind: "end" })).toBeNull();
+  });
+
+  it("reads text parts and gates think extraction on payload.type === 'think'", () => {
+    expect(
+      textFromEvent({
+        kind: "event",
+        event: { type: "TextPart", payload: { text: "hey" } },
+      }),
+    ).toBe("hey");
+    expect(
+      thinkFromEvent({
+        kind: "event",
+        event: {
+          type: "ContentPart",
+          payload: { type: "think", think: "pondering" },
+        },
+      }),
+    ).toBe("pondering");
+    expect(
+      thinkFromEvent({
+        kind: "event",
+        event: { type: "TextPart", payload: { text: "hey" } },
+      }),
+    ).toBeNull();
+  });
+});
