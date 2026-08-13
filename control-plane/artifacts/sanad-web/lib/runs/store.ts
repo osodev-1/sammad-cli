@@ -94,17 +94,42 @@ export async function getRun(id: string): Promise<RunRow | null> {
   return rows[0] ?? null;
 }
 
+/**
+ * Flip a queued run to "running". Guarded to only match status="queued" —
+ * without this, a fast completion POST (or the reaper) landing before this
+ * UPDATE runs could resurrect an already-terminal ("succeeded"/"failed"/
+ * "lost") row back to "running" forever, since an unconditional UPDATE by id
+ * has no way to know the row moved on in the meantime.
+ */
 export async function markRunRunning(id: string): Promise<void> {
   await db
     .update(runs)
     .set({ status: "running", startedAt: new Date() })
-    .where(eq(runs.id, id));
+    .where(and(eq(runs.id, id), eq(runs.status, "queued")));
 }
 
-export async function markRunFailed(id: string, errorCode: string): Promise<void> {
+/**
+ * Flip a run to "failed". `clearIdempotencyKey` should be set true only for
+ * infra-side failures (wake_timeout, machine_error) — a caller retrying with
+ * the same Idempotency-Key after those must get a fresh attempt, not an
+ * eternal replay of `{status:"failed"}` (createRun's onConflictDoNothing
+ * replays by (deploymentId, idempotencyKey), so a poisoned key can never
+ * succeed again). Genuine run failures (no_output, budget) keep their key —
+ * replaying "failed" for those is the correct, intended behavior.
+ */
+export async function markRunFailed(
+  id: string,
+  errorCode: string,
+  opts?: { clearIdempotencyKey?: boolean }
+): Promise<void> {
   await db
     .update(runs)
-    .set({ status: "failed", errorCode, finishedAt: new Date() })
+    .set({
+      status: "failed",
+      errorCode,
+      finishedAt: new Date(),
+      ...(opts?.clearIdempotencyKey ? { idempotencyKey: null } : {}),
+    })
     .where(eq(runs.id, id));
 }
 

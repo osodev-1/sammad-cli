@@ -35,6 +35,28 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Best-effort parse of a machine error response body as `{"error":{code,
+ * message}}` (the same envelope shape lib/http/envelope.ts's err() emits) —
+ * used to tell a genuine 4xx rejection (bad bundle, bad input: the caller's
+ * fault, not retryable) apart from a 5xx/network/garbled response (the
+ * machine's fault, retryable as machine_error). Returns null for anything
+ * that isn't that exact shape, including unparseable JSON.
+ */
+function parseMachineErrorEnvelope(text: string): { code: string; message: string } | null {
+  try {
+    const body = JSON.parse(text);
+    const code = body?.error?.code;
+    const message = body?.error?.message;
+    if (typeof code === "string" && typeof message === "string") {
+      return { code, message };
+    }
+  } catch {
+    // Not JSON — falls through to the generic machine_error path.
+  }
+  return null;
+}
+
 function machineWakingResponse(): NextResponse {
   // err() has no header support and this is the one response that needs
   // Retry-After, so build the envelope directly here (same shape as err()).
@@ -156,17 +178,33 @@ export async function POST(
     return err(500, "internal_error", "agent's workspace is missing", true);
   }
 
+  // Presign before waking the machine: it's pure config + signing (no
+  // machine involved), so failing fast here — instead of after paying for a
+  // cold start — avoids a bare, post-wake 500 leaving the run stuck
+  // "queued" with a machine already up and nothing to talk to it about.
+  let traceUploadUrl: string;
+  try {
+    traceUploadUrl = await presignTracePut(runId);
+  } catch (e) {
+    console.error(`invoke: failed to presign trace upload for run ${runId}`, e);
+    await markRunFailed(runId, "storage_unconfigured");
+    return err(500, "storage_unconfigured", "SANAD_RUNS_BUCKET is not configured");
+  }
+
   let target: MachineTarget;
   try {
     const woken = await wakeMachine(workspace.id, info.env, workspace.keepWarm);
     if (woken === "timeout") {
-      await markRunFailed(runId, "wake_timeout");
+      // Infra-side failure: clear the idempotency key so a caller retrying
+      // with the same Idempotency-Key gets a fresh attempt instead of an
+      // eternal replay of this failure (see markRunFailed's docstring).
+      await markRunFailed(runId, "wake_timeout", { clearIdempotencyKey: true });
       return machineWakingResponse();
     }
     target = woken;
   } catch (e) {
     console.error(`invoke: failed to wake workspace machine for run ${runId}`, e);
-    await markRunFailed(runId, "machine_error");
+    await markRunFailed(runId, "machine_error", { clearIdempotencyKey: true });
     return err(502, "machine_error", "failed to reach the workspace machine", true);
   }
 
@@ -183,7 +221,6 @@ export async function POST(
     maxTokensPerRun: deployment.maxTokensPerRun,
   };
   const sessionToken = await mintSession(agent.ownerUserId, info.orgId, undefined, "worker-run", workspace.id);
-  const traceUploadUrl = await presignTracePut(runId);
 
   let machineRes: Response;
   try {
@@ -198,14 +235,34 @@ export async function POST(
     } as RequestInit & { duplex: "half" });
   } catch (e) {
     console.error(`invoke: machine fetch failed for run ${runId}`, e);
-    await markRunFailed(runId, "machine_error");
+    await markRunFailed(runId, "machine_error", { clearIdempotencyKey: true });
     return err(502, "machine_error", "failed to reach the workspace machine", true);
   }
 
   if (!machineRes.ok) {
     const detail = await machineRes.text().catch(() => "");
+    if (machineRes.status >= 400 && machineRes.status < 500) {
+      const parsed = parseMachineErrorEnvelope(detail);
+      if (parsed) {
+        // A 4xx with a parseable envelope is the caller's/bundle's fault
+        // (bad input, bad bundle, …), not an infra problem — pass it
+        // through verbatim, non-retryable, and keep the idempotency key: a
+        // caller fixing their bundle and retrying with the same key should
+        // NOT get a fresh run, they should get the same "you did this
+        // wrong" answer until they change something (matches genuine
+        // run-failure replay semantics, e.g. no_output/budget).
+        console.error(
+          `invoke: machine rejected run ${runId} with ${machineRes.status} ${parsed.code}`,
+          detail
+        );
+        await markRunFailed(runId, parsed.code);
+        return err(machineRes.status, parsed.code, parsed.message);
+      }
+    }
+    // 5xx, network-shaped, or an unparseable body — machine's fault, not the
+    // caller's; infra failure, so clear the idempotency key too.
     console.error(`invoke: machine rejected run ${runId} with status ${machineRes.status}`, detail);
-    await markRunFailed(runId, "machine_error");
+    await markRunFailed(runId, "machine_error", { clearIdempotencyKey: true });
     return err(502, "machine_error", "workspace machine rejected the run", true);
   }
 

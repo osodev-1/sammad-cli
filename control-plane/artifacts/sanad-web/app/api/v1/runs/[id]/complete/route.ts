@@ -3,7 +3,7 @@ import { z } from "zod";
 import { ok, err } from "@/lib/http/envelope";
 import { completeRun, getRun } from "@/lib/runs/store";
 import { getAgentById, getDeploymentById, getWorkspaceById } from "@/lib/agents/registry";
-import { getMachineByWorkspaceEnv } from "@/lib/compute/machines";
+import { getMachineByWorkspaceEnv, touchMachineLastSeen } from "@/lib/compute/machines";
 import { machineTokenMatches } from "@/lib/compute/tokens";
 
 const Body = z.object({
@@ -63,6 +63,12 @@ export async function POST(
   if (!machineTokenMatches(presented, workspace.id, machine.runNonce)) {
     return err(401, "unauthorized", "Invalid machine credential");
   }
+
+  // Proof of life: this POST only reaches here on a valid machine
+  // credential, so it's as good a staleness signal as a warm-attach probe —
+  // refresh it so lib/runs/reaper.ts's staleness check doesn't reap a run
+  // whose machine has been silently alive this whole time.
+  await touchMachineLastSeen(machine.id);
 
   let raw: unknown;
   try {

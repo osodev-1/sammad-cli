@@ -162,12 +162,16 @@ async function ensureInner(
     if (warm) {
       const stale = row.imageRef !== config.workspaceImage;
       if (!stale) {
-        if (row.keepWarm !== opts.keepWarm) {
-          await db
-            .update(workspaceMachines)
-            .set({ keepWarm: opts.keepWarm, updatedAt: new Date() })
-            .where(eq(workspaceMachines.id, row.id));
-        }
+        // Touch lastSeenAt on every warm attach, not just when keepWarm
+        // changed — this is the reaper's staleness signal (lib/runs/reaper.ts).
+        // It was previously written once at cold start (below) and never
+        // refreshed, so a run on a machine that cold-started more than
+        // staleAfterMs ago would look "silent" to the reaper even while the
+        // machine is actively answering warm probes.
+        await db
+          .update(workspaceMachines)
+          .set({ keepWarm: opts.keepWarm, lastSeenAt: new Date(), updatedAt: new Date() })
+          .where(eq(workspaceMachines.id, row.id));
         return {
           machineId: row.id,
           hash12: row.hash12,
@@ -250,6 +254,20 @@ export async function getMachineByWorkspaceEnv(workspaceId: string, env: string)
     .where(and(eq(workspaceMachines.workspaceId, workspaceId), eq(workspaceMachines.env, env)))
     .limit(1);
   return row ?? null;
+}
+
+/**
+ * Touch a machine's lastSeenAt — the reaper's staleness signal
+ * (lib/runs/reaper.ts). Called from the run-completion route
+ * (POST .../runs/{id}/complete) right after the machine bearer token is
+ * verified: a completion POST is proof the machine is alive right now, same
+ * as a successful warm-attach probe in ensureWorkspaceMachine above.
+ */
+export async function touchMachineLastSeen(machineId: string): Promise<void> {
+  await db
+    .update(workspaceMachines)
+    .set({ lastSeenAt: new Date(), updatedAt: new Date() })
+    .where(eq(workspaceMachines.id, machineId));
 }
 
 /** Router route lookup: hash12 → task IP, for workspace machines. */

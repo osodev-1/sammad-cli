@@ -27,7 +27,7 @@ export async function sweepLostRuns(staleAfterMs: number): Promise<number> {
   const cutoffMs = Date.now() - staleAfterMs;
 
   const runningRows = await db
-    .select({ id: runs.id, deploymentId: runs.deploymentId })
+    .select({ id: runs.id, deploymentId: runs.deploymentId, startedAt: runs.startedAt })
     .from(runs)
     .where(eq(runs.status, "running"));
   if (runningRows.length === 0) return 0;
@@ -72,7 +72,15 @@ export async function sweepLostRuns(staleAfterMs: number): Promise<number> {
     // Stale (or no machine row at all — the `!lastSeenAt` branch covers both
     // "no matching workspaceMachines row" and "row exists but lastSeenAt is
     // still null", e.g. a machine that never finished provisioning).
-    const isLost = !lastSeenAt || lastSeenAt.getTime() < cutoffMs;
+    const machineStale = !lastSeenAt || lastSeenAt.getTime() < cutoffMs;
+    // Belt-and-suspenders against a machine-staleness false positive (e.g.
+    // lastSeenAt not yet refreshed on a machine that just picked up this
+    // run): a run that only just started can never be reaped, regardless of
+    // what the machine row says. A null startedAt (shouldn't happen for a
+    // "running" row — markRunRunning always sets it) is treated the same
+    // way: never reap on unproven age.
+    const startedStale = row.startedAt !== null && row.startedAt.getTime() < cutoffMs;
+    const isLost = machineStale && startedStale;
     if (isLost) staleIds.push(row.id);
   }
   if (staleIds.length === 0) return 0;
