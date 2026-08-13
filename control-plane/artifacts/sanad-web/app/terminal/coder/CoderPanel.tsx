@@ -135,6 +135,22 @@ export default function CoderPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initial]);
 
+  /* Same hydration race for the persisted conversationId: SessionWorkspace's
+     uiState fetch resolves AFTER this panel mounts, so the `conversationId`
+     prop can arrive several renders late. Without this, begin() would run
+     with cidRef still undefined, call ensureConversation(undefined), and
+     mint a brand-new conversation every reload — silently orphaning the
+     persisted one (and eventually piling up against the server's
+     conversation_limit). Adopt it — but never over a conversation that's
+     already started (cidRef held, or begin() already fired): once a turn is
+     underway, the LATEST id lives in cidRef/state, not in this prop. */
+  useEffect(() => {
+    if (conversationId && !cidRef.current && !startedRef.current) {
+      cidRef.current = conversationId;
+      setCid(conversationId);
+    }
+  }, [conversationId]);
+
   /* Open (or create) the conversation, then catch the panel up on whatever
      the server already knows: a turn still running (resume it live) or
      requests still awaiting an answer (fold them in as an answerable
@@ -215,8 +231,11 @@ export default function CoderPanel({
        gone) and resend ONCE.
      - CONNECTION DROP mid-turn: the turn keeps running server-side; we
        re-attach from the last seen seq (request cards replay too) and keep
-       trying for ~6 minutes. A sessionStorage anchor lets a full page reload
-       resume the same turn. */
+       trying for ~6 minutes. A full page reload resumes the same turn via
+       begin()'s server-authoritative fetchCoderTurn (using the persisted
+       conversationId), NOT via the sessionStorage anchor below — those
+       writes are currently vestigial (nothing reads the anchor back),
+       ledgered for a P2 cleanup rather than removed here. */
   const runTurn = useCallback(
     async (
       text: string,

@@ -143,6 +143,14 @@ function requestSummary(b: RequestBlock): string {
 
 function requestOutcome(b: RequestBlock): string | undefined {
   if (b.state !== "resolved" || !b.resolution) return undefined;
+  // A rehydrated block's resolution is `{ outcome }` (fromStored's synthetic
+  // shape) — not the live wire shape (`response`/`answers`). Check this
+  // FIRST: on a second toStored pass over a rehydrated block, `response`/
+  // `answers` are absent, so without this branch the outcome would be
+  // silently dropped and the card would render bare "Resolved"/"Answered"
+  // from the second reload on.
+  const outcome = b.resolution.outcome;
+  if (typeof outcome === "string") return outcome;
   if (b.requestType === "approval") {
     const response = b.resolution.response;
     return typeof response === "string" ? response : undefined;
@@ -203,12 +211,16 @@ export function toStored(messages: CoderMessage[]): StoredCoderMessage[] {
           const outcome = requestOutcome(b);
           return {
             kind: "request",
-            requestId: b.requestId,
+            // Clipped to lib/sessions/state.ts's zod bounds (requestId
+            // max 128, outcome max 200) — an oversized value here would
+            // fail the PATCH route's safeParse and silently take down
+            // persistence for the WHOLE session, not just this block.
+            requestId: clip(b.requestId, 128),
             requestType: b.requestType,
             summary: requestSummary(b),
             // PENDING requests never survive a restore as answerable.
             state: b.state === "resolved" ? "resolved" : "cancelled",
-            ...(outcome ? { outcome } : {}),
+            ...(outcome ? { outcome: clip(outcome, 200) } : {}),
           };
         }),
     };

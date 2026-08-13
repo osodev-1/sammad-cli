@@ -7,6 +7,7 @@ import {
   type CoderMessage,
 } from "@/lib/coder/transcript";
 import type { CoderItem } from "@/lib/coder/types";
+import { coderBlockState } from "@/lib/sessions/state";
 
 const approvalRequest = (requestId: string): CoderItem => ({
   kind: "request",
@@ -367,5 +368,82 @@ describe("coder transcript persistence (toStored / fromStored)", () => {
     const stored = toStored([{ role: "assistant", blocks }]);
     const storedBlocks = stored[0].role === "assistant" ? stored[0].blocks : [];
     expect(storedBlocks).toHaveLength(80);
+  });
+
+  it("double round-trip (toStored -> fromStored -> toStored) preserves a RESOLVED block's outcome and a CANCELLED block's state/summary", () => {
+    const live: CoderMessage[] = [
+      {
+        role: "assistant",
+        blocks: [
+          {
+            kind: "request",
+            requestId: "r1",
+            requestType: "approval",
+            payload: { id: "r1", action: "run command", description: "npm test" },
+            state: "resolved",
+            resolution: { response: "approve" },
+          },
+          {
+            kind: "request",
+            requestId: "r2",
+            requestType: "approval",
+            payload: { id: "r2", action: "delete file", description: "rm foo.txt" },
+            state: "cancelled",
+          },
+        ],
+      },
+    ];
+    const storedOnce = toStored(live);
+    const restored = fromStored(storedOnce);
+    const storedTwice = toStored(restored);
+
+    const blocksOnce = storedOnce[0].role === "assistant" ? storedOnce[0].blocks : [];
+    const blocksTwice = storedTwice[0].role === "assistant" ? storedTwice[0].blocks : [];
+
+    // RESOLVED block: outcome survives the second pass unchanged (this is
+    // the exact gap Finding 3 closed — requestOutcome must read a
+    // rehydrated block's `resolution.outcome`, not just live `response`/
+    // `answers`, or this would regress to "Resolved" with no outcome).
+    expect(blocksTwice[0]).toEqual(blocksOnce[0]);
+    expect(blocksTwice[0].kind === "request" && blocksTwice[0].outcome).toBe("approve");
+    expect(blocksTwice[0].kind === "request" && blocksTwice[0].state).toBe("resolved");
+
+    // CANCELLED block: state and summary both survive the second pass.
+    expect(blocksTwice[1].kind === "request" && blocksTwice[1].state).toBe("cancelled");
+    expect(blocksTwice[1].kind === "request" && blocksTwice[1].summary).toBe(
+      blocksOnce[1].kind === "request" ? blocksOnce[1].summary : undefined,
+    );
+    expect(blocksTwice[1]).toEqual(blocksOnce[1]);
+  });
+
+  it("an oversized answers digest is clipped to fit the zod `outcome` bound (max 200) and the stored block still validates", () => {
+    const longAnswer = "x".repeat(250);
+    const live: CoderMessage[] = [
+      {
+        role: "assistant",
+        blocks: [
+          {
+            kind: "request",
+            requestId: "r1",
+            requestType: "question",
+            payload: { id: "r1", questions: [{ question: "Pick one", options: [] }] },
+            state: "resolved",
+            resolution: { answers: { q1: longAnswer } },
+          },
+        ],
+      },
+    ];
+    const stored = toStored(live);
+    const block = stored[0].role === "assistant" ? stored[0].blocks[0] : null;
+    expect(block?.kind).toBe("request");
+    const outcome = block && block.kind === "request" ? block.outcome : undefined;
+    expect(outcome).toBeDefined();
+    expect(outcome!.length).toBeLessThanOrEqual(200);
+
+    // The oversized-input case is exactly what Finding 2 guards against: an
+    // unclipped digest here would fail this safeParse, and (per the real
+    // PATCH route) silently take down persistence for the whole session.
+    const parsed = coderBlockState.safeParse(block);
+    expect(parsed.success).toBe(true);
   });
 });
