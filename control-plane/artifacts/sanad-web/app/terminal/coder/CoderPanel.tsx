@@ -116,6 +116,13 @@ export default function CoderPanel({
   const drainingRef = useRef(false);
   const lastItemAtRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+  /* Latest-value ref for the persist-upward callback (AP's onStatusPhaseRef
+     pattern in SessionWorkspace): begin() must NOT depend on this prop
+     directly — an inline arrow from the parent would give begin() a new
+     identity on every parent render, re-arming startedRef's retry gate and
+     firing a fresh ensureConversation() each time while phase is "error". */
+  const onConversationIdRef = useRef(onConversationId);
+  onConversationIdRef.current = onConversationId;
 
   /* If the persisted transcript arrives after mount (hydration race), adopt
      it — but never over a conversation that already started. */
@@ -147,7 +154,7 @@ export default function CoderPanel({
     const newCid = res.conversationId;
     cidRef.current = newCid;
     setCid(newCid);
-    onConversationId?.(newCid);
+    onConversationIdRef.current?.(newCid);
 
     const state = await fetchCoderTurn(newCid, sessionId);
     if (state?.turn?.status === "running") {
@@ -177,7 +184,7 @@ export default function CoderPanel({
       setMessages((m) => [...m, { role: "assistant", blocks, at: Date.now() }]);
     }
     setPhase("ready");
-  }, [sessionId, onConversationId]);
+  }, [sessionId]);
 
   /* Start on first reveal — opening the tab is intent to use it (like a
      terminal), so waking the machine here is expected. */
@@ -485,11 +492,19 @@ export default function CoderPanel({
     // A cancelled stream ends on its own; "busy" clears via its retry timer.
   }, [cid, sessionId]);
 
-  /* Resolve a pending approval/question request. While a live turn is
-     streaming, the journal delivers `request_resolved` on its own — folding
-     it here too would race the journal's version. Without a live follower
-     (answering a card restored after reload), fold the resolution locally so
-     the card updates immediately after the 200. */
+  /* Resolve a pending approval/question request. Only skip the local fold
+     when the answered card is the LIVE TAIL of an actively streaming turn —
+     that's the one case where the journal is guaranteed to deliver its own
+     `request_resolved` moments later, and folding here too would just race
+     it. Every other case (not streaming, OR streaming but the card sits in
+     an earlier message — e.g. its turn's follower gave up or a busy-retry
+     replayed the request into a new message pair, leaving the old copy
+     behind) has no live follower for that card, so we fold optimistically:
+     otherwise it would stay pending+interactive after a successful 200, and
+     a second click would surface `request_gone` on an already-answered
+     request. The "is it the tail" check reads `prev.length` inside the
+     updater (not the outer `messages` closure) so it reflects the state at
+     the moment this update actually applies, not at call time. */
   const respond = useCallback(
     async (mi: number, block: RequestBlock, payload: RespondPayload) => {
       if (!cid) return;
@@ -497,25 +512,25 @@ export default function CoderPanel({
       setRespondBusy((prev) => ({ ...prev, [requestId]: true }));
       const result = await respondCoder(cid, requestId, payload, sessionId);
       if (result.ok) {
-        if (phase !== "streaming") {
-          setMessages((prev) => {
-            const next = [...prev];
-            const m = next[mi];
-            if (m && m.role === "assistant") {
-              next[mi] = {
-                role: "assistant",
-                at: m.at,
-                blocks: reduce(m.blocks, {
-                  kind: "request_resolved",
-                  requestId,
-                  requestType,
-                  resolution: payload as unknown as Record<string, unknown>,
-                }),
-              };
-            }
-            return next;
-          });
-        }
+        setMessages((prev) => {
+          const isLiveTail = phase === "streaming" && mi === prev.length - 1;
+          if (isLiveTail) return prev;
+          const next = [...prev];
+          const m = next[mi];
+          if (m && m.role === "assistant") {
+            next[mi] = {
+              role: "assistant",
+              at: m.at,
+              blocks: reduce(m.blocks, {
+                kind: "request_resolved",
+                requestId,
+                requestType,
+                resolution: payload as unknown as Record<string, unknown>,
+              }),
+            };
+          }
+          return next;
+        });
       } else if (result.code === "request_gone") {
         setMessages((prev) => {
           const next = [...prev];
@@ -563,11 +578,19 @@ export default function CoderPanel({
 
   if (!visible) return null;
 
-  const hasPendingRequest = messages.some(
-    (m) =>
-      m.role === "assistant" &&
-      m.blocks.some((b) => b.kind === "request" && b.state === "pending"),
-  );
+  // Scoped to the LAST message only: consume() folds exclusively into
+  // messages[length-1], so an earlier message's request block can never be
+  // reached by a later request_cancelled/request_resolved fold (its turn's
+  // follower may have given up, or a busy-retry replayed the request into a
+  // NEW message pair, stranding the old copy pending forever). Scanning the
+  // whole transcript would let that stranded card hijack the status strip
+  // permanently, masking the activity label and the stall watchdog on every
+  // later turn.
+  const lastMessage = messages[messages.length - 1];
+  const hasPendingRequest =
+    !!lastMessage &&
+    lastMessage.role === "assistant" &&
+    lastMessage.blocks.some((b) => b.kind === "request" && b.state === "pending");
   const composerDisabled = phase === "error";
 
   return (
