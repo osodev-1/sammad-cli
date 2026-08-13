@@ -6,6 +6,7 @@ import {
   getAgentByName,
   OwnerRequiredError,
   setDeploymentStatus,
+  VersionMismatchError,
 } from "@/lib/agents/registry";
 
 function isEnv(v: unknown): v is "dev" | "prod" {
@@ -50,6 +51,11 @@ export async function POST(
     if (e instanceof OwnerRequiredError) {
       return err(409, "owner_required", e.message);
     }
+    // 404, not 403 — a versionId from another agent must behave as not
+    // found, same information-hiding rule as a cross-org agent name.
+    if (e instanceof VersionMismatchError) {
+      return err(404, "version_not_found", e.message);
+    }
     console.error("deployment create failed", e);
     return err(500, "internal_error", "Failed to create deployment", true);
   }
@@ -81,7 +87,12 @@ export async function PATCH(
   }
 
   try {
-    await setDeploymentStatus(agent.id, body.env, body.status);
+    const matched = await setDeploymentStatus(agent.id, body.env, body.status);
+    if (!matched) {
+      // Same code Task 5's invoke gate uses for "no active deployment" — a
+      // pause/resume with nothing live to act on is not success.
+      return err(404, "not_deployed", "no active deployment for env");
+    }
     return ok({ agentId: agent.id, env: body.env, status: body.status });
   } catch (e) {
     console.error("deployment status update failed", e);

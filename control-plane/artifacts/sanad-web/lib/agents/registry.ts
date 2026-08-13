@@ -10,6 +10,19 @@ export class OwnerRequiredError extends Error {
   }
 }
 
+/**
+ * Thrown when a deployment's versionId doesn't belong to the agent it's
+ * being deployed to. Maps to 404, not 403 — same information-hiding rule as
+ * a cross-org agent name: a caller holding some other agent's version id
+ * must not learn anything about whether that id exists at all.
+ */
+export class VersionMismatchError extends Error {
+  readonly code = "version_not_found";
+  constructor() {
+    super("version does not belong to this agent");
+  }
+}
+
 /** sha256 of the bundle's file map, independent of key insertion order. */
 export function bundleContentHash(files: Record<string, string>): string {
   const canonical = JSON.stringify(files, Object.keys(files).sort());
@@ -113,6 +126,19 @@ export async function createDeployment(p: {
   if (!agent) throw new Error("agent not found");
   if (agent.status === "orphaned") throw new OwnerRequiredError();
 
+  // The versionId is client-supplied — without this check a caller holding
+  // any agent-version id could splice another agent's bundle into this
+  // agent's deployment history.
+  const versionRows = await db
+    .select({ id: agentVersions.id, agentId: agentVersions.agentId })
+    .from(agentVersions)
+    .where(eq(agentVersions.id, p.versionId))
+    .limit(1);
+  const version = versionRows[0];
+  if (!version || version.agentId !== p.agentId) {
+    throw new VersionMismatchError();
+  }
+
   // At most one non-superseded deployment may exist per (agentId, env): retire
   // whatever was active/paused before wiring in the new one. A blind
   // conditional update is race-free enough here — single-replica control
@@ -140,23 +166,43 @@ export async function createDeployment(p: {
   return { id };
 }
 
+/**
+ * Pause/resume the live deployment for an agent+env. Returns whether a
+ * target row existed — callers must not report success on a no-op update.
+ *
+ * drizzle's update() result shape for row-matched-count is driver-dependent
+ * (and awkward to assert on through the mocked db in tests), so this uses an
+ * explicit select-then-update instead of trusting an update result's row
+ * count. Same single-replica assumption as ensureInFlight in
+ * lib/compute/sessions.ts:286-291 — the window between the select and the
+ * update is not a concern here.
+ */
 export async function setDeploymentStatus(
   agentId: string,
   env: string,
   status: "active" | "paused"
-): Promise<void> {
+): Promise<boolean> {
   // Never resurrect a superseded row via pause/resume — only touch whatever
   // is currently the live (active or paused) deployment for this env.
-  await db
-    .update(deployments)
-    .set({ status, updatedAt: new Date() })
+  const rows = await db
+    .select({ id: deployments.id })
+    .from(deployments)
     .where(
       and(
         eq(deployments.agentId, agentId),
         eq(deployments.env, env),
         inArray(deployments.status, ["active", "paused"])
       )
-    );
+    )
+    .limit(1);
+  const target = rows[0];
+  if (!target) return false;
+
+  await db
+    .update(deployments)
+    .set({ status, updatedAt: new Date() })
+    .where(eq(deployments.id, target.id));
+  return true;
 }
 
 /** Resolve an agent by name, scoped to the org — never crosses org boundaries. */
