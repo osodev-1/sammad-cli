@@ -30,7 +30,7 @@
 - Test: existing `tests/unit/architect-client.test.ts` must pass UNCHANGED (it exercises `askArchitect`'s stream reassembly end-to-end — that is the gate)
 
 **Interfaces:**
-- Produces: `export async function streamNdjson<T>(res: Response, onItem: (item: T) => void): Promise<void>` — byte-for-byte the logic currently at `lib/architect/client.ts:68-101` (buffer across chunks, split on `\n`, skip unparseable lines, flush trailing buffer on EOF, `break` on read errors — caller re-follows). Generic `T` replaces `ArchitectItem`; the JSON.parse cast becomes `as T`.
+- Produces: `export async function streamNdjson<T>(res: Response, onItem: (item: T) => void): Promise<void>` — byte-for-byte the logic currently at `lib/architect/client.ts:68-101` (buffer across chunks, split on `\n`, skip unparsable lines, flush trailing buffer on EOF, `break` on read errors — caller re-follows). Generic `T` replaces `ArchitectItem`; the JSON.parse cast becomes `as T`.
 - `lib/architect/client.ts` keeps its exact exported surface; internally `await streamNdjson<ArchitectItem>(res, onItem)`.
 
 - [ ] **Step 1: Green baseline** — `cd /Users/omar/Development/sammad-cli/control-plane/artifacts/sanad-web && pnpm test tests/unit/architect-client.test.ts` → passes.
