@@ -62,6 +62,16 @@ class TerminalSettings:
     # machine during turns, a hung turn must cancel rather than hold the
     # machine forever.
     architect_max_turn_seconds: float = 1800.0
+    # -- worker runs (P0) -------------------------------------------------------
+    # Default-off master switch for ephemeral worker runs; "1" is the only truthy.
+    worker_enabled: bool = False
+    # Per-run budgets — a worker run is afk (no attached browser can cancel it
+    # early), so these are the only backstop against a runaway subprocess.
+    worker_max_turn_seconds: float = 900.0
+    worker_max_steps_per_turn: int = 100
+    worker_max_tokens_per_run: int = 2_000_000
+    # Keep the underlying compute warm between runs instead of scaling to zero.
+    keep_warm: bool = False
 
     @classmethod
     def load(cls, env: Mapping[str, str] | None = None) -> TerminalSettings:
@@ -128,4 +138,9 @@ class TerminalSettings:
             coder_max_steps_per_turn=int(e.get("CODER_MAX_STEPS_PER_TURN", "200")),
             coder_max_conversations=int(e.get("CODER_MAX_CONVERSATIONS", "3")),
             architect_max_turn_seconds=float(e.get("ARCHITECT_MAX_TURN_SECONDS", "1800")),
+            worker_enabled=e.get("WORKER_ENABLED", "") == "1",
+            worker_max_turn_seconds=float(e.get("WORKER_MAX_TURN_SECONDS", "900")),
+            worker_max_steps_per_turn=int(e.get("WORKER_MAX_STEPS_PER_TURN", "100")),
+            worker_max_tokens_per_run=int(e.get("WORKER_MAX_TOKENS_PER_RUN", "2000000")),
+            keep_warm=e.get("KEEP_WARM", "") == "1",
         )

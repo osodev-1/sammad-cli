@@ -21,6 +21,7 @@ class LazySubcommandGroup(typer.core.TyperGroup):
         "blueprint": ("kimi_cli.cli.blueprint", "cli", "Validate and inspect the blueprint."),
         "vis": ("kimi_cli.cli.vis", "cli", "Run Kimi Agent Tracing Visualizer."),
         "web": ("kimi_cli.cli.web", "cli", "Run Kimi Code CLI web interface."),
+        "agent": ("kimi_cli.cli.worker", "cli", "Deploy and operate worker agents."),
     }
     lazy_command_order: tuple[str, ...] = (
         "info",
@@ -30,6 +31,7 @@ class LazySubcommandGroup(typer.core.TyperGroup):
         "blueprint",
         "vis",
         "web",
+        "agent",
     )
 
     # Click options that support optional values.  When the flag is present

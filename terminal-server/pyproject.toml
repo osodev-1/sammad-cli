@@ -5,8 +5,12 @@ description = "WebSocket PTY bridge + workspace API that runs the governed sanad
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    # kimi-cli is a dependency solely so the `sanad` console script is
-    # co-installed in this environment; sanad_terminal never imports kimi_cli.
+    # kimi-cli is a dependency so the `sanad` console script is co-installed
+    # in this environment; sanad_terminal never imports kimi_cli EXCEPT for
+    # routes_worker.py's use of kimi_cli.worker (derive_agent_spec /
+    # load_worker_spec / render_input_prompt) and kimi_cli.exception
+    # (AgentSpecError) — the one sanctioned exception, since deriving a
+    # worker's agent spec is the CLI's own logic and must not be duplicated.
     "kimi-cli",
     "sanad-blueprint",
     "fastapi>=0.115.0",

@@ -9,6 +9,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import JSONResponse
 from loguru import logger
@@ -51,6 +52,7 @@ from sanad_terminal.workspace import (
 def create_app(
     settings: TerminalSettings | None = None,
     control_plane: ControlPlaneClient | None = None,
+    worker_upload_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     resolved = settings or TerminalSettings.load()
     cp = control_plane or ControlPlaneClient(
@@ -83,6 +85,10 @@ def create_app(
         idle_stopper.add_probe(
             lambda: runners_hold_machine(resolved.idle_stop_seconds)
         )
+        # Worker-serving machines can opt out of scale-to-zero entirely (the
+        # control plane sets this per-workspace so a hot path never eats a
+        # cold-start latency hit).
+        idle_stopper.add_probe(lambda: resolved.keep_warm)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -122,6 +128,10 @@ def create_app(
         from sanad_terminal.coder_runner import shutdown_conversations
 
         await shutdown_conversations()
+        from sanad_terminal.run_runner import _runs, drop_run
+
+        for run_id in list(_runs):
+            await drop_run(run_id)
         await manager.shutdown()
         await cp.aclose()
 
@@ -130,6 +140,12 @@ def create_app(
     app.state.control_plane = cp
     app.state.manager = manager
     app.state.idle_stopper = idle_stopper
+    # Test seam for worker runs' trace-upload client (routes_worker.py's
+    # `_make_on_finished` -> `httpx.AsyncClient(transport=...)`), threaded the
+    # same way `control_plane` is: production leaves this `None` (a real
+    # client); tests inject an `httpx.MockTransport` so a completed worker
+    # turn's trace PUT never reaches the network by accident.
+    app.state.worker_upload_transport = worker_upload_transport
 
     from sanad_terminal.routes_workspace import register_error_handlers, router
 
@@ -156,6 +172,20 @@ def create_app(
         return JSONResponse(
             status_code=404,
             content={"error": {"code": "coder_disabled", "message": "coder panel is not enabled"}},
+        )
+
+    from sanad_terminal.routes_worker import WorkerDisabled
+    from sanad_terminal.routes_worker import router as worker_router
+
+    app.include_router(worker_router)
+
+    @app.exception_handler(WorkerDisabled)
+    async def _worker_disabled(request, exc):  # noqa: ANN001, ANN202
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": {"code": "worker_disabled", "message": "worker runs are not enabled"}
+            },
         )
 
     register_error_handlers(app)

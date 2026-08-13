@@ -89,7 +89,12 @@ async function probeAgentd(
   }
 }
 
-async function waitForRunning(
+/**
+ * Poll ECS until the task is RUNNING with a private IP (or throw on a
+ * terminal failure). Exported for reuse by lib/compute/machines.ts — same
+ * wake state machine, keyed per (workspace, env) instead of per session.
+ */
+export async function waitForRunning(
   config: AwsComputeConfig,
   taskArn: string,
 ): Promise<string> {
@@ -105,7 +110,11 @@ async function waitForRunning(
   throw new Error("workspace task did not reach RUNNING in time");
 }
 
-async function waitForAgentd(baseUrl: string): Promise<void> {
+/**
+ * Poll agentd's /healthz through the router until it answers OK. Exported
+ * for reuse by lib/compute/machines.ts (see waitForRunning above).
+ */
+export async function waitForAgentd(baseUrl: string): Promise<void> {
   const deadline = Date.now() + HEALTH_TIMEOUT_MS;
   let lastError = "";
   while (Date.now() < deadline) {

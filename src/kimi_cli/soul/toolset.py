@@ -340,6 +340,10 @@ class KimiToolset:
     def force_stop_turn(self) -> bool:
         return self._force_stop_turn
 
+    def request_stop_turn(self) -> None:
+        """Ask the soul to end the turn after the current step (used by worker tools)."""
+        self._force_stop_turn = True
+
     def handle(self, tool_call: ToolCall) -> HandleResult:
         token = current_tool_call.set(tool_call)
         try:
