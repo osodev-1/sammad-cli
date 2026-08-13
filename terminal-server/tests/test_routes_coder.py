@@ -121,6 +121,7 @@ def test_malformed_conversation_id_is_400(client: TestClient):
     assert res.status_code in (400, 404)  # 400 from our guard; 404 if routing rejects first
 
 
+@pytest.mark.skip(reason="P0 deny posture flipped by the P1a bridge; Task 4 replaces this with the approval round-trip")
 def test_gated_tool_call_is_denied_by_default(client: TestClient):
     """P0 HTTP-level golden test: an ApprovalRequest surfaced by the agent is
     rejected (-32601) with no respond endpoint in sight, and the turn ends."""
