@@ -246,6 +246,49 @@ export async function getActiveDeployment(agentId: string, env: string) {
   return rows[0] ?? null;
 }
 
+/**
+ * The live (non-superseded) deployment for an agent+env — active OR paused.
+ * Unlike getActiveDeployment (status:"active" only, by design — see its
+ * docstring), the invoke route needs to tell "never deployed" (404
+ * not_deployed) apart from "deployed but paused" (409 paused), which
+ * requires seeing the paused row too. Same supersede invariant as
+ * setDeploymentStatus's lookup: at most one active/paused row per
+ * (agentId, env).
+ */
+export async function getLiveDeployment(agentId: string, env: string) {
+  const rows = await db
+    .select()
+    .from(deployments)
+    .where(
+      and(
+        eq(deployments.agentId, agentId),
+        eq(deployments.env, env),
+        inArray(deployments.status, ["active", "paused"])
+      )
+    )
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/** The bundle (file map) for a specific agent version, by id. */
+export async function getVersionBundle(
+  versionId: string
+): Promise<{ files: Record<string, string> } | null> {
+  const rows = await db
+    .select({ bundle: agentVersions.bundle })
+    .from(agentVersions)
+    .where(eq(agentVersions.id, versionId))
+    .limit(1);
+  const row = rows[0];
+  return (row?.bundle as { files: Record<string, string> } | undefined) ?? null;
+}
+
+/** Fetch a workspace row by id — used to read keepWarm before waking its machine. */
+export async function getWorkspaceById(id: string) {
+  const rows = await db.select().from(workspaces).where(eq(workspaces.id, id)).limit(1);
+  return rows[0] ?? null;
+}
+
 /** List every agent in the org, across all its workspaces. */
 export async function listAgentsForOrg(orgId: string) {
   return db
