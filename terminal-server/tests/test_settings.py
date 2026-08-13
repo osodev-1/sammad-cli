@@ -93,3 +93,9 @@ def test_architect_budget_defaults_and_parses(base_env):
     assert TerminalSettings.load(env=base_env).architect_max_turn_seconds == 1800.0
     s = TerminalSettings.load(env={**base_env, "ARCHITECT_MAX_TURN_SECONDS": "60"})
     assert s.architect_max_turn_seconds == 60.0
+
+
+def test_trust_store_key_parses(base_env):
+    assert TerminalSettings.load(env=base_env).trust_store_key == ""
+    s = TerminalSettings.load(env={**base_env, "TRUST_STORE_KEY": "abc"})
+    assert s.trust_store_key == "abc"

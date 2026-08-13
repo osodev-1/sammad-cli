@@ -8,6 +8,7 @@ from sanad_terminal.blueprint_trust import (
     file_sha256,
     is_executable_path,
     load_trust,
+    load_trust_checked,
     record_trust,
     trust_file_for,
     trust_statuses,
@@ -138,3 +139,53 @@ def test_walker_covers_every_gated_kind(tmp_path: Path):
         "apply",
     )
     assert trust_statuses(root)[".sanad/mcps/context7/mcp.yaml"]["status"] == "trusted"
+
+
+KEY = "k" * 32
+
+
+def test_signed_store_round_trips_with_key(tmp_path):
+    root = _workspace(tmp_path)
+    _write_skill(root, "review", "do the review")
+    digest = file_sha256(root / ".sanad/skills/review/SKILL.md")
+    record_trust(root, {".sanad/skills/review/SKILL.md": digest}, "manual", key=KEY)
+    entries, tampered = load_trust_checked(root, key=KEY)
+    assert not tampered
+    assert entries[".sanad/skills/review/SKILL.md"]["sha256"] == digest
+    raw = json.loads(trust_file_for(root).read_text())
+    assert raw["version"] == 2 and isinstance(raw.get("sig"), str)
+
+
+def test_tampered_store_fails_closed(tmp_path):
+    root = _workspace(tmp_path)
+    _write_skill(root, "review", "do the review")
+    digest = file_sha256(root / ".sanad/skills/review/SKILL.md")
+    record_trust(root, {".sanad/skills/review/SKILL.md": digest}, "manual", key=KEY)
+    # The in-session-agent attack: edit entries directly, keep the old sig.
+    raw = json.loads(trust_file_for(root).read_text())
+    raw["entries"][".sanad/skills/evil/SKILL.md"] = {"sha256": "f" * 64, "source": "manual", "at": 0}
+    trust_file_for(root).write_text(json.dumps(raw))
+    entries, tampered = load_trust_checked(root, key=KEY)
+    assert tampered and entries == {}
+    statuses = trust_statuses(root, key=KEY)
+    assert statuses and all(e["status"] == "tampered" for e in statuses.values())
+
+
+def test_legacy_unsigned_store_with_key_fails_closed(tmp_path):
+    root = _workspace(tmp_path)
+    _write_skill(root, "review", "x")
+    digest = file_sha256(root / ".sanad/skills/review/SKILL.md")
+    record_trust(root, {".sanad/skills/review/SKILL.md": digest}, "manual")  # no key: v1
+    entries, tampered = load_trust_checked(root, key=KEY)
+    assert tampered and entries == {}
+
+
+def test_no_key_keeps_legacy_behavior(tmp_path):
+    root = _workspace(tmp_path)
+    _write_skill(root, "review", "x")
+    digest = file_sha256(root / ".sanad/skills/review/SKILL.md")
+    record_trust(root, {".sanad/skills/review/SKILL.md": digest}, "manual")
+    entries, tampered = load_trust_checked(root)
+    assert not tampered and entries
+    raw = json.loads(trust_file_for(root).read_text())
+    assert raw["version"] == 1 and "sig" not in raw

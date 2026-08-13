@@ -47,7 +47,7 @@ from sanad_terminal.blueprint_trust import (
     remove_trust,
     trust_statuses,
 )
-from sanad_terminal.routes_workspace import workspace_root
+from sanad_terminal.routes_workspace import _settings, workspace_root
 
 router = APIRouter(prefix="/internal/blueprint")
 
@@ -107,14 +107,14 @@ def _plan_error(exc: PlanError) -> JSONResponse:
     )
 
 
-def _annotate_trust(payload: dict, root: Path) -> dict:
+def _annotate_trust(payload: dict, root: Path, *, key: str = "") -> dict:
     """Stamp each node with its executable definition's trust state.
 
     A skill's gated file is the SKILL.md beside its manifest; an MCP server's
     gated file is the manifest itself (it names the command/URL a session
     would actually run). Nodes without a gated file carry no ``trust`` key.
     """
-    statuses = trust_statuses(root)
+    statuses = trust_statuses(root, key=key)
     if not statuses:
         return payload
     for node in payload.get("nodes", []):
@@ -170,7 +170,7 @@ async def graph(request: Request, root: Root) -> JSONResponse:
     """The compiled graph (nodes, edges, diagnostics) for the workspace."""
     index = index_blueprint(_sanad_dir(root))
     compiled = compile_graph(index)
-    payload = _annotate_trust(compiled.to_dict(), root)
+    payload = _annotate_trust(compiled.to_dict(), root, key=_settings(request).trust_store_key)
     payload = await _annotate_git(payload, request, root)
     payload["initialized"] = _sanad_dir(root).is_dir()
     return JSONResponse(payload)
@@ -316,6 +316,8 @@ async def apply(request: Request, root: Root, body: ApplyBody) -> JSONResponse:
             content={"error": {"code": "invalid_plan", "message": "malformed plan"}},
         )
 
+    trust_key = _settings(request).trust_store_key
+
     async with _lock_for(root):
         try:
             result = await asyncio.to_thread(apply_plan, root, parsed)
@@ -350,14 +352,14 @@ async def apply(request: Request, root: Root, body: ApplyBody) -> JSONResponse:
             if is_executable_path(op.path) and (root / op.path).is_file()
         }
         if applied_executables:
-            record_trust(root, applied_executables, "apply")
+            record_trust(root, applied_executables, "apply", key=trust_key)
         # Deleted executable definitions lose their trust entries — an orphaned
         # record must never vouch for content recreated later at the same path.
         deleted_executables = [
             op.path for op in parsed.operations if op.op == "delete" and is_executable_path(op.path)
         ]
         if deleted_executables:
-            remove_trust(root, deleted_executables)
+            remove_trust(root, deleted_executables, key=trust_key)
 
         # R3: every governed apply lands in git — the durable, diffable history
         # the committedness ring and the History timeline read from. Scoped to
@@ -366,7 +368,9 @@ async def apply(request: Request, root: Root, body: ApplyBody) -> JSONResponse:
         # ring shows uncommitted until the next commit.
         committed = await _auto_commit(request, root, f"blueprint: {parsed.summary} [{tx_id}]")
 
-        graph = _annotate_trust(compile_graph(index_blueprint(_sanad_dir(root))).to_dict(), root)
+        graph = _annotate_trust(
+            compile_graph(index_blueprint(_sanad_dir(root))).to_dict(), root, key=trust_key
+        )
         graph = await _annotate_git(graph, request, root)
 
     return JSONResponse({"ok": True, "txId": tx_id, "committed": committed, "graph": graph})
@@ -392,6 +396,8 @@ async def rollback_tx(request: Request, root: Root, body: RollbackBody) -> JSONR
             status_code=404,
             content={"error": {"code": "not_found", "message": "no such transaction"}},
         )
+    trust_key = _settings(request).trust_store_key
+
     async with _lock_for(root):
         record = json.loads(record_path.read_text(encoding="utf-8"))
         after = record.get("after")
@@ -426,26 +432,29 @@ async def rollback_tx(request: Request, root: Root, body: RollbackBody) -> JSONR
             if is_executable_path(e["path"]) and (root / e["path"]).is_file()
         }
         if restored_exec:
-            record_trust(root, restored_exec, "apply")
+            record_trust(root, restored_exec, "apply", key=trust_key)
         gone_exec = [
             e["path"]
             for e in record.get("rollback", [])
             if is_executable_path(e["path"]) and not (root / e["path"]).is_file()
         ]
         if gone_exec:
-            remove_trust(root, gone_exec)
+            remove_trust(root, gone_exec, key=trust_key)
         committed = await _auto_commit(
             request, root, f"blueprint: revert {record.get('summary', body.txId)} [{body.txId}]"
         )
-        graph = _annotate_trust(compile_graph(index_blueprint(_sanad_dir(root))).to_dict(), root)
+        graph = _annotate_trust(
+            compile_graph(index_blueprint(_sanad_dir(root))).to_dict(), root, key=trust_key
+        )
         graph = await _annotate_git(graph, request, root)
     return JSONResponse({"ok": True, "committed": committed, "graph": graph})
 
 
 @router.get("/trust")
-async def trust_list(root: Root) -> JSONResponse:
+async def trust_list(request: Request, root: Root) -> JSONResponse:
     """Per-file trust state for every gated executable definition on disk."""
-    entries = await asyncio.to_thread(trust_statuses, root)
+    key = _settings(request).trust_store_key
+    entries = await asyncio.to_thread(trust_statuses, root, key=key)
     return JSONResponse({"entries": entries})
 
 
@@ -454,7 +463,7 @@ class TrustBody(BaseModel):
 
 
 @router.post("/trust")
-async def trust_review(root: Root, body: TrustBody) -> JSONResponse:
+async def trust_review(request: Request, root: Root, body: TrustBody) -> JSONResponse:
     """The one-time manual review: trust a file at its CURRENT content.
 
     This is the UI action for definitions that arrived outside the governed
@@ -468,6 +477,7 @@ async def trust_review(root: Root, body: TrustBody) -> JSONResponse:
             status_code=400,
             content={"error": {"code": "not_executable", "message": "not a gated definition path"}},
         )
+    key = _settings(request).trust_store_key
     async with _lock_for(root):
         target = root / rel
         if not target.is_file():
@@ -476,6 +486,6 @@ async def trust_review(root: Root, body: TrustBody) -> JSONResponse:
                 content={"error": {"code": "not_found", "message": "no such file"}},
             )
         digest = await asyncio.to_thread(file_sha256, target)
-        await asyncio.to_thread(record_trust, root, {rel: digest}, "manual")
-        entries = await asyncio.to_thread(trust_statuses, root)
+        await asyncio.to_thread(record_trust, root, {rel: digest}, "manual", key=key)
+        entries = await asyncio.to_thread(trust_statuses, root, key=key)
     return JSONResponse({"ok": True, "entries": entries})
