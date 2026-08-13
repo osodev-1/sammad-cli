@@ -17,7 +17,7 @@
  * contract, beyond staleness) a plain absent-from-the-map lookup instead of
  * a NULL-across-an-outer-join special case.
  */
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { db } from "../db";
 import { agents, deployments, runs, workspaceMachines } from "../db/schema";
 
@@ -65,7 +65,7 @@ export async function sweepLostRuns(staleAfterMs: number): Promise<number> {
     machineRows.map((m) => [`${m.workspaceId}:${m.env}`, m.lastSeenAt])
   );
 
-  let reaped = 0;
+  const staleIds: string[] = [];
   for (const row of runningRows) {
     const dep = byDeploymentId.get(row.deploymentId);
     const lastSeenAt = dep ? lastSeenByKey.get(`${dep.workspaceId}:${dep.env}`) : undefined;
@@ -73,14 +73,25 @@ export async function sweepLostRuns(staleAfterMs: number): Promise<number> {
     // "no matching workspaceMachines row" and "row exists but lastSeenAt is
     // still null", e.g. a machine that never finished provisioning).
     const isLost = !lastSeenAt || lastSeenAt.getTime() < cutoffMs;
-    if (!isLost) continue;
-
-    await db
-      .update(runs)
-      .set({ status: "lost", errorCode: "machine_lost", finishedAt: new Date() })
-      .where(eq(runs.id, row.id));
-    reaped++;
+    if (isLost) staleIds.push(row.id);
   }
+  if (staleIds.length === 0) return 0;
 
-  return reaped;
+  // The runningRows snapshot above can go stale before this UPDATE runs — a
+  // run in the candidate set may have genuinely completed via POST
+  // .../runs/{id}/complete in the interim. Re-checking status = "running"
+  // in the WHERE (same guard completeRun uses) makes this a no-op for any
+  // row that already left "running", instead of clobbering its real
+  // status/output/tokens/cost with "lost". One batched statement rather
+  // than a per-row loop, and RETURNING reports exactly which rows this
+  // UPDATE actually flipped — the count is `returned.length`, not
+  // `staleIds.length`, so a caller never learns "reaped N" for a run that
+  // this call didn't actually touch.
+  const returned = await db
+    .update(runs)
+    .set({ status: "lost", errorCode: "machine_lost", finishedAt: new Date() })
+    .where(and(inArray(runs.id, staleIds), eq(runs.status, "running")))
+    .returning({ id: runs.id });
+
+  return returned.length;
 }
