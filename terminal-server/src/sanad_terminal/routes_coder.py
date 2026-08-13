@@ -1,10 +1,12 @@
-"""Internal Coder REST (P0 subset) — flag-gated conversation lifecycle over
-CoderRunner. Mirrors the architect bridge: `conversations` (create) redeems a
-one-time ticket agentd-side and spawns `sanad --wire --session <id>`;
-`send`/`follow` stream NDJSON from the server-authoritative journal.
+"""Internal Coder REST — flag-gated conversation lifecycle over CoderRunner.
+Mirrors the architect bridge: `conversations` (create) redeems a one-time
+ticket agentd-side and spawns `sanad --wire --session <id>`; `send`/`follow`
+stream NDJSON from the server-authoritative journal.
 
-P0 posture: the runner rejects every inbound request, so gated tools are
-DENIED — there is deliberately no respond endpoint yet (P1). The
+P1a posture: ApprovalRequest/QuestionRequest frames are bridged into the
+turn journal and a per-runner pending registry (`GET /turn`'s
+`pendingRequests`); `POST /respond` resolves them back onto the wire.
+ToolCallRequest and any other/unknown request type is still rejected. The
 conversation id is a lookup key within this workspace, never an
 authorization input: the workspace root always derives from the caller's
 credential (`workspace_root`).
@@ -59,6 +61,13 @@ class TicketBody(BaseModel):
 class SendBody(BaseModel):
     input: str = Field(min_length=1, max_length=32_000)
     sendId: str | None = Field(default=None, max_length=64)
+
+
+class RespondBody(BaseModel):
+    requestId: str = Field(min_length=1, max_length=128)
+    response: str | None = Field(default=None, max_length=32)
+    feedback: str | None = Field(default=None, max_length=8_000)
+    answers: dict[str, str] | None = None
 
 
 def _err(status: int, code: str, message: str) -> JSONResponse:
@@ -216,14 +225,42 @@ async def send(
     )
 
 
+@router.post("/conversations/{cid}/respond")
+async def respond(_: Gated, root: Root, cid: str, body: RespondBody) -> JSONResponse:
+    if bad := _bad_cid(cid):
+        return bad
+    runner = get_conversation(root, cid)
+    if runner is None or not runner.alive:
+        return _err(409, "not_started", "conversation is not running")
+    payload: dict[str, Any] = {}
+    if body.response is not None:
+        payload["response"] = body.response
+    if body.feedback is not None:
+        payload["feedback"] = body.feedback
+    if body.answers is not None:
+        payload["answers"] = body.answers
+    try:
+        await runner.respond(body.requestId, payload)
+    except WireRunnerError as exc:
+        status = 410 if exc.code == "request_gone" else 400
+        return _err(status, exc.code, exc.message)
+    return JSONResponse({"ok": True})
+
+
 @router.get("/conversations/{cid}/turn")
 async def turn(_: Gated, root: Root, cid: str) -> JSONResponse:
     if bad := _bad_cid(cid):
         return bad
     runner = get_conversation(root, cid)
     if runner is None:
-        return JSONResponse({"turn": None, "alive": False})
-    return JSONResponse({"turn": runner.turn_summary(), "alive": runner.alive})
+        return JSONResponse({"turn": None, "alive": False, "pendingRequests": []})
+    return JSONResponse(
+        {
+            "turn": runner.turn_summary(),
+            "alive": runner.alive,
+            "pendingRequests": runner.pending_summaries(),
+        }
+    )
 
 
 @router.get("/conversations/{cid}/follow", response_model=None)
