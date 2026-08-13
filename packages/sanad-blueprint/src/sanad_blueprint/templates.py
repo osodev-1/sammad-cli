@@ -125,9 +125,7 @@ def render(kind: ResourceKind, rid: str, name: str) -> list[TemplateFile]:
     if kind == ResourceKind.CONTEXT_DOCUMENT:
         return [
             TemplateFile("context.yaml", _manifest(kind, rid, name, "  source: CONTENT.md\n")),
-            TemplateFile(
-                "CONTENT.md", f"# {name}\n\nBackground knowledge agents should read.\n"
-            ),
+            TemplateFile("CONTENT.md", f"# {name}\n\nBackground knowledge agents should read.\n"),
         ]
     # Fallback: a bare manifest with an empty spec.
     return [TemplateFile(f"{KIND_ID_PREFIX[kind]}.yaml", _manifest(kind, rid, name, "  {}\n"))]

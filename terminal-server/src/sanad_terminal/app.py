@@ -82,9 +82,7 @@ def create_app(
 
         # A running architect/coder turn (or one that just finished, within the
         # idle window) holds the machine even with zero PTYs and no HTTP.
-        idle_stopper.add_probe(
-            lambda: runners_hold_machine(resolved.idle_stop_seconds)
-        )
+        idle_stopper.add_probe(lambda: runners_hold_machine(resolved.idle_stop_seconds))
         # Worker-serving machines can opt out of scale-to-zero entirely (the
         # control plane sets this per-workspace so a hot path never eats a
         # cold-start latency hit).

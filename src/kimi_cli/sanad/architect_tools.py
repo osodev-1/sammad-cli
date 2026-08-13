@@ -230,7 +230,10 @@ class DraftBlueprintChange(CallableTool2[DraftParams]):
             if params.action == "writeFiles":
                 if not params.files:
                     return ToolError(
-                        message="writeFiles needs `files` — each with a path and its complete content (or delete=true).",
+                        message=(
+                            "writeFiles needs `files` — each with a path and its "
+                            "complete content (or delete=true)."
+                        ),
                         brief="Missing files",
                     )
                 for f in params.files:

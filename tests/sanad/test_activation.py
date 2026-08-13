@@ -33,8 +33,7 @@ def _workspace(tmp_path: Path, manifest: str = MCP_YAML) -> Path:
 def _trust(tmp_path: Path, *contents: str) -> Path:
     store = tmp_path / "blueprint-trust.json"
     entries = {
-        f"e{i}": {"sha256": hashlib.sha256(c.encode()).hexdigest()}
-        for i, c in enumerate(contents)
+        f"e{i}": {"sha256": hashlib.sha256(c.encode()).hexdigest()} for i, c in enumerate(contents)
     }
     store.write_text(json.dumps({"version": 1, "entries": entries}))
     return store
@@ -46,9 +45,7 @@ def test_no_env_means_no_op(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert workspace_mcp_configs(ws) == []
 
 
-def test_trusted_manifest_becomes_fastmcp_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_trusted_manifest_becomes_fastmcp_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     ws = _workspace(tmp_path)
     monkeypatch.setenv("SANAD_BLUEPRINT_TRUST", str(_trust(tmp_path, MCP_YAML)))
     configs = workspace_mcp_configs(ws)
@@ -91,8 +88,6 @@ def test_http_transport_and_malformed_specs(tmp_path: Path, monkeypatch: pytest.
         d = ws / ".sanad" / "mcps" / slug
         d.mkdir(parents=True)
         (d / "mcp.yaml").write_text(content)
-    monkeypatch.setenv(
-        "SANAD_BLUEPRINT_TRUST", str(_trust(tmp_path, http_yaml, bad_yaml))
-    )
+    monkeypatch.setenv("SANAD_BLUEPRINT_TRUST", str(_trust(tmp_path, http_yaml, bad_yaml)))
     configs = workspace_mcp_configs(ws)
     assert configs == [{"mcpServers": {"remote": {"url": "https://mcp.example/api"}}}]

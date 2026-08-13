@@ -15,8 +15,8 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import UTC, datetime
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Annotated
 
@@ -80,9 +80,7 @@ _TX_KEEP = 50
 def _prune_tx(root: Path) -> None:
     """Keep the newest records only — the cache is instant-undo, not history
     (git is history)."""
-    records = sorted(
-        _tx_dir(root).glob("tx_*.json"), key=lambda p: p.stat().st_mtime, reverse=True
-    )
+    records = sorted(_tx_dir(root).glob("tx_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     for stale in records[_TX_KEEP:]:
         stale.unlink(missing_ok=True)
 
@@ -162,9 +160,8 @@ async def _annotate_git(payload: dict, request: Request, root: Path) -> dict:
         paths = [p for p in paths if isinstance(p, str)]
         if any(p in dirty for p in paths):
             node["git"] = "modified"
-        elif untracked_dirs or untracked_files:
-            if any(_is_untracked(p) for p in paths):
-                node["git"] = "untracked"
+        elif (untracked_dirs or untracked_files) and any(_is_untracked(p) for p in paths):
+            node["git"] = "untracked"
     return payload
 
 
@@ -357,9 +354,7 @@ async def apply(request: Request, root: Root, body: ApplyBody) -> JSONResponse:
         # Deleted executable definitions lose their trust entries — an orphaned
         # record must never vouch for content recreated later at the same path.
         deleted_executables = [
-            op.path
-            for op in parsed.operations
-            if op.op == "delete" and is_executable_path(op.path)
+            op.path for op in parsed.operations if op.op == "delete" and is_executable_path(op.path)
         ]
         if deleted_executables:
             remove_trust(root, deleted_executables)
@@ -369,9 +364,7 @@ async def apply(request: Request, root: Root, body: ApplyBody) -> JSONResponse:
         # .sanad so a user's unrelated workspace edits are never swept in.
         # Non-fatal: the apply already succeeded; a git hiccup only means the
         # ring shows uncommitted until the next commit.
-        committed = await _auto_commit(
-            request, root, f"blueprint: {parsed.summary} [{tx_id}]"
-        )
+        committed = await _auto_commit(request, root, f"blueprint: {parsed.summary} [{tx_id}]")
 
         graph = _annotate_trust(compile_graph(index_blueprint(_sanad_dir(root))).to_dict(), root)
         graph = await _annotate_git(graph, request, root)

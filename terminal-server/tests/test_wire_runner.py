@@ -6,22 +6,20 @@ import sys
 from pathlib import Path
 
 import pytest
-from sanad_terminal.wire_runner import (
-    WireRunner,
-    register_registry,
-    runners_hold_machine,
-)
 from sanad_terminal.coder_runner import (
     CONVERSATION_ID_RE,
     CoderRunner,
+    drop_conversation,
     get_conversation,
     list_conversations,
     new_conversation_id,
     put_conversation,
-    drop_conversation,
     shutdown_conversations,
 )
-from sanad_terminal.wire_runner import WireRunnerError
+from sanad_terminal.wire_runner import (
+    WireRunner,
+    WireRunnerError,
+)
 
 FAKE_WIRE = Path(__file__).parent / "_fake_coder_wire.py"
 

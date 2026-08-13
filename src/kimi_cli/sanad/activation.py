@@ -115,9 +115,7 @@ def _mcp_entry(spec: dict[str, object]) -> dict[str, Any] | None:
         if isinstance(env, dict):
             raw_env = cast("dict[object, object]", env)
             typed_env = {
-                k: v
-                for k, v in raw_env.items()
-                if isinstance(k, str) and isinstance(v, str)
+                k: v for k, v in raw_env.items() if isinstance(k, str) and isinstance(v, str)
             }
             if len(typed_env) == len(raw_env):
                 entry["env"] = typed_env

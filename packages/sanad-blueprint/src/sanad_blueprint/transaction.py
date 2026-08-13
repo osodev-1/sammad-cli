@@ -369,9 +369,7 @@ def plan_write_files(
             pres.append(Precondition(path=path, sha256=_disk_hash(workspace, path)))
             ops.append(Operation(op="delete", path=path))
             if PurePosixPath(path).name in _MANIFEST_NAMES:
-                gone = next(
-                    (r for r in index.resources.values() if r.manifest_path == path), None
-                )
+                gone = next((r for r in index.resources.values() if r.manifest_path == path), None)
                 if gone is not None:
                     nodes_removed.append(gone.resource.metadata.id)
             continue

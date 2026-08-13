@@ -92,7 +92,11 @@ async def start(root: Root, request: Request, body: StartBody) -> JSONResponse:
 
     argv, env, uid, gid = _spawn_params(settings, root, identity.session_token)
     runner = ArchitectRunner(
-        argv=argv, cwd=root, env=env, uid=uid, gid=gid,
+        argv=argv,
+        cwd=root,
+        env=env,
+        uid=uid,
+        gid=gid,
         max_turn_seconds=settings.architect_max_turn_seconds,
     )
     try:
@@ -145,9 +149,9 @@ def _recycling_stream(
         except ArchitectError as exc:
             failed = True
             yield (
-                json.dumps(
-                    {"kind": "error", "code": "turn_failed", "message": exc.message}
-                ).encode("utf-8")
+                json.dumps({"kind": "error", "code": "turn_failed", "message": exc.message}).encode(
+                    "utf-8"
+                )
                 + b"\n"
             )
         if failed or not runner.alive:
@@ -204,9 +208,7 @@ async def turn(root: Root) -> JSONResponse:
 
 
 @router.get("/follow", response_model=None)
-async def follow(
-    root: Root, turnId: str, from_seq: int = 0
-) -> StreamingResponse | JSONResponse:
+async def follow(root: Root, turnId: str, from_seq: int = 0) -> StreamingResponse | JSONResponse:
     """Re-attach to a turn's journal from a seq — replay the missed window,
     then continue live until the turn ends."""
     runner = get_runner(root)

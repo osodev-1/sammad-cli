@@ -367,8 +367,14 @@ def test_graph_annotates_committedness(client: TestClient):
     assert all("git" not in n for n in bare["nodes"])
 
     ws = client._users_dir / USER / "workspace"  # type: ignore[attr-defined]
-    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
-           "GIT_COMMITTER_EMAIL": "t@t", "HOME": str(ws), "PATH": "/usr/bin:/bin:/usr/local/bin"}
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+        "HOME": str(ws),
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+    }
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=ws, env=env, check=True)
     # Commit the agent; leave the skill folder untracked.
     subprocess.run(["git", "add", ".sanad/agents"], cwd=ws, env=env, check=True)
@@ -391,8 +397,14 @@ def _init_repo(client: TestClient):
     import subprocess
 
     ws = client._users_dir / USER / "workspace"  # type: ignore[attr-defined]
-    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
-           "GIT_COMMITTER_EMAIL": "t@t", "HOME": str(ws), "PATH": "/usr/bin:/bin:/usr/local/bin"}
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+        "HOME": str(ws),
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+    }
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=ws, env=env, check=True)
     subprocess.run(["git", "add", "-A"], cwd=ws, env=env, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=ws, env=env, check=True)
@@ -424,7 +436,11 @@ def test_apply_auto_commits_scoped_to_sanad(client: TestClient):
 
     log = subprocess.run(
         ["git", "log", "-1", "--format=%an|%s", "--name-only"],
-        cwd=ws, env=env, check=True, capture_output=True, text=True,
+        cwd=ws,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout
     assert log.startswith("Omar A|blueprint: Create Tool “T” [tx_")
     assert ".sanad/tools/t/tool.yaml" in log
@@ -468,7 +484,5 @@ def test_rollback_is_safe_and_reverts_commit(client: TestClient):
     assert stale.status_code == 409
     assert stale.json()["error"]["code"] == "stale_rollback"
     # The drifted content survives untouched.
-    kept = client.get(
-        "/internal/workspace/file?path=.sanad/tools/r/tool.yaml", headers=HEADERS
-    )
+    kept = client.get("/internal/workspace/file?path=.sanad/tools/r/tool.yaml", headers=HEADERS)
     assert b"drifted" in kept.content
