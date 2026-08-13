@@ -49,26 +49,29 @@ export function machineHash(workspaceId: string, env: string): string {
 }
 
 /**
- * Base container env for a workspace machine. Deliberately NOT reused from
- * sessions.ts's agentBaseEnv: that helper is shaped for the interactive CLI
- * workspace (WORKSPACE_MODE: "task", SANAD_WORKSPACE_USER) and isn't a fit
- * for a non-interactive worker machine identified by (workspaceId, env).
- * Not part of the Task 4 interface contract — the worker container's actual
- * expected env var names should be confirmed against the runtime that reads
- * them (flagged in the task report as a divergence).
+ * Base container env for a workspace machine, registered once per
+ * (workspace, env) task-definition family. Deliberately does NOT set
+ * WORKSPACE_MODE: the terminal-server image's own Dockerfile default (ENV
+ * WORKSPACE_MODE=task) governs, and settings.py hard-fails on any value
+ * other than "railway"|"task" — worker behavior is gated by WORKER_ENABLED,
+ * not by inventing a new mode. settings.py requires SANAD_WORKSPACE_USER in
+ * task mode; workspaceId occupies that fixed-user slot (worker machines are
+ * workspace-scoped), matching deriveMachineToken(workspaceId, runNonce)
+ * putting workspaceId in the userId slot of the HMAC — the token the control
+ * plane derives matches the identity the machine holds.
  */
-function machineBaseEnv(
+export function machineBaseEnv(
   config: AwsComputeConfig,
   workspaceId: string,
-  env: string,
+  keepWarm: boolean,
 ): Record<string, string> {
   return {
-    WORKSPACE_MODE: "worker",
-    SANAD_WORKSPACE_ID: workspaceId,
-    SANAD_WORKSPACE_ENV: env,
+    SANAD_WORKSPACE_USER: workspaceId,
     CONTROL_PLANE_URL: config.controlPlaneUrl,
     SANAD_API_BASE_URL: config.controlPlaneUrl,
     TERMINAL_ALLOWED_ORIGINS: config.allowedOrigins,
+    WORKER_ENABLED: "1",
+    KEEP_WARM: keepWarm ? "1" : "0",
   };
 }
 
@@ -189,7 +192,7 @@ async function ensureInner(
     config,
     hash12,
     accessPointId,
-    machineBaseEnv(config, workspaceId, env),
+    machineBaseEnv(config, workspaceId, opts.keepWarm),
   );
   const taskArn = await runWorkspaceTask(config, taskDefArn, {
     AGENTD_TOKEN: agentdToken,
