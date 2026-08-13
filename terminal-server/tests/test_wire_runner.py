@@ -21,6 +21,7 @@ from sanad_terminal.coder_runner import (
     drop_conversation,
     shutdown_conversations,
 )
+from sanad_terminal.wire_runner import WireRunnerError
 
 FAKE_WIRE = Path(__file__).parent / "_fake_coder_wire.py"
 
@@ -148,7 +149,6 @@ def _coder(tmp_path, **kwargs):
     )
 
 
-@pytest.mark.xfail(reason="respond lands in the next commit", strict=True)
 @pytest.mark.asyncio
 async def test_coder_bridges_approval_requests_into_journal_and_registry(tmp_path):
     runner = _coder(tmp_path)
@@ -187,7 +187,6 @@ async def test_coder_bridges_approval_requests_into_journal_and_registry(tmp_pat
         await runner.stop()
 
 
-@pytest.mark.xfail(reason="respond lands in the next commit", strict=True)
 @pytest.mark.asyncio
 async def test_coder_bridges_question_requests(tmp_path):
     runner = _coder(tmp_path)
@@ -270,3 +269,61 @@ async def test_pending_requests_survive_subprocess_crash(tmp_path):
     finally:
         await runner.stop()
     assert runner.pending_summaries() == []
+
+
+@pytest.mark.asyncio
+async def test_respond_to_unknown_request_is_request_gone(tmp_path):
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        with pytest.raises(WireRunnerError) as exc:
+            await runner.respond("req_nope", {"response": "approve"})
+        assert exc.value.code == "request_gone"
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_respond_twice_is_request_gone(tmp_path):
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        state = await runner.start_turn("ASK_APPROVAL")
+        for _ in range(100):
+            if runner.pending_summaries():
+                break
+            await asyncio.sleep(0.02)
+        await runner.respond("req_1", {"response": "reject", "feedback": "not now"})
+        with pytest.raises(WireRunnerError) as exc:
+            await runner.respond("req_1", {"response": "approve"})
+        assert exc.value.code == "request_gone"
+        items = await asyncio.wait_for(_drain(runner, state.turn_id), timeout=5.0)
+        outcomes = [
+            i["event"]["payload"]["response"]
+            for i in items
+            if i.get("kind") == "event" and i["event"].get("type") == "RequestOutcome"
+        ]
+        assert outcomes[0]["result"]["response"] == "reject"
+        assert outcomes[0]["result"]["feedback"] == "not now"
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_respond_with_malformed_payload_is_invalid_response(tmp_path):
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        await runner.start_turn("ASK_APPROVAL")
+        for _ in range(100):
+            if runner.pending_summaries():
+                break
+            await asyncio.sleep(0.02)
+        with pytest.raises(WireRunnerError) as exc:
+            await runner.respond("req_1", {"response": "yolo_no_such_kind"})
+        assert exc.value.code == "invalid_response"
+        # Still pending — a bad payload must not consume the request.
+        assert runner.pending_summaries()
+        await runner.respond("req_1", {"response": "approve"})
+    finally:
+        await runner.stop()
