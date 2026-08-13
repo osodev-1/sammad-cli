@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "../db";
-import { agents, agentVersions, deployments, workspaces } from "../db/schema";
+import { agents, agentVersions, deployments, users, workspaces } from "../db/schema";
 
 export class OwnerRequiredError extends Error {
   readonly code = "owner_required";
@@ -324,4 +324,55 @@ export async function listAgentsForOrg(orgId: string) {
     .from(agents)
     .innerJoin(workspaces, eq(agents.workspaceId, workspaces.id))
     .where(eq(workspaces.orgId, orgId));
+}
+
+/**
+ * Org-scoped agent list with the owner's email — the agents dashboard page
+ * (Task 14) shows a human-readable owner, unlike /api/v1/agents's JSON
+ * response (listAgentsForOrg), whose callers already hold ownerUserId and
+ * can resolve it themselves. Joins users the same way getSessionMembership
+ * and the team page do.
+ */
+export async function listAgentsForOrgWithOwnerEmail(orgId: string) {
+  return db
+    .select({
+      id: agents.id,
+      name: agents.name,
+      workspaceId: agents.workspaceId,
+      workspaceName: workspaces.name,
+      ownerUserId: agents.ownerUserId,
+      ownerEmail: users.email,
+      status: agents.status,
+      createdAt: agents.createdAt,
+    })
+    .from(agents)
+    .innerJoin(workspaces, eq(agents.workspaceId, workspaces.id))
+    .innerJoin(users, eq(users.id, agents.ownerUserId))
+    .where(eq(workspaces.orgId, orgId))
+    .orderBy(desc(agents.createdAt));
+}
+
+/**
+ * Single-agent detail (the agent page, Task 14): the same org-scoped lookup
+ * as getAgentByName, plus the owner's email in the same query rather than a
+ * second round trip keyed on ownerUserId.
+ */
+export async function getAgentDetailByName(orgId: string, name: string) {
+  const rows = await db
+    .select({
+      id: agents.id,
+      workspaceId: agents.workspaceId,
+      name: agents.name,
+      ownerUserId: agents.ownerUserId,
+      ownerEmail: users.email,
+      status: agents.status,
+      description: agents.description,
+      createdAt: agents.createdAt,
+    })
+    .from(agents)
+    .innerJoin(workspaces, eq(agents.workspaceId, workspaces.id))
+    .innerJoin(users, eq(users.id, agents.ownerUserId))
+    .where(and(eq(workspaces.orgId, orgId), eq(agents.name, name)))
+    .limit(1);
+  return rows[0] ?? null;
 }
