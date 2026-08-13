@@ -286,3 +286,16 @@ def test_send_id_makes_asks_idempotent(client: TestClient):
         ).text
     )
     assert next(i["turnId"] for i in c if i["kind"] == "turn") != ta
+
+
+def test_architect_runner_carries_wall_clock_budget(client: TestClient):
+    assert (
+        client.post(
+            "/internal/architect/start", headers=HEADERS, json={"ticket": "tt_good"}
+        ).status_code
+        == 200
+    )
+    from sanad_terminal.architect_runner import _runners
+
+    runner = next(iter(_runners.values()))
+    assert runner._max_turn_seconds == 1800.0

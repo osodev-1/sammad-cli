@@ -87,3 +87,9 @@ def test_coder_conversation_cap_defaults_and_parses(base_env):
     assert TerminalSettings.load(env=base_env).coder_max_conversations == 3
     s = TerminalSettings.load(env={**base_env, "CODER_MAX_CONVERSATIONS": "5"})
     assert s.coder_max_conversations == 5
+
+
+def test_architect_budget_defaults_and_parses(base_env):
+    assert TerminalSettings.load(env=base_env).architect_max_turn_seconds == 1800.0
+    s = TerminalSettings.load(env={**base_env, "ARCHITECT_MAX_TURN_SECONDS": "60"})
+    assert s.architect_max_turn_seconds == 60.0
