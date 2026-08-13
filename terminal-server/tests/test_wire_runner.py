@@ -247,3 +247,26 @@ async def test_pending_requests_are_cancelled_on_stop(tmp_path):
         await runner.stop()
     assert runner.pending_summaries() == []
     assert any(i.get("kind") == "request_cancelled" for i in state.items)
+
+
+@pytest.mark.asyncio
+async def test_pending_requests_survive_subprocess_crash(tmp_path):
+    """The bridge registry (`_pending_requests`) must not collide with
+    WireRunner's own `_pending` RPC-futures map — if the subprocess dies
+    unprompted while a request is pending, `_read_loop`'s finally and
+    `WireRunner.stop()` both iterate `self._pending` assuming Futures; a
+    name collision would crash them on a `PendingRequest` instead."""
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        await runner.start_turn("ASK_APPROVAL")
+        for _ in range(100):
+            if runner.pending_summaries():
+                break
+            await asyncio.sleep(0.02)
+        assert runner.pending_summaries()
+        runner._proc.kill()
+        await asyncio.sleep(0.2)
+    finally:
+        await runner.stop()
+    assert runner.pending_summaries() == []
