@@ -327,3 +327,26 @@ async def test_respond_with_malformed_payload_is_invalid_response(tmp_path):
         await runner.respond("req_1", {"response": "approve"})
     finally:
         await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_request_with_no_running_turn_is_rejected(tmp_path):
+    """Bridged types still reject when no turn is running (background lane = P3/P4)."""
+    runner = CoderRunner(
+        conversation_id=new_conversation_id(),
+        argv=(sys.executable, str(FAKE_WIRE)),
+        cwd=tmp_path,
+        env={},
+        max_turn_seconds=3600.0,
+        max_steps_per_turn=200,
+    )
+    await runner.start()
+    try:
+        handled = await runner.on_request(
+            "req_ghost",
+            {"type": "ApprovalRequest", "payload": {"id": "req_ghost", "action": "run command"}},
+        )
+        assert handled is False
+        assert runner.pending_summaries() == []
+    finally:
+        await runner.stop()

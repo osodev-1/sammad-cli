@@ -257,3 +257,31 @@ def test_conversation_cap_is_enforced(client: TestClient):
     )
     assert res.status_code == 409
     assert res.json()["error"]["code"] == "conversation_limit"
+
+
+def test_open_existing_id_also_hits_the_cap(client: TestClient):
+    """`open` consumes a live-process slot exactly like create (controller ruling, P1a)."""
+    cids = [
+        client.post(
+            "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+        ).json()["conversationId"]
+        for _ in range(2)
+    ]
+    stopped = cids[0]
+    assert (
+        client.post(
+            f"/internal/coder/conversations/{stopped}/stop", headers=HEADERS
+        ).status_code
+        == 200
+    )
+    third = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    )
+    assert third.status_code == 200  # slot freed by stop
+    reopen = client.post(
+        f"/internal/coder/conversations/{stopped}/open",
+        headers=HEADERS,
+        json={"ticket": "tt_good"},
+    )
+    assert reopen.status_code == 409
+    assert reopen.json()["error"]["code"] == "conversation_limit"
