@@ -8,6 +8,7 @@ import FileTree from "./FileTree";
 import UsageDock from "./UsageDock";
 import TerminalPanel, { type TerminalPhase } from "./TerminalPanel";
 import {
+  CODER_TAB_ID,
   FilePreview,
   GRAPH_TAB_ID,
   TabsBar,
@@ -18,6 +19,7 @@ import {
 import GraphPanel from "./graph/GraphPanel";
 import ContextDock from "./dock/ContextDock";
 import ArchitectPanel from "./architect/ArchitectPanel";
+import CoderPanel from "./coder/CoderPanel";
 import WorkspaceContextHeader from "./WorkspaceContextHeader";
 import {
   buildTree,
@@ -31,6 +33,7 @@ import { loadDefaultSession, persistSessionState } from "@/lib/sessions/client";
 import {
   SESSION_STATE_VERSION,
   type StoredArchitectMessage,
+  type StoredCoderMessage,
 } from "@/lib/sessions/state";
 
 const POLL_MS = 4000;
@@ -92,6 +95,14 @@ export default function SessionWorkspace({
      hydration effect below, persisted with the other tab state). */
   const [architectTranscript, setArchitectTranscript] = useState<
     StoredArchitectMessage[] | undefined
+  >(undefined);
+  /* Coder chat (P1b) — same treatment as the architect transcript above, plus
+     the conversation id (the machine-side ticket) so a reload re-attaches. */
+  const [coderConvId, setCoderConvId] = useState<string | undefined>(
+    undefined,
+  );
+  const [coderTranscript, setCoderTranscript] = useState<
+    StoredCoderMessage[] | undefined
   >(undefined);
   /* Context dock (R4): open state persists; reviews + activity feed it. */
   const [dockOpen, setDockOpen] = useState(true);
@@ -155,6 +166,12 @@ export default function SessionWorkspace({
       if (s.active) setActive(s.active);
       if (s.architect && s.architect.length > 0) {
         setArchitectTranscript(s.architect);
+      }
+      if (s.coder) {
+        if (s.coder.conversationId) setCoderConvId(s.coder.conversationId);
+        if (s.coder.transcript && s.coder.transcript.length > 0) {
+          setCoderTranscript(s.coder.transcript);
+        }
       }
       if (s.dockOpen === false) setDockOpen(false);
       hydrated.current = true;
@@ -236,6 +253,8 @@ export default function SessionWorkspace({
   useEffect(() => {
     if (!hydrated.current || !prdSessionId.current || !sessionId) return;
     const timer = window.setTimeout(() => {
+      const hasCoder =
+        !!coderConvId || (coderTranscript && coderTranscript.length > 0);
       void persistSessionState(sessionId, prdSessionId.current!, {
         v: SESSION_STATE_VERSION,
         terminals,
@@ -245,6 +264,14 @@ export default function SessionWorkspace({
         drawerOpen,
         architect: architectTranscript,
         dockOpen,
+        ...(hasCoder
+          ? {
+              coder: {
+                conversationId: coderConvId,
+                transcript: coderTranscript,
+              },
+            }
+          : {}),
       });
     }, 800);
     return () => window.clearTimeout(timer);
@@ -256,6 +283,8 @@ export default function SessionWorkspace({
     drawerOpen,
     architectTranscript,
     dockOpen,
+    coderConvId,
+    coderTranscript,
     sessionId,
   ]);
 
@@ -268,6 +297,7 @@ export default function SessionWorkspace({
   const isTerminalActive = terminals.some((t) => t.id === active);
   const activeView = viewTabs.find((v) => v.id === active) ?? null;
   const graphActive = active === GRAPH_TAB_ID;
+  const coderActive = active === CODER_TAB_ID;
   /* The Architect chat is a pane WITHIN the Blueprint tab (it edits the graph,
      so the graph stays in view), toggled open/closed rather than a tab. */
   const [architectOpen, setArchitectOpen] = useState(false);
@@ -277,6 +307,7 @@ export default function SessionWorkspace({
      folder name under a kind dir → "<prefix>:<slug>". */
   const [graphFocus, setGraphFocus] = useState<string | null>(null);
   const openGraph = useCallback(() => setActive(GRAPH_TAB_ID), []);
+  const openCoder = useCallback(() => setActive(CODER_TAB_ID), []);
 
   /* Paths the file tree should reveal — set to a fresh array after each apply
      so the FileTree re-runs its expand effect even for a repeated path. */
@@ -462,13 +493,14 @@ export default function SessionWorkspace({
     });
     setActive((current) =>
       current === GRAPH_TAB_ID ||
+      (coderEnabled && current === CODER_TAB_ID) ||
       terminals.some((t) => t.id === current) ||
       viewTabs.some((v) => v.id === current) ||
       known.has(current)
         ? current
         : terminals[0].id,
     );
-  }, [entries, terminals, viewTabs]);
+  }, [entries, terminals, viewTabs, coderEnabled]);
 
   /* The active terminal's state, lifted for the status bar + session dot. */
   const statusPhase: TerminalPhase = phases[
@@ -514,12 +546,14 @@ export default function SessionWorkspace({
           fileTabs={fileTabs}
           active={active}
           canAddTerminal={terminals.length < MAX_TERMINALS}
+          showCoder={coderEnabled ?? false}
           onSelect={setActive}
           onCloseFile={closeFile}
           onCloseTerminal={closeTerminal}
           onCloseView={closeView}
           onNewTerminal={addTerminal}
           onOpenGraph={openGraph}
+          onOpenCoder={openCoder}
         />
         <div style={s.panelArea}>
           {/* Terminals stay MOUNTED across tab switches — hidden, never unmounted.
@@ -584,9 +618,28 @@ export default function SessionWorkspace({
               </div>
             </div>
           </div>
-          {!isTerminalActive && !activeView && !graphActive && active && (
-            <FilePreview key={active} path={active} sessionId={sessionId} />
+          {/* Coder pane: a singleton tab like Blueprint, dark unless the
+              caller has the flag (Task 4). Kept mounted while hidden so the
+              conversation survives tab switches. */}
+          {coderEnabled && (
+            <div style={coderActive ? s.coderPane : s.paneHidden}>
+              <CoderPanel
+                sessionId={sessionId}
+                visible={coderActive}
+                conversationId={coderConvId}
+                onConversationId={setCoderConvId}
+                initial={coderTranscript}
+                onPersist={setCoderTranscript}
+              />
+            </div>
           )}
+          {!isTerminalActive &&
+            !activeView &&
+            !graphActive &&
+            !coderActive &&
+            active && (
+              <FilePreview key={active} path={active} sessionId={sessionId} />
+            )}
         </div>
         <div style={s.drawer}>
           <button type="button" style={s.drawerBar} onClick={toggleDrawer}>
@@ -662,6 +715,12 @@ const s: Record<string, CSSProperties> = {
     position: "relative",
   },
   graphPane: {
+    position: "absolute",
+    inset: 0,
+    display: "flex",
+    flexDirection: "column",
+  },
+  coderPane: {
     position: "absolute",
     inset: 0,
     display: "flex",
