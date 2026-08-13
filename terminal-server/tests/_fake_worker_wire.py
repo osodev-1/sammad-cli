@@ -11,6 +11,12 @@ Modes are keyed on the prompt text:
 - "TOKENS:<n>":    emits one StatusUpdate event whose token_usage totals `n`
                    output tokens, then hangs until cancel (the token-budget
                    path: the runner is expected to trip and cancel it).
+- "TOKENS_THEN_FINISH:<n>": emits the same over-budget StatusUpdate but does
+                   NOT hang — it finishes the turn immediately afterward, the
+                   same scheduling slice a late `_trip_budget` task could
+                   otherwise race against (the "over-budget event was the
+                   run's last one" case that must NOT retroactively mark a
+                   successful run as budget-exceeded).
 """
 
 import json
@@ -88,6 +94,23 @@ def main() -> None:
                 for i in range(int(user_input.split(":", 1)[1])):
                     _event("StepBegin", {"step": i})
                 _hang_until_cancel(mid)
+            elif user_input.startswith("TOKENS_THEN_FINISH:"):
+                # No output-file write here (unlike the default path): that's
+                # a real disk I/O syscall, and the gap it introduces between
+                # the two stdout writes is enough for the server's reader
+                # loop to yield in between them — which gives a scheduled
+                # trip task room to interleave BEFORE the `finished` response
+                # is even read, defeating the point of this mode (both
+                # messages must land in the same read so the runner processes
+                # them in the same scheduling slice, same as a real model
+                # emitting a final StatusUpdate immediately before its
+                # response completes).
+                n = int(user_input.split(":", 1)[1])
+                _event(
+                    "StatusUpdate",
+                    {"token_usage": {"input_other": 0, "output": n}},
+                )
+                _write({"jsonrpc": "2.0", "id": mid, "result": {"status": "finished"}})
             elif user_input.startswith("TOKENS:"):
                 n = int(user_input.split(":", 1)[1])
                 _event(

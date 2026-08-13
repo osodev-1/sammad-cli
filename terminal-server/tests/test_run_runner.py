@@ -1,3 +1,4 @@
+import asyncio
 import sys
 from pathlib import Path
 
@@ -80,6 +81,55 @@ async def test_token_budget_trips_and_journals(tmp_path: Path) -> None:
     totals = runner.usage_totals()
     assert totals["tokensOut"] == 500
     await runner.stop()
+
+
+async def test_token_budget_does_not_corrupt_a_natural_finish(tmp_path: Path) -> None:
+    """If the over-budget StatusUpdate is the run's LAST event before a
+    natural `finished`, `_consume` can journal the `end` item and settle the
+    turn in the same scheduling slice — before the trip task scheduled from
+    that event ever gets a chance to run. `_schedule_trip`'s wrapper
+    re-checks `state.status == "running"` as its first statement, so that
+    late task must no-op instead of appending a stray `turn_budget_exceeded`
+    error AFTER the turn already finished (which would corrupt
+    `terminal_item()` for what was actually a successful run)."""
+    run_id = "r_eeeeeeeeeeee"
+    dirs = prepare_run_dirs(tmp_path, run_id)
+    runner = RunRunner(
+        run_id=run_id, argv=(sys.executable, str(FAKE_WIRE)),
+        cwd=dirs.workspace, env={"KIMI_WORKER_OUTPUT_FILE": str(dirs.output_file)},
+        uid=None, gid=None, max_turn_seconds=30.0, max_steps_per_turn=50,
+        max_tokens_per_run=100,
+    )
+    await runner.start()
+    state = await runner.start_turn("TOKENS_THEN_FINISH:500")
+    async for item in runner.follow(state.turn_id, 0):
+        if item["kind"] in ("end", "error"):
+            break
+    # Give any late-scheduled trip task its chance to run (and no-op) before
+    # asserting the journal is settled.
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert state.status == "finished"
+    item = runner.terminal_item()
+    assert item is not None
+    assert item["kind"] == "end"
+    codes = [i.get("code") for i in state.items if i.get("kind") == "error"]
+    assert "turn_budget_exceeded" not in codes
+    await runner.stop()
+
+
+async def test_observe_event_ignores_malformed_token_usage(tmp_path: Path) -> None:
+    """`observe_event` is telemetry parsing on subprocess-controlled data —
+    it must degrade malformed fields to 0 (and never raise into `_consume`,
+    which has no guard around this call)."""
+    runner = _runner(tmp_path)
+    runner.observe_event(
+        {
+            "type": "StatusUpdate",
+            "payload": {"token_usage": {"input_other": "garbage", "output": [1]}},
+        }
+    )
+    assert runner.usage_totals() == {"tokensIn": 0, "tokensOut": 0, "modelAlias": None}
 
 
 async def test_on_finished_fires_once(tmp_path: Path) -> None:

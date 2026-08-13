@@ -23,10 +23,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from sanad_terminal.wire_runner import TurnState, WireRunner, WireRunnerError, register_registry
 
 # Server-minted only (P0); the shape keeps ids path- and shell-safe.
 RUN_ID_RE = re.compile(r"^r_[a-f0-9]{12}$")
+
+
+def _as_int(value: Any) -> int:
+    """Coerce a `token_usage` field to `int`, never raising: a wire
+    subprocess is untrusted input, and malformed telemetry (a string, list,
+    dict, None, ...) must degrade to 0 rather than fail the run."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    return 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +132,20 @@ class RunRunner(WireRunner):
     def observe_event(self, envelope: dict[str, Any]) -> None:
         """Accumulate token usage from `StatusUpdate` events and trip the
         token budget when the run's ceiling is exceeded. Called synchronously
-        from `WireRunner._consume` for every journaled event."""
+        from `WireRunner._consume` for every journaled event.
+
+        Belt-and-suspenders defensive: this is telemetry parsing on data from
+        a subprocess, and it must never be able to kill a turn by raising
+        into `_consume` (which has no guard around this call) — a malformed
+        `token_usage` field would otherwise fail the whole run with no
+        journal item explaining why.
+        """
+        try:
+            self._observe_event(envelope)
+        except Exception:
+            logger.exception("observe_event failed; ignoring malformed telemetry")
+
+    def _observe_event(self, envelope: dict[str, Any]) -> None:
         if envelope.get("type") != "StatusUpdate":
             return
         payload = envelope.get("payload") or {}
@@ -136,23 +160,39 @@ class RunRunner(WireRunner):
         if not isinstance(usage, dict):
             return
         self._tokens_in += (
-            int(usage.get("input_other", 0) or 0)
-            + int(usage.get("input_cache_read", 0) or 0)
-            + int(usage.get("input_cache_creation", 0) or 0)
+            _as_int(usage.get("input_other"))
+            + _as_int(usage.get("input_cache_read"))
+            + _as_int(usage.get("input_cache_creation"))
         )
-        self._tokens_out += int(usage.get("output", 0) or 0)
+        self._tokens_out += _as_int(usage.get("output"))
         if self._tokens_in + self._tokens_out > self._max_tokens and self._current is not None:
             self._schedule_trip(self._current, "token budget exceeded")
 
     def _schedule_trip(self, state: TurnState, reason: str) -> None:
         """Task wrapper matching how the wall-clock/step watchers trip the
         budget — `_trip_budget` itself is idempotent, so a burst of events
-        past the threshold still yields exactly one journaled breach."""
+        past the threshold still yields exactly one journaled breach.
+
+        Re-checks `state.status == "running"` (and `not state.budget_tripped`)
+        as the coroutine's first statement, mirroring `_budget_watch`'s own
+        guard: `observe_event` runs synchronously inside `_consume`'s event
+        handling, so it can schedule this task on what turns out to be the
+        run's LAST event before a natural `finished`/`cancelled`/`failed` end
+        — without the re-check, this task could still be pending when
+        `_consume` journals the `end` item and settles the turn, then wake up
+        and append a stray `turn_budget_exceeded` error AFTER it, corrupting
+        `terminal_item()` for an otherwise-successful run.
+        """
         if state.budget_tripped:
             return
         if self._token_trip_task is not None and not self._token_trip_task.done():
             return
-        self._token_trip_task = asyncio.create_task(self._trip_budget(state, reason))
+        self._token_trip_task = asyncio.create_task(self._trip_if_still_running(state, reason))
+
+    async def _trip_if_still_running(self, state: TurnState, reason: str) -> None:
+        if state.status != "running" or state.budget_tripped:
+            return
+        await self._trip_budget(state, reason)
 
     def usage_totals(self) -> dict[str, Any]:
         return {
