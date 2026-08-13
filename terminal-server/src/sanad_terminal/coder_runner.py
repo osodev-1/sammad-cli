@@ -87,13 +87,6 @@ class CoderRunner(WireRunner):
             # ToolCall/hook/unknown types, malformed frames, and requests
             # outside a running turn (background lane = P3/P4) all reject.
             return False
-        self._pending_requests[rid] = PendingRequest(
-            request_id=rid,
-            request_type=request_type,
-            turn_id=state.turn_id,
-            created_at=time.time(),
-            request=payload,
-        )
         await self._append(
             state,
             {
@@ -103,6 +96,13 @@ class CoderRunner(WireRunner):
                 "turnId": state.turn_id,
                 "request": payload,
             },
+        )
+        self._pending_requests[rid] = PendingRequest(
+            request_id=rid,
+            request_type=request_type,
+            turn_id=state.turn_id,
+            created_at=time.time(),
+            request=payload,
         )
         return True
 
