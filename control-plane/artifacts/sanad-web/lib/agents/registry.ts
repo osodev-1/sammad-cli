@@ -266,6 +266,7 @@ export async function getLiveDeployment(agentId: string, env: string) {
         inArray(deployments.status, ["active", "paused"])
       )
     )
+    .orderBy(desc(deployments.createdAt))
     .limit(1);
   return rows[0] ?? null;
 }
