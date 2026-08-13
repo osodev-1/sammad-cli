@@ -343,3 +343,27 @@ export const terminalTickets = pgTable("terminal_tickets", {
     .defaultNow()
     .notNull(),
 });
+
+/**
+ * A workspace machine = the Fargate task backing a (workspace, env) pair for
+ * running deployed agents (PRD worker runtime). Same wake state machine as
+ * workspace_sessions, keyed per workspace+env instead of per user+session —
+ * hash12 namespaced with a "wm:" prefix (see machineHash) so worker routing
+ * never collides with user-session routing.
+ */
+export const workspaceMachines = pgTable("workspace_machines", {
+  id: text("id").primaryKey(), // wm_<uuid>
+  workspaceId: text("workspace_id").notNull().references(() => workspaces.id),
+  env: text("env").notNull(),
+  hash12: text("hash12").notNull().unique(),
+  efsAccessPointId: text("efs_access_point_id").notNull(),
+  taskArn: text("task_arn"),
+  taskIp: text("task_ip"),
+  runNonce: text("run_nonce"),
+  imageRef: text("image_ref").notNull(),
+  state: text("state").notNull(), // "provisioning" | "ready" | "error"
+  keepWarm: boolean("keep_warm").default(false).notNull(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
