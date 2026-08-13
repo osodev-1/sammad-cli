@@ -43,6 +43,13 @@
       "when": 1786620000000,
       "tag": "0005_usage_attribution",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786627610138,
+      "tag": "0006_foamy_venus",
+      "breakpoints": true
     }
   ]
 }

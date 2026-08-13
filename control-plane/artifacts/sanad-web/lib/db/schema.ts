@@ -6,6 +6,7 @@ import {
   boolean,
   jsonb,
   pgEnum,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 export const planEnum = pgEnum("plan", ["free", "pro", "team", "enterprise"]);
@@ -194,6 +195,88 @@ export const workspaceSessions = pgTable("workspace_sessions", {
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+// -- worker runtime (P0) ------------------------------------------------------
+
+export const workspaces = pgTable("workspaces", {
+  id: text("id").primaryKey(), // ws_<uuid>
+  orgId: text("org_id").notNull().references(() => organizations.id),
+  name: text("name").notNull(),
+  keepWarm: boolean("keep_warm").default(false).notNull(),
+  budgetUsdMonth: integer("budget_usd_month"), // null = uncapped in P0
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const agents = pgTable("agents", {
+  id: text("id").primaryKey(), // ag_<uuid>
+  workspaceId: text("workspace_id").notNull().references(() => workspaces.id),
+  name: text("name").notNull(), // unique per workspace, enforced in registry.ts
+  ownerUserId: text("owner_user_id").notNull().references(() => users.id),
+  status: text("status").default("active").notNull(), // "active" | "orphaned"
+  description: text("description"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const agentVersions = pgTable("agent_versions", {
+  id: text("id").primaryKey(), // av_<uuid>
+  agentId: text("agent_id").notNull().references(() => agents.id),
+  contentHash: text("content_hash").notNull(), // sha256 of canonical bundle JSON
+  bundle: jsonb("bundle").notNull(), // { files: { "agent.yaml": "...", "worker.yaml": "...", ... } }
+  createdBy: text("created_by").notNull(), // soft user id
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const deployments = pgTable("deployments", {
+  id: text("id").primaryKey(), // dp_<uuid>
+  agentId: text("agent_id").notNull().references(() => agents.id),
+  agentVersionId: text("agent_version_id").notNull().references(() => agentVersions.id),
+  env: text("env").notNull(), // "dev" | "prod"
+  status: text("status").default("active").notNull(), // "active" | "paused"
+  maxTurnSeconds: integer("max_turn_seconds").default(900).notNull(),
+  maxStepsPerTurn: integer("max_steps_per_turn").default(100).notNull(),
+  maxTokensPerRun: integer("max_tokens_per_run").default(2000000).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const runs = pgTable(
+  "runs",
+  {
+    id: text("id").primaryKey(), // r_<12 hex> — also the kimi session id on the machine
+    deploymentId: text("deployment_id").notNull().references(() => deployments.id),
+    agentVersionId: text("agent_version_id").notNull(),
+    status: text("status").default("queued").notNull(),
+    // "queued" | "running" | "succeeded" | "failed" | "cancelled" | "lost"
+    errorCode: text("error_code"), // e.g. "no_output" | "turn_budget_exceeded"
+    triggerPrincipal: text("trigger_principal").notNull(), // "itok:<tokenId>" | "user:<id>"
+    idempotencyKey: text("idempotency_key"),
+    output: jsonb("output"), // the ReturnOutput document (or {"text": ...})
+    tokensIn: integer("tokens_in").default(0).notNull(),
+    tokensOut: integer("tokens_out").default(0).notNull(),
+    costUsdMicros: integer("cost_usd_micros").default(0).notNull(),
+    modelAlias: text("model_alias"),
+    traceUploaded: boolean("trace_uploaded").default(false).notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => ({
+    idempotencyIndex: uniqueIndex("runs_deployment_idem_uq").on(table.deploymentId, table.idempotencyKey),
+  })
+);
+
+export const invokeTokens = pgTable("invoke_tokens", {
+  id: text("id").primaryKey(), // tokenId — a UUID
+  tokenHash: text("token_hash").notNull().unique(),
+  familyId: text("family_id").notNull(),
+  agentId: text("agent_id").notNull().references(() => agents.id),
+  env: text("env").notNull(),
+  orgId: text("org_id").notNull(),
+  createdBy: text("created_by").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
 /**
