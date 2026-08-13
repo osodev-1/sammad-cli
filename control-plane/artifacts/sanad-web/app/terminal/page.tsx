@@ -1,6 +1,7 @@
-import { auth } from "@clerk/nextjs/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 import { getOrgUsage } from "@/lib/billing/quota";
+import { isCoderPanelAllowed } from "@/lib/auth/coder";
 import WorkspaceClient from "./WorkspaceClient";
 
 export const metadata = { title: "sanad — workspace" };
@@ -16,5 +17,9 @@ export default async function TerminalPage() {
    */
   const usage = await getOrgUsage(`personal_${userId}`);
 
-  return <WorkspaceClient plan={usage.plan} />;
+  const clerkUser = await currentUser();
+  const email = clerkUser?.emailAddresses[0]?.emailAddress ?? "";
+  const coderEnabled = isCoderPanelAllowed(email);
+
+  return <WorkspaceClient plan={usage.plan} coderEnabled={coderEnabled} />;
 }
