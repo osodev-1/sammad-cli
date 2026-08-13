@@ -82,6 +82,9 @@ def _bad_cid(cid: str) -> JSONResponse | None:
 
 async def _spawn(request: Request, root: Path, cid: str, ticket: str) -> JSONResponse | CoderRunner:
     settings = _settings(request)
+    live = [r for r in list_conversations(root) if r.alive]
+    if len(live) >= settings.coder_max_conversations:
+        return _err(409, "conversation_limit", "too many live conversations; stop one first")
     cp = request.app.state.control_plane
     try:
         identity = await cp.redeem_ticket(ticket)

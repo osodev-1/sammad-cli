@@ -55,6 +55,8 @@ class TerminalSettings:
     # 24h-token ceilings; a runaway browser-driven turn burns quota unattended.
     coder_max_turn_seconds: float = 3600.0
     coder_max_steps_per_turn: int = 200
+    # Live runner cap per workspace; write-lease arrives in P6.
+    coder_max_conversations: int = 3
 
     @classmethod
     def load(cls, env: Mapping[str, str] | None = None) -> TerminalSettings:
@@ -119,4 +121,5 @@ class TerminalSettings:
             coder_enabled=e.get("CODER_ENABLED", "") == "1",
             coder_max_turn_seconds=float(e.get("CODER_MAX_TURN_SECONDS", "3600")),
             coder_max_steps_per_turn=int(e.get("CODER_MAX_STEPS_PER_TURN", "200")),
+            coder_max_conversations=int(e.get("CODER_MAX_CONVERSATIONS", "3")),
         )
