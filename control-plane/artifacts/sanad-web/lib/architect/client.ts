@@ -1,6 +1,7 @@
 import { parseSessionGrant } from "@/lib/terminal/protocol";
 import { withSession } from "@/lib/terminal/workspace-model";
 import type { ChangePlan } from "@/lib/blueprint/api";
+import { streamNdjson } from "@/lib/ndjson";
 
 /** One item off the architect turn stream (mirrors the agentd bridge).
  * Items carry a journal `seq` — the reconnect cursor (R6 resilience). */
@@ -65,41 +66,6 @@ export async function startArchitect(sessionId?: string): Promise<StartResult> {
   }
 }
 
-async function streamNdjson(
-  res: Response,
-  onItem: (item: ArchitectItem) => void,
-): Promise<void> {
-  if (!res.body) return;
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  const flush = (line: string) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    try {
-      onItem(JSON.parse(trimmed) as ArchitectItem);
-    } catch {
-      /* skip a partial/garbled line */
-    }
-  };
-  for (;;) {
-    let chunk: ReadableStreamReadResult<Uint8Array>;
-    try {
-      chunk = await reader.read();
-    } catch {
-      break; // aborted or connection dropped — the caller re-follows
-    }
-    if (chunk.done) break;
-    buf += decoder.decode(chunk.value, { stream: true });
-    let nl: number;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      flush(buf.slice(0, nl));
-      buf = buf.slice(nl + 1);
-    }
-  }
-  flush(buf);
-}
-
 /**
  * Start one turn, invoking `onItem` per streamed item. The server journals
  * the turn independently of this connection: on a drop, the caller re-attaches
@@ -139,7 +105,7 @@ export async function askArchitect(
     });
     return;
   }
-  await streamNdjson(res, onItem);
+  await streamNdjson<ArchitectItem>(res, onItem);
 }
 
 /** Re-attach to a journaled turn from a seq (replay the gap, then live). */
@@ -170,7 +136,7 @@ export async function followArchitect(
     });
     return;
   }
-  await streamNdjson(res, onItem);
+  await streamNdjson<ArchitectItem>(res, onItem);
 }
 
 export interface TurnSummary {
