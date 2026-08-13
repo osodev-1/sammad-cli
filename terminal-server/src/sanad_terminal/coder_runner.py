@@ -67,7 +67,7 @@ class CoderRunner(WireRunner):
             max_steps_per_turn=max_steps_per_turn,
         )
         self.conversation_id = conversation_id
-        self._pending: dict[str, PendingRequest] = {}
+        self._pending_requests: dict[str, PendingRequest] = {}
 
     # -- request bridge (P1) --------------------------------------------------
 
@@ -87,7 +87,7 @@ class CoderRunner(WireRunner):
             # ToolCall/hook/unknown types, malformed frames, and requests
             # outside a running turn (background lane = P3/P4) all reject.
             return False
-        self._pending[rid] = PendingRequest(
+        self._pending_requests[rid] = PendingRequest(
             request_id=rid,
             request_type=request_type,
             turn_id=state.turn_id,
@@ -115,7 +115,7 @@ class CoderRunner(WireRunner):
                 "createdAt": p.created_at,
                 "request": p.request,
             }
-            for p in self._pending.values()
+            for p in self._pending_requests.values()
         ]
 
     async def _consume(self, state, queue) -> None:  # noqa: ANN001
@@ -130,11 +130,11 @@ class CoderRunner(WireRunner):
         if state is not None:
             await self._cancel_pending("runner_stopped", state)
         else:
-            self._pending.clear()
+            self._pending_requests.clear()
 
     async def _cancel_pending(self, reason: str, state) -> None:  # noqa: ANN001
-        for rid in list(self._pending):
-            self._pending.pop(rid, None)
+        for rid in list(self._pending_requests):
+            self._pending_requests.pop(rid, None)
             await self._append(
                 state, {"kind": "request_cancelled", "requestId": rid, "reason": reason}
             )
