@@ -17,6 +17,7 @@ import {
   EFSClient,
 } from "@aws-sdk/client-efs";
 import { DescribeImagesCommand, ECRClient } from "@aws-sdk/client-ecr";
+import { deriveTrustStoreKey } from "./tokens";
 
 export interface AwsComputeConfig {
   region: string;
@@ -126,6 +127,18 @@ export async function registerTaskDefinition(
   accessPointId: string,
   agentEnv: Record<string, string>,
 ): Promise<string> {
+  const environment = Object.entries(agentEnv).map(([name, value]) => ({
+    name,
+    value,
+  }));
+  // TRUST_STORE_KEY: stable per-user HMAC key for the workspace's trust
+  // store, derived here (not per-run, unlike AGENTD_TOKEN/MACHINE_NONCE)
+  // since it must keep verifying across machine restarts. userId is already
+  // in scope via agentEnv's SANAD_WORKSPACE_USER entry.
+  const userId = agentEnv.SANAD_WORKSPACE_USER;
+  if (userId) {
+    environment.push({ name: "TRUST_STORE_KEY", value: deriveTrustStoreKey(userId) });
+  }
   const result = await ecs(config.region).send(
     new RegisterTaskDefinitionCommand({
       family: `sanad-ws-${hash12}`,
@@ -150,10 +163,7 @@ export async function registerTaskDefinition(
           name: "workspace",
           image: config.workspaceImage,
           essential: true,
-          environment: Object.entries(agentEnv).map(([name, value]) => ({
-            name,
-            value,
-          })),
+          environment,
           mountPoints: [{ sourceVolume: "data", containerPath: "/data" }],
           portMappings: [7070, 3000, 5173, 8000, 8080].map((p) => ({
             containerPort: p,

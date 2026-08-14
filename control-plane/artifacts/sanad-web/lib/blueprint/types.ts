@@ -15,8 +15,13 @@ export interface Diagnostic {
   path: string | null;
 }
 
-/** S9 trust state of a node's executable definition (e.g. a skill's SKILL.md). */
-export type TrustState = "trusted" | "untrusted" | "changed";
+/**
+ * S9 trust state of a node's executable definition (e.g. a skill's
+ * SKILL.md). "tampered" = the trust store's signature no longer verifies
+ * against the content — the strongest signal, distinct from ordinary
+ * "changed" (edited since review) or "untrusted" (never reviewed).
+ */
+export type TrustState = "trusted" | "untrusted" | "changed" | "tampered";
 
 export interface BlueprintNode {
   id: string;
