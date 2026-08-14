@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
 from kimi_cli.approval_runtime import (
@@ -203,6 +203,8 @@ class Approval:
         action: str,
         description: str,
         display: list[DisplayBlock] | None = None,
+        also_cached_as: Sequence[str] = (),
+        cacheable: bool = True,
     ) -> ApprovalResult:
         """
         Request approval for the given action. Intended to be called by tools.
@@ -212,6 +214,12 @@ class Approval:
             action (str): The action to request approval for.
                 This is used to identify the action for auto-approval.
             description (str): The description of the action. This is used to display to the user.
+            also_cached_as (Sequence[str]): Additional legacy action names that also satisfy
+                the session auto-approve cache for this request (cache-check only — the
+                write-back on ``approve_for_session`` still caches only the primary ``action``).
+            cacheable (bool): When False, an ``approve_for_session`` response behaves as a
+                plain ``approve``: nothing is written to the session cache and no other
+                pending request is resolved from it.
 
         Returns:
             ApprovalResult: Result with ``approved`` flag and optional ``feedback``.
@@ -259,7 +267,9 @@ class Approval:
             )
             return ApprovalResult(approved=True)
 
-        if action in self._state.auto_approve_actions:
+        if action in self._state.auto_approve_actions or any(
+            alias in self._state.auto_approve_actions for alias in also_cached_as
+        ):
             from kimi_cli.telemetry import track
 
             track(
@@ -332,6 +342,12 @@ class Approval:
 
         record = self._runtime.get_request(request_id)
         approved_via_session_cache = bool(record and record.approved_via_session_cache)
+
+        if response == "approve_for_session" and not cacheable:
+            # Uncacheable actions (e.g. .sanad edits) must always re-prompt — treat
+            # a session-approve response as a plain one-shot approve: no cache
+            # write, no resolving of other pending requests for this action.
+            response = "approve"
 
         match response:
             case "approve":
