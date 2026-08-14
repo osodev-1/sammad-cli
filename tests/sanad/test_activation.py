@@ -72,6 +72,32 @@ def test_corrupt_store_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert workspace_mcp_configs(ws) == []
 
 
+def test_inline_env_hash_set_loads_without_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """SANAD_BLUEPRINT_TRUST_SHA256S present → the inline hash set is trusted
+    directly, no store file ever read."""
+    monkeypatch.delenv("SANAD_BLUEPRINT_TRUST", raising=False)
+    ws = _workspace(tmp_path)
+    digest = hashlib.sha256(MCP_YAML.encode()).hexdigest()
+    monkeypatch.setenv("SANAD_BLUEPRINT_TRUST_SHA256S", digest)
+    configs = workspace_mcp_configs(ws)
+    assert configs == [
+        {
+            "mcpServers": {
+                "files": {"command": "node", "args": ["server.js"], "env": {"LOG": "quiet"}}
+            }
+        }
+    ]
+
+
+def test_inline_empty_env_wins_over_legacy_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Inline var present-even-empty takes precedence over a valid legacy
+    file var — proves the CLI never falls back to the file once inline is set."""
+    ws = _workspace(tmp_path)
+    monkeypatch.setenv("SANAD_BLUEPRINT_TRUST", str(_trust(tmp_path, MCP_YAML)))
+    monkeypatch.setenv("SANAD_BLUEPRINT_TRUST_SHA256S", "")
+    assert workspace_mcp_configs(ws) == []
+
+
 def test_http_transport_and_malformed_specs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     http_yaml = (
         "apiVersion: sanad.dev/v1alpha1\nkind: MCPServer\n"

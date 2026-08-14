@@ -46,6 +46,7 @@ from sanad_terminal.workspace import (
     find_resumable_session,
     prepare_single_user_dirs,
     prepare_user_dirs,
+    verified_trust_hashes,
 )
 
 
@@ -308,6 +309,9 @@ def create_app(
                     api_base_url=resolved.child_api_base_url,
                     cols=cols,
                     rows=rows,
+                    trusted_hashes=verified_trust_hashes(
+                        user_dir / "workspace", resolved.trust_store_key
+                    ),
                 )
                 spawn_uid: int | None = None
                 spawn_gid: int | None = None

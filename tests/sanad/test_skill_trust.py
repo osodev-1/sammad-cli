@@ -89,6 +89,32 @@ async def test_unreadable_store_fails_closed_for_sanad_roots(tmp_path: Path, mon
 
 
 @pytest.mark.asyncio
+async def test_inline_env_hash_set_loads_without_file(tmp_path: Path, monkeypatch):
+    """SANAD_BLUEPRINT_TRUST_SHA256S present → the inline hash set gates
+    discovery directly, no store file ever read."""
+    root = _skills_root(tmp_path)
+    trusted_md = _write_skill(root, "reviewed", TRUSTED_MD)
+    _write_skill(root, "sneaky", UNTRUSTED_MD)
+    monkeypatch.delenv("SANAD_BLUEPRINT_TRUST", raising=False)
+    digest = hashlib.sha256(trusted_md.read_bytes()).hexdigest()
+    monkeypatch.setenv("SANAD_BLUEPRINT_TRUST_SHA256S", digest)
+    assert await _names(root) == ["reviewed"]
+
+
+@pytest.mark.asyncio
+async def test_inline_empty_env_wins_over_legacy_file(tmp_path: Path, monkeypatch):
+    """Inline var present-even-empty takes precedence over a valid legacy
+    file var — proves the CLI never falls back to the file once inline is set."""
+    root = _skills_root(tmp_path)
+    trusted_md = _write_skill(root, "reviewed", TRUSTED_MD)
+    _write_skill(root, "sneaky", UNTRUSTED_MD)
+    store = _write_trust(tmp_path, trusted_md)
+    monkeypatch.setenv("SANAD_BLUEPRINT_TRUST", str(store))
+    monkeypatch.setenv("SANAD_BLUEPRINT_TRUST_SHA256S", "")
+    assert await _names(root) == []
+
+
+@pytest.mark.asyncio
 async def test_missing_store_file_fails_closed(tmp_path: Path, monkeypatch):
     """Env set but no store written yet (fresh machine): nothing loads until
     the first apply/review creates it — never a silent free-for-all."""
