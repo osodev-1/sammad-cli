@@ -62,6 +62,24 @@ def test_child_env_exact_and_leak_free(tmp_path: Path, monkeypatch):
     }
 
 
+def test_inline_trust_env_replaces_file_var(tmp_path):
+    env = build_child_env(
+        user_dir=tmp_path, session_token="sess_x", api_base_url="https://cp",
+        cols=80, rows=24, trusted_hashes=["a" * 64, "b" * 64],
+    )
+    assert env["SANAD_BLUEPRINT_TRUST_SHA256S"] == "a" * 64 + "," + "b" * 64
+    assert "SANAD_BLUEPRINT_TRUST" not in env
+
+
+def test_no_hashes_keeps_legacy_file_var(tmp_path):
+    env = build_child_env(
+        user_dir=tmp_path, session_token="sess_x", api_base_url="https://cp",
+        cols=80, rows=24,
+    )
+    assert env["SANAD_BLUEPRINT_TRUST"].endswith("blueprint-trust.json")
+    assert "SANAD_BLUEPRINT_TRUST_SHA256S" not in env
+
+
 def test_find_resumable_session(tmp_path: Path):
     import hashlib
     import os

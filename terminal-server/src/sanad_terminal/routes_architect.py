@@ -28,7 +28,7 @@ from sanad_terminal.architect_runner import (
 )
 from sanad_terminal.control_plane import ControlPlaneError
 from sanad_terminal.routes_workspace import _settings, workspace_root
-from sanad_terminal.workspace import build_child_env
+from sanad_terminal.workspace import build_child_env, verified_trust_hashes
 
 router = APIRouter(prefix="/internal/architect")
 
@@ -55,6 +55,7 @@ def _spawn_params(settings: Any, root, session_token: str):  # noqa: ANN001, ANN
         api_base_url=settings.child_api_base_url,
         cols=80,
         rows=24,
+        trusted_hashes=verified_trust_hashes(root, settings.trust_store_key),
     )
     uid = gid = None
     if settings.agent_user:

@@ -441,10 +441,18 @@ def _sanad_trust_gate(skills_dir: KaosPath) -> frozenset[str] | None:
     Local CLIs never set the env, so their discovery is unchanged. An unreadable
     store fails CLOSED (empty set → nothing gated loads) rather than open.
     """
+    if ".sanad" not in Path(str(skills_dir)).parts:
+        return None
+
+    # P2a inline delivery: present-even-empty wins over the legacy file var —
+    # governed machines hand the CLI the VERIFIED hash set directly at exec
+    # time, so the store file is never re-read.
+    inline = os.environ.get("SANAD_BLUEPRINT_TRUST_SHA256S")
+    if inline is not None:
+        return frozenset(h for h in inline.split(",") if h)
+
     trust_path = os.environ.get("SANAD_BLUEPRINT_TRUST")
     if not trust_path:
-        return None
-    if ".sanad" not in Path(str(skills_dir)).parts:
         return None
     try:
         data: object = json.loads(Path(trust_path).read_text(encoding="utf-8"))

@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -91,6 +92,7 @@ def build_child_env(
     api_base_url: str,
     cols: int,
     rows: int,
+    trusted_hashes: Sequence[str] | None = None,
 ) -> dict[str, str]:
     """The spawned agent's environment, built FROM SCRATCH.
 
@@ -98,7 +100,7 @@ def build_child_env(
     here is user-readable (`env`). TERMINAL_SHARED_SECRET must never appear.
     SANAD_SESSION_TOKEN is the user's own credential — acceptable by design.
     """
-    return {
+    env = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "HOME": str(user_dir / "home"),
         "TERM": "xterm-256color",
@@ -113,8 +115,29 @@ def build_child_env(
         "KIMI_CLI_NO_AUTO_UPDATE": "1",
         "SANAD_API_BASE_URL": api_base_url,
         "SANAD_SESSION_TOKEN": session_token,
-        # S9 trust gate: with this set, the CLI loads `.sanad` skills only when
-        # their SKILL.md hash is recorded here (apply-reviewed or UI-reviewed).
-        # Local dev CLIs never set it, so their behavior is unchanged.
-        "SANAD_BLUEPRINT_TRUST": str(user_dir / "blueprint-trust.json"),
     }
+    if trusted_hashes is not None:
+        # Inline delivery (P2a): the CLI gets the VERIFIED hash set at exec time
+        # and never reads the store file — an in-session edit of the EFS store
+        # can no longer poison gates (the signature check catches it at the
+        # next spawn, and this process's set is already fixed).
+        env["SANAD_BLUEPRINT_TRUST_SHA256S"] = ",".join(trusted_hashes)
+    else:
+        # S9 trust gate (legacy, pre-P2a callers): with this set, the CLI
+        # loads `.sanad` skills only when their SKILL.md hash is recorded
+        # here (apply-reviewed or UI-reviewed). Local dev CLIs never set it,
+        # so their behavior is unchanged.
+        env["SANAD_BLUEPRINT_TRUST"] = str(user_dir / "blueprint-trust.json")
+    return env
+
+
+def verified_trust_hashes(workspace_root: Path, key: str) -> list[str]:
+    """Sorted sha256 set from the signed store; [] when absent or tampered."""
+    from sanad_terminal.blueprint_trust import load_trust_checked
+
+    entries, tampered = load_trust_checked(workspace_root, key=key)
+    if tampered:
+        return []
+    return sorted(
+        e["sha256"] for e in entries.values() if isinstance(e.get("sha256"), str)
+    )

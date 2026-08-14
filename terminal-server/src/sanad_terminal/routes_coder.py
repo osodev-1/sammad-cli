@@ -35,7 +35,7 @@ from sanad_terminal.coder_runner import (
 from sanad_terminal.control_plane import ControlPlaneError
 from sanad_terminal.routes_workspace import _settings, workspace_root
 from sanad_terminal.wire_runner import WireRunnerError
-from sanad_terminal.workspace import build_child_env
+from sanad_terminal.workspace import build_child_env, verified_trust_hashes
 
 router = APIRouter(prefix="/internal/coder")
 
@@ -101,6 +101,7 @@ async def _spawn(request: Request, root: Path, cid: str, ticket: str) -> JSONRes
         api_base_url=settings.child_api_base_url,
         cols=80,
         rows=24,
+        trusted_hashes=verified_trust_hashes(root, settings.trust_store_key),
     )
     uid = gid = None
     if settings.agent_user:

@@ -30,6 +30,14 @@ def _trusted_hashes() -> frozenset[str] | None:
     An unreadable/corrupt store fails CLOSED (load nothing) — matching the
     skill gate's posture.
     """
+    # P2a inline delivery: present-even-empty wins over the legacy file var —
+    # governed machines hand the CLI the VERIFIED hash set directly at exec
+    # time, so the store file is never re-read (and can't be poisoned
+    # in-session between spawn and read).
+    inline = os.environ.get("SANAD_BLUEPRINT_TRUST_SHA256S")
+    if inline is not None:
+        return frozenset(h for h in inline.split(",") if h)
+
     trust_path = os.environ.get("SANAD_BLUEPRINT_TRUST")
     if not trust_path:
         return None
