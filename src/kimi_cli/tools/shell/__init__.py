@@ -13,6 +13,7 @@ from kimi_cli.soul.agent import Runtime
 from kimi_cli.soul.approval import Approval
 from kimi_cli.soul.toolset import get_current_tool_call_or_none
 from kimi_cli.tools.display import BackgroundTaskDisplayBlock, ShellDisplayBlock
+from kimi_cli.tools.shell.approval_pattern import action_for
 from kimi_cli.tools.utils import ToolResultBuilder, load_desc
 from kimi_cli.utils.environment import Environment
 from kimi_cli.utils.logging import logger
@@ -91,7 +92,7 @@ class Shell(CallableTool2[Params]):
 
         result = await self._approval.request(
             self.name,
-            "run command",
+            action_for(command),
             f"Run command `{command}`",
             display=[
                 ShellDisplayBlock(
@@ -99,6 +100,7 @@ class Shell(CallableTool2[Params]):
                     command=command,
                 )
             ],
+            also_cached_as=("run command",),
         )
         if not result:
             return result.rejection_error()
@@ -153,7 +155,7 @@ class Shell(CallableTool2[Params]):
 
         result = await self._approval.request(
             self.name,
-            "run background command",
+            action_for(command, prefix="run background command"),
             f"Run background command `{command}`",
             display=[
                 ShellDisplayBlock(
@@ -161,6 +163,7 @@ class Shell(CallableTool2[Params]):
                     command=command,
                 )
             ],
+            also_cached_as=("run background command",),
         )
         if not result:
             return result.rejection_error()

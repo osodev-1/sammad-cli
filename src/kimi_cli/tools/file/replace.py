@@ -14,7 +14,7 @@ from kimi_cli.tools.file.plan_mode import inspect_plan_edit_target
 from kimi_cli.tools.utils import load_desc
 from kimi_cli.utils.diff import build_diff_blocks
 from kimi_cli.utils.logging import logger
-from kimi_cli.utils.path import is_within_workspace, kaos_path_from_user_input
+from kimi_cli.utils.path import is_within_directory, is_within_workspace, kaos_path_from_user_input
 
 _BASE_DESCRIPTION = load_desc(Path(__file__).parent / "replace.md")
 
@@ -149,11 +149,15 @@ class StrReplaceFile(CallableTool2[Params]):
                 str(p), original_content, content
             )
 
-            action = (
-                FileActions.EDIT
-                if is_within_workspace(p, self._work_dir, self._additional_dirs)
-                else FileActions.EDIT_OUTSIDE
-            )
+            if is_within_directory(p, self._work_dir / ".sanad"):
+                action = FileActions.EDIT_SANAD
+                cacheable = False
+            elif is_within_workspace(p, self._work_dir, self._additional_dirs):
+                action = FileActions.EDIT
+                cacheable = True
+            else:
+                action = FileActions.EDIT_OUTSIDE
+                cacheable = True
 
             # Plan file edits are auto-approved; all other edits need approval.
             if not is_plan_file_edit:
@@ -162,6 +166,7 @@ class StrReplaceFile(CallableTool2[Params]):
                     action,
                     f"Edit file `{p}`",
                     display=diff_blocks,
+                    cacheable=cacheable,
                 )
                 if not result:
                     return result.rejection_error()
