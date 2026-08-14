@@ -6,6 +6,16 @@ coarse "run command" approval bucket, this extracts the leading command
 "head(s)" — e.g. ``git`` from ``git status`` — so the approval action reflects
 what is actually being run, while still degrading gracefully to the legacy
 bare action when no head can be derived.
+
+Two hardening rules keep the derived action trustworthy rather than merely
+informative:
+
+- Wrapper prefixes (``sudo``, ``env``, ...) are transparent: the head comes
+  from the wrapped command, not the wrapper, so ``sudo git push`` is bucketed
+  under ``git`` rather than a blanket-approvable ``sudo``.
+- A head containing characters that could forge the formatted action string
+  (comma, parens, whitespace) is treated as suspicious and the whole request
+  falls back to the bare, coarse action instead of trusting the fragment.
 """
 
 from __future__ import annotations
@@ -15,6 +25,13 @@ import shlex
 
 _SEPARATORS = ("&&", "||", "|", ";", "&")
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_SUSPICIOUS_HEAD_RE = re.compile(r"[,()\s]")
+
+# Commands that merely wrap another command. The approval action should be
+# keyed on what they run, never on the wrapper itself — otherwise approving
+# `sudo git push` once would session-cache a bare `sudo` bucket that covers
+# any future `sudo <anything>`.
+_WRAPPER_PREFIXES = frozenset({"sudo", "env", "nohup", "nice", "time", "command", "exec"})
 
 
 def _split_unquoted(command: str) -> list[str]:
@@ -53,6 +70,11 @@ def _is_env_assignment(token: str) -> bool:
     return bool(_ENV_ASSIGNMENT_RE.match(token))
 
 
+def _is_suspicious_head(head: str) -> bool:
+    """True when *head* contains characters that could forge the formatted action."""
+    return bool(_SUSPICIOUS_HEAD_RE.search(head))
+
+
 def _segment_head(segment: str) -> str | None:
     try:
         tokens = shlex.split(segment)
@@ -60,20 +82,30 @@ def _segment_head(segment: str) -> str | None:
         tokens = segment.split()
 
     idx = 0
-    while idx < len(tokens) and _is_env_assignment(tokens[idx]):
-        idx += 1
-    if idx >= len(tokens):
-        return None
+    while idx < len(tokens):
+        token = tokens[idx]
+        if _is_env_assignment(token):
+            # Also covers "skip subsequent VAR=val tokens after env": once a
+            # wrapper is consumed below, this same check runs again on the
+            # next token before any wrapper check does.
+            idx += 1
+            continue
+        stripped = token.rsplit("/", 1)[-1]
+        if stripped in _WRAPPER_PREFIXES:
+            idx += 1
+            continue
+        return stripped or None
 
-    head = tokens[idx].rsplit("/", 1)[-1]
-    return head or None
+    return None
 
 
 def action_for(command: str, prefix: str = "run command") -> str:
     """Return an approval action naming the command's head(s), e.g. ``run command (git)``.
 
     Falls back to the bare *prefix* (legacy behavior) when no head can be
-    derived, such as an empty or whitespace-only command.
+    derived (e.g. an empty command, or a command that is only wrapper
+    prefixes) or when any derived head looks like it could forge the
+    formatted action string.
     """
     heads: list[str] = []
     for segment in _split_unquoted(command):
@@ -81,6 +113,6 @@ def action_for(command: str, prefix: str = "run command") -> str:
         if head is not None and head not in heads:
             heads.append(head)
 
-    if not heads:
+    if not heads or any(_is_suspicious_head(head) for head in heads):
         return prefix
     return f"{prefix} ({', '.join(heads)})"

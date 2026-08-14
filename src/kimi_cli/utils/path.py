@@ -8,6 +8,8 @@ from pathlib import Path, PurePath
 from stat import S_ISDIR
 
 import aiofiles.os
+from kaos import get_current_kaos
+from kaos.local import local_kaos
 from kaos.path import KaosPath
 
 from kimi_cli.utils.environment import is_windows
@@ -226,6 +228,47 @@ def is_within_workspace(
     if is_within_directory(path, work_dir):
         return True
     return any(is_within_directory(path, d) for d in additional_dirs)
+
+
+def resolve_symlinks(path: KaosPath) -> KaosPath:
+    """Resolve symlinks in *path* when running on the local KAOS backend.
+
+    ``KaosPath.canonical()`` normalizes ``.``/``..`` segments but does **not**
+    resolve symlinks. On local backends this walks symlinks via
+    ``pathlib.Path.resolve()`` — which tolerates a not-yet-existing tail by
+    resolving as much of the chain as exists and appending the rest verbatim
+    — before falling back to ``canonical()`` for path-segment normalization.
+    Non-local backends keep the canonical-only path, since ``Path.resolve()``
+    would walk the wrong filesystem.
+
+    Security-sensitive callers (e.g. classifying a write target as inside a
+    privileged directory) must use this instead of ``canonical()`` alone, or
+    a workspace symlink can be used to disguise the real destination.
+    """
+    resolved = path
+    if get_current_kaos().name == local_kaos.name:
+        try:
+            local_resolved = Path(str(path)).resolve()
+        except OSError:
+            # Keep the original path; canonical() below still does what it can.
+            pass
+        else:
+            resolved = KaosPath.unsafe_from_local_path(local_resolved)
+    try:
+        return resolved.canonical()
+    except OSError:
+        return resolved
+
+
+def is_sanad_definition_path(path: KaosPath, work_dir: KaosPath) -> bool:
+    """True when *path* — after resolving symlinks — is inside ``<work_dir>/.sanad``.
+
+    Classification must reflect where a write actually lands, not the literal
+    argument path: a workspace symlink pointing into (or out of) ``.sanad``
+    must not let a sanad-definition edit masquerade as a plain file edit.
+    """
+    sanad_dir = resolve_symlinks(work_dir / ".sanad")
+    return is_within_directory(resolve_symlinks(path), sanad_dir)
 
 
 async def find_project_root(work_dir: KaosPath) -> KaosPath:
