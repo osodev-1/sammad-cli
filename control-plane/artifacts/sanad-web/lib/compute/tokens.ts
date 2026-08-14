@@ -22,6 +22,20 @@ export function deriveMachineToken(userId: string, runNonce: string): string {
     .digest("base64url");
 }
 
+/**
+ * TRUST_STORE_KEY = base64url(HMAC-SHA256(TERMINAL_MACHINE_KEY, userId + ":trust-store"))
+ *
+ * Per-user, stable across task runs (no nonce — the machine's trust-store
+ * signatures must keep verifying across restarts, unlike the per-run
+ * AGENTD_TOKEN). Injected into the task's baseline env at task-def
+ * registration; sanad-web never needs to recompute it.
+ */
+export function deriveTrustStoreKey(userId: string): string {
+  return createHmac("sha256", machineKey())
+    .update(`${userId}:trust-store`)
+    .digest("base64url");
+}
+
 export function machineTokenMatches(
   presented: string,
   userId: string,

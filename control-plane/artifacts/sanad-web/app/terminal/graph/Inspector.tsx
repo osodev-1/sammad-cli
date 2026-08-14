@@ -42,13 +42,23 @@ export default function Inspector({
 
       <div style={s.body}>
         {/* S9: unreviewed executable content — explain the gate and offer the
-            one-time review. Open the file first; trusting is approving it. */}
-        {(node.trust === "untrusted" || node.trust === "changed") && (
+            one-time review. Open the file first; trusting is approving it.
+            "tampered" (signature mismatch) gets the most severe presentation
+            available here: a solid filled note block instead of plain text. */}
+        {(node.trust === "untrusted" ||
+          node.trust === "changed" ||
+          node.trust === "tampered") && (
           <Section title="Trust">
-            <p style={s.trustNote}>
-              {node.trust === "changed"
-                ? "This skill's instructions were edited since they were last reviewed. New agent sessions will not load them until re-reviewed."
-                : "This skill's instructions arrived outside a reviewed change. New agent sessions will not load them until reviewed."}
+            <p
+              style={
+                node.trust === "tampered" ? s.trustNoteTampered : s.trustNote
+              }
+            >
+              {node.trust === "tampered"
+                ? "Signature mismatch: this content does not match its last reviewed state and may have been altered outside a reviewed change. New agent sessions will not load it until re-reviewed — verify the change carefully before trusting it again."
+                : node.trust === "changed"
+                  ? "This skill's instructions were edited since they were last reviewed. New agent sessions will not load them until re-reviewed."
+                  : "This skill's instructions arrived outside a reviewed change. New agent sessions will not load them until reviewed."}
             </p>
             {onTrust && (
               <button
@@ -272,6 +282,18 @@ const s: Record<string, CSSProperties> = {
     fontSize: "0.78rem",
     lineHeight: 1.55,
     color: "var(--ink-soft)",
+  },
+  /* Most severe trust presentation: solid fill (inverted) block, not plain
+     text — the same solid-vs-hollow escalation the trust chip badge uses. */
+  trustNoteTampered: {
+    margin: 0,
+    fontSize: "0.78rem",
+    lineHeight: 1.55,
+    fontWeight: 600,
+    color: "var(--paper)",
+    background: "var(--ink)",
+    borderRadius: "var(--radius-sm)",
+    padding: "0.5rem 0.6rem",
   },
   trustBtn: {
     alignSelf: "flex-start",

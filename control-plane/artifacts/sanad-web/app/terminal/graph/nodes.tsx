@@ -34,17 +34,30 @@ function BlueprintNodeInner({ data, selected }: NodeProps) {
       <span style={s.kind}>{kindLabel(d.kind)}</span>
       <span style={s.name}>{d.name}</span>
       {/* S9: unreviewed executable content is flagged in words, not hue —
-          it will not load into new agent sessions until reviewed. */}
-      {(d.trust === "untrusted" || d.trust === "changed") && (
+          it will not load into new agent sessions until reviewed.
+          "tampered" (signature mismatch) gets the most severe presentation
+          available here: a solid filled chip instead of the dashed outline. */}
+      {(d.trust === "untrusted" ||
+        d.trust === "changed" ||
+        d.trust === "tampered") && (
         <span
-          style={s.trustChip}
+          style={{
+            ...s.trustChip,
+            ...(d.trust === "tampered" ? s.trustChipTampered : null),
+          }}
           title={
-            d.trust === "changed"
-              ? "Edited since review — re-review to activate"
-              : "Not yet reviewed — review to activate"
+            d.trust === "tampered"
+              ? "Signature mismatch — content changed outside review, do not trust"
+              : d.trust === "changed"
+                ? "Edited since review — re-review to activate"
+                : "Not yet reviewed — review to activate"
           }
         >
-          {d.trust === "changed" ? "changed" : "unreviewed"}
+          {d.trust === "tampered"
+            ? "tampered"
+            : d.trust === "changed"
+              ? "changed"
+              : "unreviewed"}
         </span>
       )}
       {/* Committed-ness in words + a hollow corner dot — never hue. */}
@@ -136,6 +149,13 @@ const s: Record<string, CSSProperties> = {
     borderRadius: "var(--radius-pill)",
     padding: "0 0.35rem",
     lineHeight: 1.6,
+  },
+  /* Most severe trust presentation: solid fill (inverted), not dashed —
+     the same solid-vs-hollow escalation the severity dot already uses. */
+  trustChipTampered: {
+    border: "1px solid var(--ink)",
+    background: "var(--ink)",
+    color: "var(--paper)",
   },
   /* Hollow ring top-left = uncommitted work on this resource (the severity
      dot keeps top-right). Solid-vs-hollow reads in greyscale. */

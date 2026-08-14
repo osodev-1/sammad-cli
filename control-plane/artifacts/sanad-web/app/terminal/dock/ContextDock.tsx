@@ -7,7 +7,7 @@ import { withSession } from "@/lib/terminal/workspace-model";
 
 interface TrustItem {
   path: string;
-  status: "trusted" | "untrusted" | "changed";
+  status: "trusted" | "untrusted" | "changed" | "tampered";
 }
 
 interface Commit {
@@ -195,8 +195,18 @@ export default function ContextDock({
               <div key={t.path} style={s.trustRow}>
                 <span style={s.trustPath} title={t.path}>
                   {t.path.replace(".sanad/", "")}
-                  <span style={s.trustState}>
-                    {t.status === "changed" ? " changed" : " unreviewed"}
+                  <span
+                    style={
+                      t.status === "tampered"
+                        ? s.trustStateTampered
+                        : s.trustState
+                    }
+                  >
+                    {t.status === "tampered"
+                      ? " tampered"
+                      : t.status === "changed"
+                        ? " changed"
+                        : " unreviewed"}
                   </span>
                 </span>
                 <button
@@ -362,6 +372,9 @@ const s: Record<string, CSSProperties> = {
     whiteSpace: "nowrap",
   },
   trustState: { color: "var(--ink-muted)", fontStyle: "italic" },
+  /* Most severe trust presentation: bold ink, no italic softening — the
+     same escalation the graph badge and inspector note use. */
+  trustStateTampered: { color: "var(--ink)", fontWeight: 700 },
   trustBtn: {
     font: "inherit",
     fontSize: "0.68rem",
