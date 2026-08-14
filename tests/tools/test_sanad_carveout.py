@@ -94,3 +94,74 @@ async def test_normal_write_still_uses_edit_file_action(
 
     result = await task
     assert not result.is_error
+
+
+# --- symlink hardening: classification must reflect the resolved destination ---
+
+
+async def test_sanad_write_through_symlinked_directory_still_classifies_sanad(
+    write_file_tool: WriteFile, temp_work_dir: KaosPath, approval: Approval
+):
+    """A workspace symlink DIRECTORY pointing at .sanad must not disguise the write."""
+    local_work_dir = temp_work_dir.unsafe_to_local_path()
+    sanad_skills_dir = local_work_dir / ".sanad" / "skills" / "x"
+    sanad_skills_dir.mkdir(parents=True, exist_ok=True)
+    mylink = local_work_dir / "mylink"
+    mylink.symlink_to(local_work_dir / ".sanad", target_is_directory=True)
+
+    file_path = temp_work_dir / "mylink" / "skills" / "x" / "SKILL.md"
+
+    task = asyncio.create_task(write_file_tool(Params(path=str(file_path), content="hi")))
+    pending = await _await_pending(approval)
+    assert len(pending) == 1
+    assert pending[0].action == "edit sanad definition"
+    approval._runtime.resolve(pending[0].id, "approve")
+
+    result = await task
+    assert not result.is_error
+
+
+async def test_sanad_write_through_symlinked_file_still_classifies_sanad(
+    write_file_tool: WriteFile, temp_work_dir: KaosPath, approval: Approval
+):
+    """A workspace symlink FILE whose target is inside .sanad must not disguise the write."""
+    local_work_dir = temp_work_dir.unsafe_to_local_path()
+    sanad_skills_dir = local_work_dir / ".sanad" / "skills" / "x"
+    sanad_skills_dir.mkdir(parents=True, exist_ok=True)
+    real_file = sanad_skills_dir / "REAL.md"
+    real_file.write_text("original")
+    linked_file = local_work_dir / "linked.md"
+    linked_file.symlink_to(real_file)
+
+    file_path = temp_work_dir / "linked.md"
+
+    task = asyncio.create_task(write_file_tool(Params(path=str(file_path), content="hi")))
+    pending = await _await_pending(approval)
+    assert len(pending) == 1
+    assert pending[0].action == "edit sanad definition"
+    approval._runtime.resolve(pending[0].id, "approve")
+
+    result = await task
+    assert not result.is_error
+
+
+async def test_symlink_elsewhere_in_workspace_still_uses_edit_file(
+    write_file_tool: WriteFile, temp_work_dir: KaosPath, approval: Approval
+):
+    """A symlink that does not point into .sanad must not be misclassified (no false positive)."""
+    local_work_dir = temp_work_dir.unsafe_to_local_path()
+    real_dir = local_work_dir / "real_elsewhere"
+    real_dir.mkdir(parents=True, exist_ok=True)
+    other_link = local_work_dir / "other_link"
+    other_link.symlink_to(real_dir, target_is_directory=True)
+
+    file_path = temp_work_dir / "other_link" / "file.txt"
+
+    task = asyncio.create_task(write_file_tool(Params(path=str(file_path), content="hi")))
+    pending = await _await_pending(approval)
+    assert len(pending) == 1
+    assert pending[0].action == "edit file"
+    approval._runtime.resolve(pending[0].id, "approve")
+
+    result = await task
+    assert not result.is_error
