@@ -260,15 +260,41 @@ def resolve_symlinks(path: KaosPath) -> KaosPath:
         return resolved
 
 
+def resolve_write_target(path: KaosPath, work_dir: KaosPath) -> tuple[KaosPath, bool]:
+    """Resolve *path* once and classify it, for callers that both classify and write.
+
+    Returns ``(resolved_path, is_sanad)``. ``resolved_path`` is *path* with
+    symlinks resolved (see :func:`resolve_symlinks`); ``is_sanad`` is True
+    when that resolved location is inside ``<work_dir>/.sanad``.
+
+    Callers MUST perform the actual write against the returned
+    ``resolved_path``, not the original *path*. Resolving symlinks only for
+    classification and then writing through the original (still-symlinked)
+    path reopens a TOCTOU: the write's own symlink traversal happens again,
+    at syscall time, so a concurrent retarget of the symlink between approval
+    and write can redirect the bytes to a different location than the one
+    that was classified and approved. Sharing one resolution between
+    classify and write closes that gap.
+    """
+    resolved = resolve_symlinks(path)
+    sanad_dir = resolve_symlinks(work_dir / ".sanad")
+    is_sanad = is_within_directory(resolved, sanad_dir)
+    return resolved, is_sanad
+
+
 def is_sanad_definition_path(path: KaosPath, work_dir: KaosPath) -> bool:
     """True when *path* — after resolving symlinks — is inside ``<work_dir>/.sanad``.
 
     Classification must reflect where a write actually lands, not the literal
     argument path: a workspace symlink pointing into (or out of) ``.sanad``
     must not let a sanad-definition edit masquerade as a plain file edit.
+
+    Callers that also perform a write following this classification should
+    use :func:`resolve_write_target` instead, so classification and the
+    write share a single symlink resolution.
     """
-    sanad_dir = resolve_symlinks(work_dir / ".sanad")
-    return is_within_directory(resolve_symlinks(path), sanad_dir)
+    _, is_sanad = resolve_write_target(path, work_dir)
+    return is_sanad
 
 
 async def find_project_root(work_dir: KaosPath) -> KaosPath:
