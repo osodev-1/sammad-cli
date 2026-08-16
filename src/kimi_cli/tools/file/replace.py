@@ -15,9 +15,9 @@ from kimi_cli.tools.utils import load_desc
 from kimi_cli.utils.diff import build_diff_blocks
 from kimi_cli.utils.logging import logger
 from kimi_cli.utils.path import (
-    is_sanad_definition_path,
     is_within_workspace,
     kaos_path_from_user_input,
+    resolve_write_target,
 )
 
 _BASE_DESCRIPTION = load_desc(Path(__file__).parent / "replace.md")
@@ -153,7 +153,13 @@ class StrReplaceFile(CallableTool2[Params]):
                 str(p), original_content, content
             )
 
-            if is_sanad_definition_path(p, self._work_dir):
+            # Resolve symlinks ONCE and write to that resolved target below, so
+            # classification and the write share a single resolution — a
+            # concurrent retarget of a symlink between approval and write can't
+            # redirect the bytes to a location other than the one approved.
+            write_target, is_sanad = resolve_write_target(p, self._work_dir)
+
+            if is_sanad:
                 action = FileActions.EDIT_SANAD
                 cacheable = False
             elif is_within_workspace(p, self._work_dir, self._additional_dirs):
@@ -175,8 +181,8 @@ class StrReplaceFile(CallableTool2[Params]):
                 if not result:
                     return result.rejection_error()
 
-            # Write the modified content back to the file
-            await p.write_text(content, errors="replace")
+            # Write the modified content back to the resolved target
+            await write_target.write_text(content, errors="replace")
 
             # Count changes for success message
             total_replacements = 0

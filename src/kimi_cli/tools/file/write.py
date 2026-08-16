@@ -15,9 +15,9 @@ from kimi_cli.tools.utils import load_desc
 from kimi_cli.utils.diff import build_diff_blocks
 from kimi_cli.utils.logging import logger
 from kimi_cli.utils.path import (
-    is_sanad_definition_path,
     is_within_workspace,
     kaos_path_from_user_input,
+    resolve_write_target,
 )
 
 _BASE_DESCRIPTION = load_desc(Path(__file__).parent / "write.md")
@@ -138,9 +138,15 @@ class WriteFile(CallableTool2[Params]):
                 new_text,
             )
 
+            # Resolve symlinks ONCE and write to that resolved target below, so
+            # classification and the write share a single resolution — a
+            # concurrent retarget of a symlink between approval and write can't
+            # redirect the bytes to a location other than the one approved.
+            write_target, is_sanad = resolve_write_target(p, self._work_dir)
+
             # Plan file writes are auto-approved; other writes need approval
             if not is_plan_file_write:
-                if is_sanad_definition_path(p, self._work_dir):
+                if is_sanad:
                     action = FileActions.EDIT_SANAD
                     cacheable = False
                 elif is_within_workspace(p, self._work_dir, self._additional_dirs):
@@ -161,15 +167,17 @@ class WriteFile(CallableTool2[Params]):
                 if not result:
                     return result.rejection_error()
 
-            # Write content to file
+            # Write content to the resolved target
             match params.mode:
                 case "overwrite":
-                    await p.write_text(params.content)
+                    await write_target.write_text(params.content)
                 case "append":
-                    await p.append_text(params.content)
+                    await write_target.append_text(params.content)
 
-            # Get file info for success message
-            file_size = (await p.stat()).st_size
+            # Get file info for success message (stat the resolved target, not
+            # the original path — a symlink retargeted mid-call would otherwise
+            # re-resolve here to a different location than the one written).
+            file_size = (await write_target.stat()).st_size
             action = "overwritten" if params.mode == "overwrite" else "appended to"
             return ToolReturnValue(
                 is_error=False,

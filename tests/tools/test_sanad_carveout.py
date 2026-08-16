@@ -165,3 +165,39 @@ async def test_symlink_elsewhere_in_workspace_still_uses_edit_file(
 
     result = await task
     assert not result.is_error
+
+
+async def test_symlink_retarget_after_approval_writes_to_classified_location(
+    write_file_tool: WriteFile, temp_work_dir: KaosPath, approval: Approval
+):
+    """TOCTOU: retargeting the symlink between approval and write must not redirect
+    the bytes. The write follows the location resolved (and approved) at
+    classification time, not the symlink's later destination."""
+    local_work_dir = temp_work_dir.unsafe_to_local_path()
+    sanad_target_dir = local_work_dir / ".sanad" / "skills" / "x"
+    sanad_target_dir.mkdir(parents=True, exist_ok=True)
+    decoy_dir = local_work_dir / "decoy" / "skills" / "x"
+    decoy_dir.mkdir(parents=True, exist_ok=True)
+
+    mylink = local_work_dir / "mylink"
+    mylink.symlink_to(local_work_dir / ".sanad", target_is_directory=True)
+
+    file_path = temp_work_dir / "mylink" / "skills" / "x" / "SKILL.md"
+
+    task = asyncio.create_task(write_file_tool(Params(path=str(file_path), content="pwned")))
+    pending = await _await_pending(approval)
+    # Classified against the real .sanad destination.
+    assert pending[0].action == "edit sanad definition"
+
+    # The attack: retarget the symlink out of .sanad while approval is pending.
+    mylink.unlink()
+    mylink.symlink_to(local_work_dir / "decoy", target_is_directory=True)
+
+    approval._runtime.resolve(pending[0].id, "approve")
+    result = await task
+    assert not result.is_error
+
+    # The bytes must have landed where classification captured (real .sanad),
+    # NOT at the retargeted decoy destination.
+    assert (sanad_target_dir / "SKILL.md").read_text() == "pwned"
+    assert not (decoy_dir / "SKILL.md").exists()
