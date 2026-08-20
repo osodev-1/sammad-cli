@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import json
 import os
+import resource
 import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
@@ -22,7 +23,7 @@ from typing import Any
 
 from loguru import logger
 
-_WIRE_PROTOCOL_VERSION = "1.10"
+_WIRE_PROTOCOL_VERSION = "1.11"
 _INIT_TIMEOUT_SECONDS = 30.0
 _TURN_KEEP = 5
 
@@ -34,9 +35,25 @@ class WireRunnerError(Exception):
         self.message = message
 
 
-def _preexec(uid: int | None, gid: int | None):  # noqa: ANN202
+def _preexec(
+    uid: int | None,
+    gid: int | None,
+    rlimit_nproc: int = 0,
+    rlimit_fsize: int = 0,
+):  # noqa: ANN202
     def _run() -> None:
         os.setsid()  # own process group → we can signal the whole tree on stop
+        # Ulimits before dropping privilege — uid-split mode only (rlimits on
+        # agentd's own root process would be pointless/dangerous). `0` skips
+        # a limit; a setrlimit failure (unsupported platform, e.g. macOS dev)
+        # must never block spawn.
+        if uid is not None:
+            if rlimit_nproc > 0:
+                with contextlib.suppress(ValueError, OSError):
+                    resource.setrlimit(resource.RLIMIT_NPROC, (rlimit_nproc, rlimit_nproc))
+            if rlimit_fsize > 0:
+                with contextlib.suppress(ValueError, OSError):
+                    resource.setrlimit(resource.RLIMIT_FSIZE, (rlimit_fsize, rlimit_fsize))
         if gid is not None:
             os.setgid(gid)
         if uid is not None:
@@ -83,6 +100,8 @@ class WireRunner:
         env: dict[str, str],
         uid: int | None = None,
         gid: int | None = None,
+        rlimit_nproc: int = 0,
+        rlimit_fsize: int = 0,
         client_name: str,
         capabilities: dict[str, bool],
         max_turn_seconds: float | None = None,
@@ -93,6 +112,8 @@ class WireRunner:
         self._env = env
         self._uid = uid
         self._gid = gid
+        self._rlimit_nproc = rlimit_nproc
+        self._rlimit_fsize = rlimit_fsize
         self._client_name = client_name
         self._capabilities = dict(capabilities)
         self._max_turn_seconds = max_turn_seconds
@@ -143,7 +164,7 @@ class WireRunner:
                 stderr=asyncio.subprocess.DEVNULL,
                 cwd=str(self._cwd),
                 env=self._env,
-                preexec_fn=_preexec(self._uid, self._gid),
+                preexec_fn=_preexec(self._uid, self._gid, self._rlimit_nproc, self._rlimit_fsize),
                 close_fds=True,
             )
             self._alive = True
@@ -413,6 +434,45 @@ class WireRunner:
         cid = self._next_id()
         with contextlib.suppress(Exception):
             await self._send({"jsonrpc": "2.0", "method": "cancel", "id": str(cid)})
+
+    async def call(
+        self, method: str, params: dict[str, Any], timeout: float = 10.0
+    ) -> dict[str, Any]:
+        """Generic request/response round trip — the pending-future machinery
+        `initialize` uses, generalized for any standalone JSON-RPC method
+        (`set_permission_mode` today). Raises ``WireRunnerError("call_failed", ...)``
+        on an error response, a dropped subprocess, or a timeout; never raises
+        anything else."""
+        if not self.alive:
+            raise WireRunnerError("not_started", "agent is not running")
+        mid = self._next_id()
+        fut = self._new_pending(mid)
+        try:
+            await self._send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": method,
+                    "id": str(mid),
+                    "params": params,
+                }
+            )
+        except Exception as exc:
+            self._pending.pop(mid, None)
+            raise WireRunnerError("call_failed", str(exc)) from exc
+        try:
+            resp = await asyncio.wait_for(fut, timeout=timeout)
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            self._pending.pop(mid, None)
+            raise WireRunnerError("call_failed", f"{method} timed out") from exc
+        except WireRunnerError as exc:
+            # `_read_loop`'s finally resolves every pending future with this
+            # on subprocess exit — surface it as a call failure, not a crash.
+            raise WireRunnerError("call_failed", exc.message) from exc
+        if "error" in resp:
+            raise WireRunnerError("call_failed", str(resp.get("error")))
+        self._touch()
+        result = resp.get("result")
+        return result if isinstance(result, dict) else {}
 
     # -- io ------------------------------------------------------------------
 

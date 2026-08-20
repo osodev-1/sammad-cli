@@ -88,6 +88,33 @@ async def test_no_budget_means_unlimited():
 
 
 @pytest.mark.asyncio
+async def test_call_round_trips():
+    """`call()` generalizes the pending-future machinery `initialize` already
+    uses: fresh id, register pending, send, await, return the result."""
+    runner = _runner()
+    await runner.start()
+    try:
+        result = await runner.call("set_permission_mode", {"mode": "accept-edits"})
+        assert result == {"status": "ok", "permission_mode": "accept-edits"}
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_call_timeout_raises():
+    """The fake ignores unknown top-level methods (no response at all) — the
+    call must time out rather than hang forever."""
+    runner = _runner()
+    await runner.start()
+    try:
+        with pytest.raises(WireRunnerError) as exc:
+            await runner.call("no_such_method", {}, timeout=0.5)
+        assert exc.value.code == "call_failed"
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
 async def test_inbound_request_is_rejected_by_default():
     """P0 posture: no bridge, so every request is refused with -32601 and the
     turn still completes — a gated tool call becomes a denial, never a hang."""
@@ -324,6 +351,32 @@ async def test_respond_with_malformed_payload_is_invalid_response(tmp_path):
         # Still pending — a bad payload must not consume the request.
         assert runner.pending_summaries()
         await runner.respond("req_1", {"response": "approve"})
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_permission_mode_updates_tracking(tmp_path):
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        assert runner.permission_mode == "default"
+        await runner.set_permission_mode("accept-edits")
+        assert runner.permission_mode == "accept-edits"
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_permission_mode_rejects_unknown_mode(tmp_path):
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        with pytest.raises(WireRunnerError) as exc:
+            await runner.set_permission_mode("yolo")
+        assert exc.value.code == "invalid_mode"
+        # A rejected mode must not be adopted into local tracking.
+        assert runner.permission_mode == "default"
     finally:
         await runner.stop()
 

@@ -74,6 +74,12 @@ class TerminalSettings:
     worker_max_tokens_per_run: int = 2_000_000
     # Keep the underlying compute warm between runs instead of scaling to zero.
     keep_warm: bool = False
+    # -- agent process ulimits (P2a) -------------------------------------------
+    # Resource caps applied to the spawned agent's OS user (uid-split mode
+    # only — preexec gates on uid being set). A fork-bomb or disk-fill inside
+    # the agent's own process tree stays bounded. `0` disables that limit.
+    agent_rlimit_nproc: int = 512
+    agent_rlimit_fsize: int = 4 * 1024**3
 
     @classmethod
     def load(cls, env: Mapping[str, str] | None = None) -> TerminalSettings:
@@ -146,4 +152,6 @@ class TerminalSettings:
             worker_max_steps_per_turn=int(e.get("WORKER_MAX_STEPS_PER_TURN", "100")),
             worker_max_tokens_per_run=int(e.get("WORKER_MAX_TOKENS_PER_RUN", "2000000")),
             keep_warm=e.get("KEEP_WARM", "") == "1",
+            agent_rlimit_nproc=int(e.get("AGENT_RLIMIT_NPROC", "512")),
+            agent_rlimit_fsize=int(e.get("AGENT_RLIMIT_FSIZE", str(4 * 1024**3))),
         )

@@ -248,6 +248,66 @@ def test_conversation_cap_is_enforced(client: TestClient):
     assert res.json()["error"]["code"] == "conversation_limit"
 
 
+def test_create_seeds_default_mode(client: TestClient):
+    """CREATE (not open) seeds `default` posture right after start() — visible
+    on /turn without sending anything."""
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
+    assert turn["mode"] == "default"
+
+
+def test_turn_carries_mode_field_when_no_runner(client: TestClient):
+    turn = client.get(
+        "/internal/coder/conversations/c_000000000000/turn", headers=HEADERS
+    ).json()
+    assert turn["mode"] is None
+
+
+def test_mode_route_happy_path(client: TestClient):
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    res = client.post(
+        f"/internal/coder/conversations/{cid}/mode",
+        headers=HEADERS,
+        json={"mode": "accept-edits"},
+    )
+    assert res.status_code == 200
+    assert res.json() == {"ok": True, "mode": "accept-edits"}
+    turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
+    assert turn["mode"] == "accept-edits"
+
+
+def test_mode_route_rejects_yolo(client: TestClient):
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    res = client.post(
+        f"/internal/coder/conversations/{cid}/mode", headers=HEADERS, json={"mode": "yolo"}
+    )
+    assert res.status_code == 400
+    assert res.json()["error"]["code"] == "invalid_mode"
+
+
+def test_mode_route_unknown_cid_is_not_started(client: TestClient):
+    res = client.post(
+        "/internal/coder/conversations/c_000000000000/mode",
+        headers=HEADERS,
+        json={"mode": "default"},
+    )
+    assert res.status_code == 409
+    assert res.json()["error"]["code"] == "not_started"
+
+
+def test_mode_route_malformed_cid_is_400(client: TestClient):
+    res = client.post(
+        "/internal/coder/conversations/..%2Fetc/mode", headers=HEADERS, json={"mode": "default"}
+    )
+    assert res.status_code in (400, 404)
+
+
 def test_open_existing_id_also_hits_the_cap(client: TestClient):
     """`open` consumes a live-process slot exactly like create (controller ruling, P1a)."""
     cids = [

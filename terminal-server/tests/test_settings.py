@@ -99,3 +99,22 @@ def test_trust_store_key_parses(base_env):
     assert TerminalSettings.load(env=base_env).trust_store_key == ""
     s = TerminalSettings.load(env={**base_env, "TRUST_STORE_KEY": "abc"})
     assert s.trust_store_key == "abc"
+
+
+def test_agent_rlimit_defaults_and_parses(base_env):
+    s = TerminalSettings.load(env=base_env)
+    assert s.agent_rlimit_nproc == 512
+    assert s.agent_rlimit_fsize == 4 * 1024**3
+    s2 = TerminalSettings.load(
+        env={**base_env, "AGENT_RLIMIT_NPROC": "128", "AGENT_RLIMIT_FSIZE": "1073741824"}
+    )
+    assert s2.agent_rlimit_nproc == 128
+    assert s2.agent_rlimit_fsize == 1073741824
+
+
+def test_agent_rlimit_zero_disables(base_env):
+    s = TerminalSettings.load(
+        env={**base_env, "AGENT_RLIMIT_NPROC": "0", "AGENT_RLIMIT_FSIZE": "0"}
+    )
+    assert s.agent_rlimit_nproc == 0
+    assert s.agent_rlimit_fsize == 0

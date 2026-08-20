@@ -42,6 +42,9 @@ class PendingRequest:
     request: dict[str, Any]
 
 
+_PERMISSION_MODES = {"default", "accept-edits", "plan"}
+
+
 class CoderRunner(WireRunner):
     def __init__(
         self,
@@ -52,6 +55,8 @@ class CoderRunner(WireRunner):
         env: dict[str, str],
         uid: int | None = None,
         gid: int | None = None,
+        rlimit_nproc: int = 0,
+        rlimit_fsize: int = 0,
         max_turn_seconds: float,
         max_steps_per_turn: int,
     ) -> None:
@@ -61,13 +66,28 @@ class CoderRunner(WireRunner):
             env=env,
             uid=uid,
             gid=gid,
+            rlimit_nproc=rlimit_nproc,
+            rlimit_fsize=rlimit_fsize,
             client_name="sanad-coder-bridge",
             capabilities={"supports_question": True, "supports_plan_mode": True},
             max_turn_seconds=max_turn_seconds,
             max_steps_per_turn=max_steps_per_turn,
         )
         self.conversation_id = conversation_id
+        self.permission_mode: str = "default"
         self._pending_requests: dict[str, PendingRequest] = {}
+
+    # -- permission mode (P2a) -------------------------------------------------
+
+    async def set_permission_mode(self, mode: str) -> None:
+        """Switch the agent's approval posture. Validates locally (never a
+        wire round trip for a bad mode — `yolo` is not a thing), then calls
+        the CLI and only adopts the new mode into local tracking on success:
+        a failed/rejected call leaves the previously-known posture intact."""
+        if mode not in _PERMISSION_MODES:
+            raise WireRunnerError("invalid_mode", f"unknown permission mode: {mode!r}")
+        await self.call("set_permission_mode", {"mode": mode})
+        self.permission_mode = mode
 
     # -- request bridge (P1) --------------------------------------------------
 

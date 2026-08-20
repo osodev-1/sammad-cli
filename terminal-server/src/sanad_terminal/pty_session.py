@@ -15,6 +15,7 @@ import errno
 import fcntl
 import os
 import pty
+import resource
 import signal
 import struct
 import subprocess
@@ -42,11 +43,25 @@ def _set_winsize(fd: int, cols: int, rows: int) -> None:
 
 
 def _preexec_for_tty(
-    slave_fd: int, uid: int | None = None, gid: int | None = None
+    slave_fd: int,
+    uid: int | None = None,
+    gid: int | None = None,
+    rlimit_nproc: int = 0,
+    rlimit_fsize: int = 0,
 ) -> Callable[[], None]:
     def _run() -> None:
         os.setsid()
         fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+        # Ulimits before dropping privilege — uid-split mode only. `0` skips
+        # a limit; a setrlimit failure (unsupported platform, e.g. macOS dev)
+        # must never break spawn.
+        if uid is not None:
+            if rlimit_nproc > 0:
+                with contextlib.suppress(ValueError, OSError):
+                    resource.setrlimit(resource.RLIMIT_NPROC, (rlimit_nproc, rlimit_nproc))
+            if rlimit_fsize > 0:
+                with contextlib.suppress(ValueError, OSError):
+                    resource.setrlimit(resource.RLIMIT_FSIZE, (rlimit_fsize, rlimit_fsize))
         # uid split (task mode): agentd runs as root, the agent runs as an
         # unprivileged user, so agentd's env (machine credentials) is
         # unreachable from the user's shell via /proc.
@@ -71,6 +86,8 @@ class PtySession:
         rows: int,
         uid: int | None = None,
         gid: int | None = None,
+        rlimit_nproc: int = 0,
+        rlimit_fsize: int = 0,
     ) -> None:
         self._argv = list(argv)
         self._cwd = cwd
@@ -79,6 +96,8 @@ class PtySession:
         self._rows = rows
         self._uid = uid
         self._gid = gid
+        self._rlimit_nproc = rlimit_nproc
+        self._rlimit_fsize = rlimit_fsize
         self._master_fd: int | None = None
         self._process: subprocess.Popen[bytes] | None = None
         self._queue: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -108,7 +127,13 @@ class PtySession:
                 stdout=slave_fd,
                 stderr=slave_fd,
                 env=self._env,
-                preexec_fn=_preexec_for_tty(slave_fd, uid=self._uid, gid=self._gid),
+                preexec_fn=_preexec_for_tty(
+                    slave_fd,
+                    uid=self._uid,
+                    gid=self._gid,
+                    rlimit_nproc=self._rlimit_nproc,
+                    rlimit_fsize=self._rlimit_fsize,
+                ),
                 close_fds=True,
             )
 

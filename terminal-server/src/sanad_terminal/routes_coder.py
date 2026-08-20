@@ -21,6 +21,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from sanad_terminal.coder_runner import (
@@ -70,6 +71,10 @@ class RespondBody(BaseModel):
     answers: dict[str, str] | None = None
 
 
+class ModeBody(BaseModel):
+    mode: str = Field(min_length=1, max_length=32)
+
+
 def _err(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": {"code": code, "message": message}})
 
@@ -80,7 +85,9 @@ def _bad_cid(cid: str) -> JSONResponse | None:
     return None
 
 
-async def _spawn(request: Request, root: Path, cid: str, ticket: str) -> JSONResponse | CoderRunner:
+async def _spawn(
+    request: Request, root: Path, cid: str, ticket: str, *, seed_default: bool = False
+) -> JSONResponse | CoderRunner:
     settings = _settings(request)
     live = [r for r in list_conversations(root) if r.alive]
     if len(live) >= settings.coder_max_conversations:
@@ -117,6 +124,8 @@ async def _spawn(request: Request, root: Path, cid: str, ticket: str) -> JSONRes
         env=env,
         uid=uid,
         gid=gid,
+        rlimit_nproc=settings.agent_rlimit_nproc,
+        rlimit_fsize=settings.agent_rlimit_fsize,
         max_turn_seconds=settings.coder_max_turn_seconds,
         max_steps_per_turn=settings.coder_max_steps_per_turn,
     )
@@ -126,6 +135,17 @@ async def _spawn(request: Request, root: Path, cid: str, ticket: str) -> JSONRes
         await runner.stop()
         return _err(503, exc.code, exc.message)
     put_conversation(root, runner)
+    if seed_default:
+        # CREATE only — never on `open`, which resumes a session that may
+        # already carry a persisted posture the reattach must not clobber.
+        # Non-fatal: an old CLI at wire protocol 1.10 rejects the method, and
+        # the conversation still works fine at whatever posture it starts in.
+        try:
+            await runner.set_permission_mode("default")
+        except WireRunnerError as exc:
+            logger.warning(
+                "default-mode seeding failed for conversation {}: {}", cid, exc.message
+            )
     return runner
 
 
@@ -149,7 +169,7 @@ async def conversations(_: Gated, root: Root) -> JSONResponse:
 @router.post("/conversations")
 async def create(_: Gated, root: Root, request: Request, body: TicketBody) -> JSONResponse:
     cid = new_conversation_id()
-    result = await _spawn(request, root, cid, body.ticket)
+    result = await _spawn(request, root, cid, body.ticket, seed_default=True)
     if isinstance(result, JSONResponse):
         return result
     return JSONResponse({"conversationId": cid})
@@ -258,14 +278,29 @@ async def turn(_: Gated, root: Root, cid: str) -> JSONResponse:
         return bad
     runner = get_conversation(root, cid)
     if runner is None:
-        return JSONResponse({"turn": None, "alive": False, "pendingRequests": []})
+        return JSONResponse({"turn": None, "alive": False, "pendingRequests": [], "mode": None})
     return JSONResponse(
         {
             "turn": runner.turn_summary(),
             "alive": runner.alive,
             "pendingRequests": runner.pending_summaries(),
+            "mode": runner.permission_mode,
         }
     )
+
+
+@router.post("/conversations/{cid}/mode")
+async def set_mode(_: Gated, root: Root, cid: str, body: ModeBody) -> JSONResponse:
+    if bad := _bad_cid(cid):
+        return bad
+    runner = get_conversation(root, cid)
+    if runner is None or not runner.alive:
+        return _err(409, "not_started", "conversation is not running")
+    try:
+        await runner.set_permission_mode(body.mode)
+    except WireRunnerError as exc:
+        return _err(400, exc.code, exc.message)
+    return JSONResponse({"ok": True, "mode": runner.permission_mode})
 
 
 @router.get("/conversations/{cid}/follow", response_model=None)
