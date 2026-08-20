@@ -485,7 +485,7 @@ def _normalize_server_version(value: Any) -> Any:
     """Normalize the server version in initialize response to '<VERSION>'."""
     if isinstance(value, dict):
         value = {k: _normalize_server_version(v) for k, v in value.items()}
-        if value.get("name") == "Kimi Code CLI" and "version" in value:
+        if value.get("name") in ("Kimi Code CLI", "sanad") and "version" in value:
             value = {**value, "version": "<VERSION>"}
     elif isinstance(value, list):
         value = [_normalize_server_version(v) for v in value]
