@@ -16,6 +16,12 @@ Modes are keyed on the prompt text:
                   for the client's response line, echoes it back as a
                   RequestOutcome event, then finishes — the question bridge
                   round-trip proof.
+
+Outside the prompt loop, `set_permission_mode` is handled directly (mirrors
+the real CLI: a StatusUpdate event first, then the success response) —
+`WireRunner.call()` is a standalone request/response, not tied to a turn.
+Any other unknown top-level method is silently ignored (no response), which
+is what proves `call()`'s timeout path.
 """
 
 import json
@@ -157,6 +163,16 @@ def main() -> None:
                 _write({"jsonrpc": "2.0", "id": mid, "result": {"status": "finished"}})
         elif method == "cancel":
             _write({"jsonrpc": "2.0", "id": mid, "result": {}})
+        elif method == "set_permission_mode":
+            mode = msg.get("params", {}).get("mode", "")
+            _event("StatusUpdate", {"permission_mode": mode})
+            _write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": mid,
+                    "result": {"status": "ok", "permission_mode": mode},
+                }
+            )
 
 
 if __name__ == "__main__":
