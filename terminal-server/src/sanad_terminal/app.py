@@ -343,6 +343,8 @@ def create_app(
                     rows=rows,
                     uid=spawn_uid,
                     gid=spawn_gid,
+                    rlimit_nproc=resolved.agent_rlimit_nproc,
+                    rlimit_fsize=resolved.agent_rlimit_fsize,
                 )
                 await pty.start()
             except Exception as exc:
