@@ -36,13 +36,13 @@ def test_initialize_handshake(tmp_path) -> None:
     try:
         resp = send_initialize(wire)
         result = _as_dict(resp.get("result"))
-        assert result.get("protocol_version") == "1.10"
+        assert result.get("protocol_version") == "1.11"
         assert "slash_commands" in result
         assert normalize_response(resp) == snapshot(
             {
                 "result": {
-                    "protocol_version": "1.10",
-                    "server": {"name": "Kimi Code CLI", "version": "<VERSION>"},
+                    "protocol_version": "1.11",
+                    "server": {"name": "sanad", "version": "<VERSION>"},
                     "slash_commands": [
                         {
                             "name": "init",
@@ -151,8 +151,8 @@ def test_initialize_external_tool_conflict(tmp_path) -> None:
         assert normalize_response(resp) == snapshot(
             {
                 "result": {
-                    "protocol_version": "1.10",
-                    "server": {"name": "Kimi Code CLI", "version": "<VERSION>"},
+                    "protocol_version": "1.11",
+                    "server": {"name": "sanad", "version": "<VERSION>"},
                     "slash_commands": [
                         {
                             "name": "init",
@@ -334,8 +334,7 @@ def test_external_tool_call(tmp_path) -> None:
                         "max_context_tokens": None,
                         "token_usage": None,
                         "message_id": None,
-                        "plan_mode": False,
-                        "mcp_status": None,
+                        "plan_mode": False, "permission_mode": None, "mcp_status": None,
                     },
                 },
                 {
@@ -376,8 +375,7 @@ def test_external_tool_call(tmp_path) -> None:
                         "max_context_tokens": None,
                         "token_usage": None,
                         "message_id": None,
-                        "plan_mode": False,
-                        "mcp_status": None,
+                        "plan_mode": False, "permission_mode": None, "mcp_status": None,
                     },
                 },
                 {"method": "event", "type": "TurnEnd", "payload": {}},
@@ -428,8 +426,7 @@ def test_prompt_without_initialize(tmp_path) -> None:
                         "max_context_tokens": None,
                         "token_usage": None,
                         "message_id": None,
-                        "plan_mode": False,
-                        "mcp_status": None,
+                        "plan_mode": False, "permission_mode": None, "mcp_status": None,
                     },
                 },
                 {"method": "event", "type": "TurnEnd", "payload": {}},
