@@ -18,6 +18,13 @@ from kimi_cli.wire.types import DisplayBlock
 
 type Response = Literal["approve", "approve_for_session", "reject"]
 
+# Mirrors kimi_cli.tools.file.FileActions.EDIT / EDIT_OUTSIDE literals. Not
+# imported directly to avoid a tools -> soul dependency edge; these two
+# actions are the ones swapped by a `default`/`accept-edits` permission mode
+# switch (`Approval.apply_permission_mode`). EDIT_SANAD is deliberately never
+# included — `.sanad` edits are never mode-managed or session-cacheable.
+MODE_MANAGED_ACTIONS = frozenset({"edit file", "edit file outside of working directory"})
+
 # Maps DisplayBlock.type to the TS approval_surface vocabulary.
 _SURFACE_BY_BLOCK_TYPE = {
     "shell": "command",
@@ -151,6 +158,32 @@ class Approval:
 
     def set_yolo(self, yolo: bool) -> None:
         self._state.yolo = yolo
+        self._state.notify_change()
+
+    def apply_permission_mode(self, mode: str) -> None:
+        """Apply a `default`/`accept-edits` permission-mode posture switch.
+
+        Swaps the mode-managed file-edit actions (``MODE_MANAGED_ACTIONS``)
+        in ``auto_approve_actions``; per-pattern shell entries and everything
+        else survive untouched. Both modes also force ``yolo`` off, since a
+        mode switch is an explicit posture statement. ``plan`` (or any other
+        value) leaves approvals untouched — plan-mode toggling itself is
+        handled by the caller (the wire server delegates to
+        ``KimiSoul.set_plan_mode_from_manual``, not this method).
+
+        Always fires ``notify_change`` so the existing save_state seam
+        persists the (possibly unchanged) posture.
+        """
+        if mode == "default":
+            self._state.auto_approve_actions = (
+                self._state.auto_approve_actions - MODE_MANAGED_ACTIONS
+            ) | {"edit file"}
+            self._state.yolo = False
+        elif mode == "accept-edits":
+            self._state.auto_approve_actions = (
+                self._state.auto_approve_actions - MODE_MANAGED_ACTIONS
+            ) | {"edit file", "edit file outside of working directory"}
+            self._state.yolo = False
         self._state.notify_change()
 
     def set_afk(self, afk: bool) -> None:

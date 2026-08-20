@@ -161,6 +161,18 @@ class JSONRPCSetPlanModeMessage(_MessageBase):
     params: _SetPlanModeParams
 
 
+class _SetPermissionModeParams(BaseModel):
+    mode: Literal["default", "accept-edits", "plan"]
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class JSONRPCSetPermissionModeMessage(_MessageBase):
+    method: Literal["set_permission_mode"] = "set_permission_mode"
+    id: str
+    params: _SetPermissionModeParams
+
+
 class JSONRPCCancelMessage(_MessageBase):
     method: Literal["cancel"] = "cancel"
     id: str
@@ -212,10 +224,19 @@ type JSONRPCInMessage = (
     | JSONRPCSteerMessage
     | JSONRPCReplayMessage
     | JSONRPCSetPlanModeMessage
+    | JSONRPCSetPermissionModeMessage
     | JSONRPCCancelMessage
 )
 JSONRPCInMessageAdapter = TypeAdapter[JSONRPCInMessage](JSONRPCInMessage)
-JSONRPC_IN_METHODS = {"initialize", "prompt", "steer", "replay", "set_plan_mode", "cancel"}
+JSONRPC_IN_METHODS = {
+    "initialize",
+    "prompt",
+    "steer",
+    "replay",
+    "set_plan_mode",
+    "set_permission_mode",
+    "cancel",
+}
 
 type JSONRPCOutMessage = (
     JSONRPCSuccessResponse
