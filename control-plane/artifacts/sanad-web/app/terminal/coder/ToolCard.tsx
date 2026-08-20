@@ -117,15 +117,13 @@ function FileEditCard({
           <span style={s.label}>{path}</span>
         )}
       </div>
-      {diff ? (
+      {diff && (
         <>
           <DiffView before={diff.old_text} after={diff.new_text} />
           {diff.is_summary && (
             <div style={s.note}>Diff truncated — showing a partial view.</div>
           )}
         </>
-      ) : (
-        block.result?.isError && <span style={s.chipFail}>✗ failed</span>
       )}
     </div>
   );
