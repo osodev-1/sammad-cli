@@ -1,5 +1,13 @@
-import type { ApprovalPayload, CoderItem, QuestionPayload } from "./types";
-import { textFromEvent, thinkFromEvent, toolLabel } from "./client";
+import type {
+  ApprovalPayload,
+  CoderItem,
+  DisplayBlock,
+  QuestionPayload,
+  ToolCallPayload,
+  ToolResultPayload,
+} from "./types";
+import { textFromEvent, thinkFromEvent } from "./client";
+import { normalizeDisplay, parseToolArgs, toolActionLabel } from "./toolDisplay";
 
 /**
  * The Coder chat's live transcript model (journal-folded), plus its mapping
@@ -18,7 +26,18 @@ export type CoderBlock =
   | { kind: "text"; text: string }
   /** Live reasoning steps — shown on demand, never persisted. */
   | { kind: "think"; text: string }
-  | { kind: "tool"; label: string }
+  /** One tool call, correlated to its result by `toolCallId`. `result` is
+   * `undefined` while the call is in flight (streaming-safe: the card
+   * renders the label with a pending affordance). Rich (args/result) —
+   * live-only; `toStored` keeps only `label` (see below). */
+  | {
+      kind: "tool";
+      toolCallId: string;
+      name: string;
+      label: string;
+      args: Record<string, unknown>;
+      result?: { isError: boolean; display: DisplayBlock[] };
+    }
   | {
       kind: "request";
       requestId: string;
@@ -58,11 +77,50 @@ export function reduce(blocks: CoderBlock[], item: CoderItem): CoderBlock[] {
     return [...blocks, { kind: "text", text }];
   }
 
-  const label = toolLabel(item);
-  if (label) {
-    const last = blocks[blocks.length - 1];
-    if (last && last.kind === "tool" && last.label === label) return blocks; // dedupe
-    return [...blocks, { kind: "tool", label }];
+  if (item.kind === "event" && item.event.type === "ToolCall") {
+    const payload = item.event.payload as unknown as ToolCallPayload | undefined;
+    const name = payload?.function?.name ?? "";
+    const args = parseToolArgs(name, payload?.function?.arguments ?? null);
+    const block: CoderBlock = {
+      kind: "tool",
+      toolCallId: payload?.id ?? "",
+      name,
+      label: toolActionLabel(name, args),
+      args,
+      result: undefined,
+    };
+    // Each call is its own card — no dedupe. A tool called twice in a row
+    // (e.g. two Greps) shows two cards, correlated to their own results.
+    return [...blocks, block];
+  }
+
+  if (item.kind === "event" && item.event.type === "ToolResult") {
+    const payload = item.event.payload as unknown as ToolResultPayload | undefined;
+    const toolCallId = payload?.tool_call_id;
+    if (!toolCallId) return blocks; // malformed result — nothing to correlate
+    // Find the TRAILING tool block with a matching id — a result always
+    // targets the most recent call with that id (ids are server-issued and
+    // unique per call, but scanning from the end is the correlation the
+    // spec calls for and is cheap for a bounded block list).
+    let idx = -1;
+    for (let i = blocks.length - 1; i >= 0; i -= 1) {
+      const b = blocks[i];
+      if (b.kind === "tool" && b.toolCallId === toolCallId) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx === -1) return blocks; // a result with no visible call — rare; ignore
+    const existing = blocks[idx] as Extract<CoderBlock, { kind: "tool" }>;
+    const returnValue = payload?.return_value;
+    const updated: CoderBlock = {
+      ...existing,
+      result: {
+        isError: Boolean(returnValue?.is_error),
+        display: normalizeDisplay(returnValue?.display),
+      },
+    };
+    return [...blocks.slice(0, idx), updated, ...blocks.slice(idx + 1)];
   }
 
   if (item.kind === "request") {
@@ -238,7 +296,20 @@ export function fromStored(stored: StoredCoderMessage[]): CoderMessage[] {
       role: "assistant",
       at: m.at,
       blocks: m.blocks.map((b): CoderBlock => {
-        if (b.kind !== "request") return b;
+        if (b.kind === "text") return b;
+        if (b.kind === "tool") {
+          // Inert: the rich args/result never survived toStored (live-only
+          // by design — the server journal is the source of truth). A
+          // restored card shows the label only.
+          return {
+            kind: "tool",
+            toolCallId: "",
+            name: "",
+            label: b.label,
+            args: {},
+            result: undefined,
+          };
+        }
         const payload: ApprovalPayload | QuestionPayload =
           b.requestType === "approval"
             ? { id: b.requestId, action: b.summary }

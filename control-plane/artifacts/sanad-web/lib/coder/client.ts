@@ -311,7 +311,10 @@ export function thinkFromEvent(item: CoderItem): string | null {
   return typeof payload.think === "string" && payload.think ? payload.think : null;
 }
 
-const TOOL_LABELS: Record<string, string> = {
+/** Generic present-tense phrase per tool name — the fallback tier for
+ * `toolActionLabel` (lib/coder/toolDisplay.ts) when args don't give a more
+ * concrete label, and the sole source for the always-on activity line here. */
+export const TOOL_LABELS: Record<string, string> = {
   Shell: "Running a command",
   WriteFile: "Writing a file",
   StrReplaceFile: "Editing a file",

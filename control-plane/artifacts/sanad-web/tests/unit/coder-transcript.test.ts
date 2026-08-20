@@ -33,9 +33,24 @@ const questionRequest = (requestId: string): CoderItem => ({
 });
 
 describe("coder transcript fold (reduce)", () => {
-  const toolEvent = (name: string): CoderItem => ({
+  const toolEvent = (name: string, id = "", args?: Record<string, unknown>): CoderItem => ({
     kind: "event",
-    event: { type: "ToolCall", payload: { function: { name } } },
+    event: {
+      type: "ToolCall",
+      payload: { type: "function", id, function: { name, arguments: args ? JSON.stringify(args) : null } },
+    },
+  });
+
+  const toolResultEvent = (
+    toolCallId: string,
+    isError: boolean,
+    display: unknown[] = [],
+  ): CoderItem => ({
+    kind: "event",
+    event: {
+      type: "ToolResult",
+      payload: { tool_call_id: toolCallId, return_value: { is_error: isError, display } },
+    },
   });
 
   it("pending -> resolved: block replaced in place, order stable", () => {
@@ -187,20 +202,54 @@ describe("coder transcript fold (reduce)", () => {
     ]);
   });
 
-  it("consecutive identical tool labels dedupe", () => {
-    const toolItem = (name: string): CoderItem => ({
-      kind: "event",
-      event: { type: "ToolCall", payload: { function: { name } } },
-    });
+  it("a ToolCall then its ToolResult fold into ONE tool block, correlated by tool_call_id", () => {
     let blocks: CoderBlock[] = [];
-    blocks = reduce(blocks, toolItem("Grep"));
-    blocks = reduce(blocks, toolItem("Grep"));
-    expect(blocks).toEqual([{ kind: "tool", label: "Searching files" }]);
-    blocks = reduce(blocks, toolItem("Glob"));
+    blocks = reduce(blocks, toolEvent("Shell", "tc1", { command: "npm test" }));
     expect(blocks).toEqual([
-      { kind: "tool", label: "Searching files" },
-      { kind: "tool", label: "Finding files" },
+      {
+        kind: "tool",
+        toolCallId: "tc1",
+        name: "Shell",
+        label: expect.stringContaining("npm test"),
+        args: { command: "npm test" },
+        result: undefined,
+      },
     ]);
+
+    blocks = reduce(
+      blocks,
+      toolResultEvent("tc1", false, [{ type: "brief", text: "ran fine" }]),
+    );
+    expect(blocks).toHaveLength(1);
+    const block = blocks[0];
+    expect(block.kind === "tool" && block.result).toEqual({
+      isError: false,
+      display: [{ type: "brief", text: "ran fine" }],
+    });
+  });
+
+  it("ToolResult sets isError from a failed call", () => {
+    let blocks: CoderBlock[] = reduce([], toolEvent("Shell", "tc1", { command: "false" }));
+    blocks = reduce(blocks, toolResultEvent("tc1", true, []));
+    const block = blocks[0];
+    expect(block.kind === "tool" && block.result?.isError).toBe(true);
+  });
+
+  it("two ToolCalls with distinct ids produce two blocks — no dedupe", () => {
+    let blocks: CoderBlock[] = [];
+    blocks = reduce(blocks, toolEvent("Grep", "tc1", { pattern: "foo" }));
+    blocks = reduce(blocks, toolEvent("Grep", "tc2", { pattern: "foo" }));
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].kind === "tool" && blocks[0].toolCallId).toBe("tc1");
+    expect(blocks[1].kind === "tool" && blocks[1].toolCallId).toBe("tc2");
+  });
+
+  it("a ToolResult with an unknown tool_call_id is ignored", () => {
+    let blocks: CoderBlock[] = reduce([], toolEvent("Shell", "tc1", { command: "ls" }));
+    const before = blocks;
+    blocks = reduce(blocks, toolResultEvent("does-not-exist", false, []));
+    expect(blocks).toEqual(before);
+    expect(blocks[0].kind === "tool" && blocks[0].result).toBeUndefined();
   });
 
   it("error with code !== busy appends a warning text block; busy errors are silent", () => {
@@ -232,7 +281,14 @@ describe("coder transcript persistence (toStored / fromStored)", () => {
           { kind: "think", text: "reasoning..." },
           { kind: "text", text: "⚠ Network error — check your connection." },
           { kind: "text", text: "I'll fix it." },
-          { kind: "tool", label: "Editing a file" },
+          {
+            kind: "tool",
+            toolCallId: "tc1",
+            name: "StrReplaceFile",
+            label: "Editing a file",
+            args: { path: "foo.ts" },
+            result: undefined,
+          },
           {
             kind: "request",
             requestId: "r1",
@@ -363,7 +419,11 @@ describe("coder transcript persistence (toStored / fromStored)", () => {
   it("caps blocks per assistant message at 80", () => {
     const blocks: CoderBlock[] = Array.from({ length: 90 }, (_, i) => ({
       kind: "tool" as const,
+      toolCallId: `tc${i}`,
+      name: "Shell",
       label: `step ${i}`,
+      args: {},
+      result: undefined,
     }));
     const stored = toStored([{ role: "assistant", blocks }]);
     const storedBlocks = stored[0].role === "assistant" ? stored[0].blocks : [];
@@ -443,6 +503,36 @@ describe("coder transcript persistence (toStored / fromStored)", () => {
     // The oversized-input case is exactly what Finding 2 guards against: an
     // unclipped digest here would fail this safeParse, and (per the real
     // PATCH route) silently take down persistence for the whole session.
+    const parsed = coderBlockState.safeParse(block);
+    expect(parsed.success).toBe(true);
+  });
+
+  it("toStored of a rich tool block keeps only the label — args/result/toolCallId dropped — and still validates under coderBlockState", () => {
+    const live: CoderMessage[] = [
+      {
+        role: "assistant",
+        blocks: [
+          {
+            kind: "tool",
+            toolCallId: "tc1",
+            name: "Shell",
+            label: "Run `npm test`",
+            args: { command: "npm test" },
+            result: {
+              isError: false,
+              display: [{ type: "brief", text: "3 passed" }],
+            },
+          },
+        ],
+      },
+    ];
+    const stored = toStored(live);
+    const block = stored[0].role === "assistant" ? stored[0].blocks[0] : null;
+    expect(block).toEqual({ kind: "tool", label: "Run `npm test`" });
+    expect(block && "args" in block).toBe(false);
+    expect(block && "result" in block).toBe(false);
+    expect(block && "toolCallId" in block).toBe(false);
+
     const parsed = coderBlockState.safeParse(block);
     expect(parsed.success).toBe(true);
   });
