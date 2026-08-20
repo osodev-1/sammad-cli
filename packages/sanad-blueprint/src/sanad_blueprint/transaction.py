@@ -19,7 +19,7 @@ import yaml
 
 from .edges import EDGE_RULES, target_field_ids
 from .envelope import parse_manifest
-from .indexer import _MANIFEST_NAMES, BlueprintIndex
+from .indexer import _MANIFEST_NAMES, _PUBLISH_DIR, BlueprintIndex
 from .schemas import ResourceKind
 from .templates import KIND_DIR, render, slugify
 
@@ -48,6 +48,99 @@ def _check_plan_path(path: str) -> None:
         raise PlanError("invalid_path", f"illegal path: {path!r}")
     if not path.startswith(".sanad/") or path == ".sanad/":
         raise PlanError("invalid_path", f"plans may only touch .sanad/: {path!r}")
+
+
+# Canonical manifest filename per kind — mirrors the template scaffolds. The
+# indexer classifies manifests BY FILENAME (_MANIFEST_NAMES), the trust store
+# gates by (kind dir, filename), and runtime activation reads the same layout:
+# a manifest anywhere else indexes as an UNCLASSIFIED file — visible on the
+# graph, invisible to trust and activation (the context7 lesson, hh validation
+# 2026-08-14). The planner is the choke point where both the Architect and
+# manual authoring flow, so canonical placement is enforced here.
+MANIFEST_FOR_KIND: dict[ResourceKind, str] = {
+    ResourceKind.PROJECT: "sanad.yaml",
+    ResourceKind.AGENT: "agent.yaml",
+    ResourceKind.SKILL: "skill.yaml",
+    ResourceKind.TOOL: "tool.yaml",
+    ResourceKind.MCP_SERVER: "mcp.yaml",
+    ResourceKind.HOOK: "hook.yaml",
+    ResourceKind.WORKFLOW: "workflow.yaml",
+    ResourceKind.POLICY: "policy.yaml",
+    ResourceKind.EVALUATION: "evaluation.yaml",
+    ResourceKind.TEMPLATE: "template.yaml",
+    ResourceKind.PROMPT: "prompt.yaml",
+    ResourceKind.CONTEXT_DOCUMENT: "context.yaml",
+}
+
+
+def _canonical_home(kind: ResourceKind) -> str:
+    """Human-readable canonical path for a kind, for teaching error messages."""
+    if kind is ResourceKind.PROJECT:
+        return ".sanad/sanad.yaml"
+    if kind is ResourceKind.PUBLISH_PROFILE:
+        return ".sanad/publish/<environment>.yaml"
+    name = MANIFEST_FOR_KIND.get(kind, "<kind>.yaml")
+    kind_dir = KIND_DIR.get(kind)
+    if kind_dir is None:
+        return f".sanad/…/{name}"
+    return f".sanad/{kind_dir}/<slug>/{name}"
+
+
+def _check_manifest_layout(path: str, kind: ResourceKind) -> None:
+    """A NEW manifest must sit at its kind's canonical path. Updates are
+    grandfathered (an existing misplaced file can still be edited toward
+    migration), and deletes are always allowed — cleanup must never be
+    blocked by the very rule that makes cleanup necessary."""
+    parts = PurePosixPath(path).parts
+    if kind is ResourceKind.PROJECT:
+        if path != ".sanad/sanad.yaml":
+            raise PlanError(
+                "misplaced_manifest", f"{path}: the Project manifest lives at .sanad/sanad.yaml"
+            )
+        return
+    if kind is ResourceKind.PUBLISH_PROFILE:
+        if len(parts) == 3 and parts[1] == "publish":
+            return
+        raise PlanError(
+            "misplaced_manifest",
+            f"{path}: a PublishProfile lives at {_canonical_home(kind)}",
+        )
+    expected_name = MANIFEST_FOR_KIND.get(kind)
+    if expected_name is not None and parts[-1] != expected_name:
+        raise PlanError(
+            "manifest_kind_mismatch",
+            f"{path}: a {kind.value} manifest must be named {expected_name}",
+        )
+    kind_dir = KIND_DIR.get(kind)
+    if kind_dir is not None and not (len(parts) == 4 and parts[1] == kind_dir):
+        raise PlanError(
+            "misplaced_manifest",
+            f"{path}: a {kind.value} manifest lives at {_canonical_home(kind)}",
+        )
+
+
+def _reject_misplaced_manifest(path: str, content: str) -> None:
+    """Manifest-shaped YAML under a NON-manifest filename (e.g. `server.yaml`
+    carrying `kind: MCPServer`) — the exact shape that slips every check and
+    then silently never activates. Only a mapping whose `kind` is a real
+    ResourceKind trips this; arbitrary YAML support files pass untouched."""
+    try:
+        loaded = yaml.safe_load(content)
+    except yaml.YAMLError:
+        return
+    if not isinstance(loaded, dict):
+        return
+    try:
+        kind = ResourceKind(loaded.get("kind"))
+    except ValueError:
+        return
+    if "apiVersion" not in loaded and "metadata" not in loaded:
+        return
+    raise PlanError(
+        "misplaced_manifest",
+        f"{path}: this is a {kind.value} manifest — it must live at "
+        f"{_canonical_home(kind)} to be indexed, trust-gated and activated",
+    )
 
 
 @dataclass
@@ -399,8 +492,14 @@ def plan_write_files(
             else:
                 if indexed is not None or rid in planned_ids:
                     raise PlanError("duplicate_id", f"{rid} already exists")
+                _check_manifest_layout(path, parsed.resource.kind)
                 nodes_added.append(rid)
             planned_ids.add(rid)
+        elif (
+            PurePosixPath(path).suffix in (".yaml", ".yml")
+            and PurePosixPath(path).parent.name != _PUBLISH_DIR
+        ):
+            _reject_misplaced_manifest(path, content)
 
         if exists:
             try:

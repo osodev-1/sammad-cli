@@ -111,3 +111,30 @@ def test_mcp_manifests_are_gated_executables():
     assert not is_executable_path(".sanad/tools/t/tool.yaml")
     # Skills unchanged.
     assert is_executable_path(".sanad/skills/x/SKILL.md")
+
+
+def test_walker_covers_every_gated_kind(tmp_path: Path):
+    # The status walker must see every _GATED (kind dir, filename) pair — a
+    # gated kind it cannot see is auto-trusted at apply yet invisible to the
+    # review UI (the R5 rung-1 gap: mcps/ gated but never walked).
+    root = _workspace(tmp_path)
+    _write_skill(root, "review", "# Review\n")
+    mcp_dir = root / ".sanad" / "mcps" / "context7"
+    mcp_dir.mkdir(parents=True)
+    (mcp_dir / "mcp.yaml").write_text(
+        "apiVersion: sanad.dev/v1alpha1\nkind: MCPServer\n"
+        "metadata:\n  id: mcp:context7\n  name: Context7\n"
+        "spec:\n  transport: http\n  url: https://mcp.context7.com/mcp\n",
+        encoding="utf-8",
+    )
+
+    statuses = trust_statuses(root)
+    assert statuses[".sanad/skills/review/SKILL.md"]["status"] == "untrusted"
+    assert statuses[".sanad/mcps/context7/mcp.yaml"]["status"] == "untrusted"
+
+    record_trust(
+        root,
+        {".sanad/mcps/context7/mcp.yaml": file_sha256(mcp_dir / "mcp.yaml")},
+        "apply",
+    )
+    assert trust_statuses(root)[".sanad/mcps/context7/mcp.yaml"]["status"] == "trusted"

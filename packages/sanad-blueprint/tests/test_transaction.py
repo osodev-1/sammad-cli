@@ -356,3 +356,109 @@ def test_new_kinds_are_creatable(tmp_path: Path):
         name = rid.split(":", 1)[1].replace("-", " ").title()
         apply_plan(tmp_path, plan_create_resource(index_blueprint(sanad), kind, name))
         assert rid in index_blueprint(sanad).resources, rid
+
+
+# --------------------------------------- canonical layout (R5 rung-1 fix) ---
+
+
+MCP_MANIFEST = (
+    "apiVersion: sanad.dev/v1alpha1\nkind: MCPServer\n"
+    "metadata:\n  id: mcp:context7\n  name: Context7\n"
+    "spec:\n  transport: http\n  url: https://mcp.context7.com/mcp\n"
+)
+
+
+def test_write_files_rejects_manifest_under_wrong_filename(tmp_path: Path):
+    # kind: MCPServer inside `server.yaml` — indexes as an unclassified file,
+    # invisible to trust and runtime activation (the context7 shape).
+    sanad = _sanad(tmp_path)
+    with pytest.raises(PlanError) as e:
+        plan_write_files(
+            index_blueprint(sanad),
+            [(".sanad/mcp-servers/context7/server.yaml", MCP_MANIFEST)],
+            "s",
+        )
+    assert e.value.code == "misplaced_manifest"
+    assert ".sanad/mcps/<slug>/mcp.yaml" in e.value.message
+
+
+def test_write_files_rejects_canonical_name_in_wrong_dir(tmp_path: Path):
+    sanad = _sanad(tmp_path)
+    with pytest.raises(PlanError) as e:
+        plan_write_files(
+            index_blueprint(sanad),
+            [(".sanad/mcp-servers/context7/mcp.yaml", MCP_MANIFEST)],
+            "s",
+        )
+    assert e.value.code == "misplaced_manifest"
+
+
+def test_write_files_rejects_kind_filename_mismatch(tmp_path: Path):
+    sanad = _sanad(tmp_path)
+    with pytest.raises(PlanError) as e:
+        plan_write_files(
+            index_blueprint(sanad),
+            [(".sanad/mcps/context7/skill.yaml", MCP_MANIFEST)],
+            "s",
+        )
+    assert e.value.code == "manifest_kind_mismatch"
+
+
+def test_write_files_canonical_mcp_creates_and_indexes(tmp_path: Path):
+    sanad = _sanad(tmp_path)
+    plan = plan_write_files(
+        index_blueprint(sanad),
+        [(".sanad/mcps/context7/mcp.yaml", MCP_MANIFEST)],
+        "Add the context7 MCP server",
+    )
+    assert plan.nodes_added == ["mcp:context7"]
+    apply_plan(tmp_path, plan)
+    assert "mcp:context7" in index_blueprint(sanad).resources
+
+
+def test_write_files_legacy_misplaced_manifest_updates_and_deletes(tmp_path: Path):
+    # Files that arrived misplaced BEFORE the rule: a manifest-NAMED file in a
+    # wrong dir stays editable (update is grandfathered toward migration), and
+    # a misplaced-manifest delete is always allowed — cleanup must never be
+    # blocked by the rule that makes cleanup necessary.
+    sanad = _sanad(tmp_path)
+    legacy_dir = sanad / "mcp-servers" / "old"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "mcp.yaml").write_text(
+        MCP_MANIFEST.replace("mcp:context7", "mcp:old").replace("Context7", "Old")
+    )
+    (legacy_dir / "server.yaml").write_text(MCP_MANIFEST)
+
+    index = index_blueprint(sanad)
+    plan = plan_write_files(
+        index,
+        [(".sanad/mcp-servers/old/mcp.yaml", (legacy_dir / "mcp.yaml").read_text() + "# note\n")],
+        "Edit the legacy manifest",
+    )
+    assert plan.nodes_changed == ["mcp:old"]
+
+    # An UPDATE that keeps feeding a manifest under a non-manifest filename is
+    # rejected (migration, not perpetuation)…
+    with pytest.raises(PlanError) as e:
+        plan_write_files(
+            index, [(".sanad/mcp-servers/old/server.yaml", MCP_MANIFEST)], "s"
+        )
+    assert e.value.code == "misplaced_manifest"
+
+    # …but deleting it is fine.
+    plan = plan_write_files(
+        index, [(".sanad/mcp-servers/old/server.yaml", None)], "Remove the stray file"
+    )
+    assert [op.op for op in plan.operations] == ["delete"]
+
+
+def test_write_files_plain_yaml_support_files_pass(tmp_path: Path):
+    # Arbitrary YAML support files (no recognizable manifest envelope) are
+    # untouched by the sniff.
+    sanad = _sanad(tmp_path)
+    plan = plan_write_files(
+        index_blueprint(sanad),
+        [(".sanad/agents/primary/settings.yaml", "retries: 3\nkind: helpful\n")],
+        "Agent settings",
+    )
+    assert [op.op for op in plan.operations] == ["create"]

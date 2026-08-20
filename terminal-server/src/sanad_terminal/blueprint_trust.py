@@ -131,15 +131,21 @@ def _write_store(root: Path, entries: dict[str, dict]) -> None:
 
 
 def _executable_files_on_disk(root: Path) -> dict[str, Path]:
-    """Workspace-relative → absolute path of every gated file present."""
-    skills = root / ".sanad" / "skills"
+    """Workspace-relative → absolute path of every gated file present.
+
+    Walks every _GATED (kind dir, filename) pair — a gated kind whose files
+    the walker cannot see gets trust records at apply time but no status in
+    the UI, so untrusted/changed content of that kind would be invisible to
+    review (the R5 rung-1 gap: mcps/ was gated but never walked)."""
     found: dict[str, Path] = {}
-    if not skills.is_dir():
-        return found
-    for child in sorted(skills.iterdir()):
-        skill_md = child / "SKILL.md"
-        if child.is_dir() and skill_md.is_file():
-            found[f".sanad/skills/{child.name}/SKILL.md"] = skill_md
+    for kind_dir, gated_name in _GATED:
+        base = root / ".sanad" / kind_dir
+        if not base.is_dir():
+            continue
+        for child in sorted(base.iterdir()):
+            gated = child / gated_name
+            if child.is_dir() and gated.is_file():
+                found[f".sanad/{kind_dir}/{child.name}/{gated_name}"] = gated
     return found
 
 
