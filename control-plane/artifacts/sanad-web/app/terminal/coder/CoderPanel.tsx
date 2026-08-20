@@ -7,8 +7,10 @@ import {
   ensureConversation,
   fetchCoderTurn,
   followCoder,
+  modeFromEvent,
   respondCoder,
   sendCoder,
+  setCoderMode,
   textFromEvent,
   thinkFromEvent,
   toolLabel,
@@ -22,10 +24,31 @@ import {
 } from "@/lib/coder/transcript";
 import type { CoderItem, RespondPayload } from "@/lib/coder/types";
 import type { StoredCoderMessage } from "@/lib/sessions/state";
+import { button, disabled, size } from "../../ui/theme";
 import { ApprovalCard, QuestionCard } from "./RequestCards";
 import { ToolCard } from "./ToolCard";
 
 type RequestBlock = Extract<CoderBlock, { kind: "request" }>;
+
+/** The three P2a-supported permission modes — no yolo here (never surfaced
+ * in this panel; see P2a's `apply_permission_mode`). */
+type CoderMode = "plan" | "default" | "accept-edits";
+
+const MODE_OPTIONS: { value: CoderMode; label: string }[] = [
+  { value: "plan", label: "Plan" },
+  { value: "default", label: "Default" },
+  { value: "accept-edits", label: "Accept edits" },
+];
+
+/** One-line meaning of each mode, per P2a's `apply_permission_mode`: default
+ * auto-approves `edit file`; accept-edits also auto-approves edits outside
+ * the workspace; plan is read-only (proposes, never applies). Shell always
+ * asks in every mode — there is no yolo tier here. */
+const MODE_CAPTIONS: Record<CoderMode, string> = {
+  default: "Edits auto-approved · shell asks",
+  "accept-edits": "Edits auto-approved (incl. outside the workspace) · shell asks",
+  plan: "Read-only — proposes a plan, makes no changes",
+};
 
 const BUSY_RETRY_MS = 4000;
 const STALL_AFTER_MS = 90_000;
@@ -96,6 +119,16 @@ export default function CoderPanel({
   const [showSteps, setShowSteps] = useState(false);
   /* Per-requestId busy flag for the inline approval/question cards. */
   const [respondBusy, setRespondBusy] = useState<Record<string, boolean>>({});
+  /* Live permission mode — seeded from /turn in begin(), kept live via
+     StatusUpdate events in consume(), and driven optimistically by the
+     segmented control (reverted on a failed /mode call). */
+  const [mode, setMode] = useState<CoderMode>("default");
+  /* Brief inline error when a mode switch is rejected server-side — this
+     panel has no toast affordance, so it borrows the same "⚠ text, then
+     fade" idiom used elsewhere here, just scoped to the mode row instead of
+     the transcript. */
+  const [modeNotice, setModeNotice] = useState<string | null>(null);
+  const modeNoticeTimerRef = useRef<number | null>(null);
 
   const anchorKey = `sanad-coder-turn:${sessionId ?? "default"}`;
   const startedRef = useRef(false);
@@ -174,6 +207,13 @@ export default function CoderPanel({
     onConversationIdRef.current?.(newCid);
 
     const state = await fetchCoderTurn(newCid, sessionId);
+    if (
+      state?.mode === "plan" ||
+      state?.mode === "default" ||
+      state?.mode === "accept-edits"
+    ) {
+      setMode(state.mode);
+    }
     if (state?.turn?.status === "running") {
       await runTurnRef.current?.(
         state.turn.userInput || "(earlier request)",
@@ -275,6 +315,14 @@ export default function CoderPanel({
           if (item.seq <= lastSeq) return; // duplicate from a re-follow
           lastSeq = item.seq;
           saveAnchor();
+        }
+        const liveMode = modeFromEvent(item);
+        if (
+          liveMode === "plan" ||
+          liveMode === "default" ||
+          liveMode === "accept-edits"
+        ) {
+          setMode(liveMode);
         }
         if (item.kind === "turn") {
           turnId = item.turnId;
@@ -512,6 +560,41 @@ export default function CoderPanel({
     // A cancelled stream ends on its own; "busy" clears via its retry timer.
   }, [cid, sessionId]);
 
+  /* Clear any pending "mode switch failed" notice on unmount. */
+  useEffect(() => {
+    return () => {
+      if (modeNoticeTimerRef.current !== null) {
+        window.clearTimeout(modeNoticeTimerRef.current);
+      }
+    };
+  }, []);
+
+  /* Optimistic mode switch: flip local state immediately, then confirm with
+     the server. A rejection (e.g. a busy conversation — carried forward from
+     P2a, ledgered rather than fixed here) reverts to the prior mode and
+     surfaces the error briefly next to the control. */
+  const switchMode = useCallback(
+    (next: CoderMode) => {
+      if (!cid || next === mode) return;
+      const prev = mode;
+      setMode(next);
+      setModeNotice(null);
+      void setCoderMode(cid, next, sessionId).then((result) => {
+        if (result.ok) return;
+        setMode(prev);
+        setModeNotice(result.message ?? "Could not switch modes — try again.");
+        if (modeNoticeTimerRef.current !== null) {
+          window.clearTimeout(modeNoticeTimerRef.current);
+        }
+        modeNoticeTimerRef.current = window.setTimeout(
+          () => setModeNotice(null),
+          4000,
+        );
+      });
+    },
+    [cid, mode, sessionId],
+  );
+
   /* Resolve a pending approval/question request. Only skip the local fold
      when the answered card is the LIVE TAIL of an actively streaming turn —
      that's the one case where the journal is guaranteed to deliver its own
@@ -612,6 +695,7 @@ export default function CoderPanel({
     lastMessage.role === "assistant" &&
     lastMessage.blocks.some((b) => b.kind === "request" && b.state === "pending");
   const composerDisabled = phase === "error";
+  const modeDisabled = !cid || phase === "error" || phase === "starting";
 
   return (
     <div style={s.wrap}>
@@ -828,6 +912,31 @@ export default function CoderPanel({
           )}
         </div>
       )}
+
+      <div style={s.modeRow}>
+        <div style={s.modeSegments} role="group" aria-label="Permission mode">
+          {MODE_OPTIONS.map((opt) => {
+            const active = mode === opt.value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                style={{
+                  ...(active ? button.primary(size.sm) : button.secondary(size.sm)),
+                  ...disabled(modeDisabled),
+                }}
+                disabled={modeDisabled}
+                aria-pressed={active}
+                onClick={() => switchMode(opt.value)}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+        <span style={s.modeCaption}>{MODE_CAPTIONS[mode]}</span>
+        {modeNotice && <span style={s.modeNotice}>⚠ {modeNotice}</span>}
+      </div>
 
       <div style={s.composer}>
         <textarea
@@ -1118,6 +1227,27 @@ const s: Record<string, CSSProperties> = {
     padding: "0.15rem 0.7rem",
     cursor: "pointer",
     whiteSpace: "nowrap",
+  },
+  modeRow: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.3rem",
+    padding: "0.55rem 0.85rem 0",
+  },
+  modeSegments: {
+    display: "inline-flex",
+    gap: "0.4rem",
+    flexWrap: "wrap",
+  },
+  modeCaption: {
+    fontSize: "0.72rem",
+    lineHeight: 1.4,
+    color: "var(--ink-muted)",
+  },
+  modeNotice: {
+    fontSize: "0.72rem",
+    lineHeight: 1.4,
+    color: "var(--ink)",
   },
   composer: {
     display: "flex",
