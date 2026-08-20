@@ -23,6 +23,7 @@ import {
 import type { CoderItem, RespondPayload } from "@/lib/coder/types";
 import type { StoredCoderMessage } from "@/lib/sessions/state";
 import { ApprovalCard, QuestionCard } from "./RequestCards";
+import { ToolCard } from "./ToolCard";
 
 type RequestBlock = Extract<CoderBlock, { kind: "request" }>;
 
@@ -712,11 +713,7 @@ export default function CoderPanel({
                         </div>
                       );
                     if (b.kind === "tool")
-                      return (
-                        <div key={bi} style={s.tool}>
-                          <span style={s.toolDot} /> {b.label}
-                        </div>
-                      );
+                      return <ToolCard key={bi} block={b} />;
                     return b.requestType === "approval" ? (
                       <ApprovalCard
                         key={bi}

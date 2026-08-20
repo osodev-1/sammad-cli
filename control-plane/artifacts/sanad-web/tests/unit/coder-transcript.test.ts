@@ -244,6 +244,22 @@ describe("coder transcript fold (reduce)", () => {
     expect(blocks[1].kind === "tool" && blocks[1].toolCallId).toBe("tc2");
   });
 
+  it("ToolResult for one of two in-flight calls resolves only its own block — the other stays undefined", () => {
+    let blocks: CoderBlock[] = [];
+    blocks = reduce(blocks, toolEvent("Grep", "A", { pattern: "foo" }));
+    blocks = reduce(blocks, toolEvent("Grep", "B", { pattern: "bar" }));
+    blocks = reduce(blocks, toolResultEvent("A", false, [{ type: "brief", text: "found foo" }]));
+    expect(blocks).toHaveLength(2);
+    const [a, b] = blocks;
+    expect(a.kind === "tool" && a.toolCallId).toBe("A");
+    expect(a.kind === "tool" && a.result).toEqual({
+      isError: false,
+      display: [{ type: "brief", text: "found foo" }],
+    });
+    expect(b.kind === "tool" && b.toolCallId).toBe("B");
+    expect(b.kind === "tool" && b.result).toBeUndefined();
+  });
+
   it("a ToolResult with an unknown tool_call_id is ignored", () => {
     let blocks: CoderBlock[] = reduce([], toolEvent("Shell", "tc1", { command: "ls" }));
     const before = blocks;
