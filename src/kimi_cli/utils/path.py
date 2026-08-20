@@ -260,12 +260,19 @@ def resolve_symlinks(path: KaosPath) -> KaosPath:
         return resolved
 
 
-def resolve_write_target(path: KaosPath, work_dir: KaosPath) -> tuple[KaosPath, bool]:
+def resolve_write_target(
+    path: KaosPath,
+    work_dir: KaosPath,
+    additional_dirs: Sequence[KaosPath] = (),
+) -> tuple[KaosPath, bool, bool]:
     """Resolve *path* once and classify it, for callers that both classify and write.
 
-    Returns ``(resolved_path, is_sanad)``. ``resolved_path`` is *path* with
-    symlinks resolved (see :func:`resolve_symlinks`); ``is_sanad`` is True
-    when that resolved location is inside ``<work_dir>/.sanad``.
+    Returns ``(resolved_path, is_sanad, is_within_workspace)``. All three are
+    derived from a SINGLE symlink resolution of *path* (and of ``work_dir`` /
+    ``additional_dirs``), so classification reflects exactly where the write
+    lands: a workspace symlink pointing OUT of the workspace is classified as
+    an outside-workspace edit (not an in-workspace one), and a symlink into
+    ``.sanad`` is classified as a sanad-definition edit.
 
     Callers MUST perform the actual write against the returned
     ``resolved_path``, not the original *path*. Resolving symlinks only for
@@ -277,24 +284,11 @@ def resolve_write_target(path: KaosPath, work_dir: KaosPath) -> tuple[KaosPath, 
     classify and write closes that gap.
     """
     resolved = resolve_symlinks(path)
-    sanad_dir = resolve_symlinks(work_dir / ".sanad")
-    is_sanad = is_within_directory(resolved, sanad_dir)
-    return resolved, is_sanad
-
-
-def is_sanad_definition_path(path: KaosPath, work_dir: KaosPath) -> bool:
-    """True when *path* — after resolving symlinks — is inside ``<work_dir>/.sanad``.
-
-    Classification must reflect where a write actually lands, not the literal
-    argument path: a workspace symlink pointing into (or out of) ``.sanad``
-    must not let a sanad-definition edit masquerade as a plain file edit.
-
-    Callers that also perform a write following this classification should
-    use :func:`resolve_write_target` instead, so classification and the
-    write share a single symlink resolution.
-    """
-    _, is_sanad = resolve_write_target(path, work_dir)
-    return is_sanad
+    resolved_work_dir = resolve_symlinks(work_dir)
+    resolved_additional = [resolve_symlinks(d) for d in additional_dirs]
+    is_sanad = is_within_directory(resolved, resolve_symlinks(work_dir / ".sanad"))
+    within_workspace = is_within_workspace(resolved, resolved_work_dir, resolved_additional)
+    return resolved, is_sanad, within_workspace
 
 
 async def find_project_root(work_dir: KaosPath) -> KaosPath:

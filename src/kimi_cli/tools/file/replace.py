@@ -157,12 +157,14 @@ class StrReplaceFile(CallableTool2[Params]):
             # classification and the write share a single resolution — a
             # concurrent retarget of a symlink between approval and write can't
             # redirect the bytes to a location other than the one approved.
-            write_target, is_sanad = resolve_write_target(p, self._work_dir)
+            write_target, is_sanad, is_in_workspace = resolve_write_target(
+                p, self._work_dir, self._additional_dirs
+            )
 
             if is_sanad:
                 action = FileActions.EDIT_SANAD
                 cacheable = False
-            elif is_within_workspace(p, self._work_dir, self._additional_dirs):
+            elif is_in_workspace:
                 action = FileActions.EDIT
                 cacheable = True
             else:

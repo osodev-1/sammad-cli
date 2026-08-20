@@ -57,7 +57,8 @@ class TerminalSettings:
     coder_max_steps_per_turn: int = 200
     # Live runner cap per workspace; write-lease arrives in P6.
     coder_max_conversations: int = 3
-    # HMAC key for the blueprint trust store — agentd-env only, NEVER in child env. Empty = legacy unsigned store (local/dev/railway).
+    # HMAC key for the blueprint trust store — agentd-env only, NEVER in the
+    # child env. Empty = legacy unsigned store (local/dev/railway).
     trust_store_key: str = ""
     # -- architect panel (P1) -------------------------------------------------
     # Wall-clock bound on one architect turn — with idle probes holding the
@@ -99,6 +100,14 @@ class TerminalSettings:
                 raise SettingsError("SANAD_WORKSPACE_USER is required in task mode")
             if not agentd_token:
                 raise SettingsError("AGENTD_TOKEN is required in task mode")
+            # Fail-closed on the trust-hardening prerequisites: without the HMAC
+            # key the store loads unverified (legacy path), and without the uid
+            # split the key is /proc-readable by the agent and the rlimits no-op.
+            # A governed machine that can't guarantee both must not boot.
+            if not e.get("TRUST_STORE_KEY", ""):
+                raise SettingsError("TRUST_STORE_KEY is required in task mode")
+            if not e.get("AGENT_USER", ""):
+                raise SettingsError("AGENT_USER is required in task mode")
 
         spawn = e.get("TERMINAL_SPAWN_ARGV", "")
         if spawn:
