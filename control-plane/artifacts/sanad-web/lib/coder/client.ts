@@ -237,6 +237,7 @@ export async function fetchCoderTurn(
       turn: data?.turn ?? null,
       alive: Boolean(data?.alive),
       pendingRequests: data?.pendingRequests ?? [],
+      mode: data?.mode ?? undefined,
     };
   } catch {
     return null;
@@ -258,6 +259,35 @@ export async function respondCoder(
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ requestId, ...payload }),
+      },
+    );
+    if (res.ok) return { ok: true };
+    const b = await res.json().catch(() => null);
+    return { ok: false, code: b?.error?.code, message: b?.error?.message };
+  } catch {
+    return {
+      ok: false,
+      code: "network",
+      message: "Network error — check your connection.",
+    };
+  }
+}
+
+/** Switch the live permission mode ("plan" | "default" | "accept-edits").
+ * Never throws — the caller (CoderPanel) treats a failed switch as "stay on
+ * the prior mode" and reverts its optimistic UI state. */
+export async function setCoderMode(
+  cid: string,
+  mode: string,
+  sessionId?: string,
+): Promise<{ ok: boolean; code?: string; message?: string }> {
+  try {
+    const res = await fetch(
+      withSession(`/api/coder/conversations/${encodeURIComponent(cid)}/mode`, sessionId),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode }),
       },
     );
     if (res.ok) return { ok: true };
@@ -309,6 +339,16 @@ export function thinkFromEvent(item: CoderItem): string | null {
   const payload = item.event.payload as { type?: unknown; think?: unknown } | undefined;
   if (payload?.type !== "think") return null;
   return typeof payload.think === "string" && payload.think ? payload.think : null;
+}
+
+/** Live permission-mode signal off a `StatusUpdate` event. Standalone (not
+ * part of `reduce()` in transcript.ts) — it's conversation-level state, not
+ * a transcript block, so CoderPanel's `consume()` calls this alongside the
+ * other extractors to update its own mode state directly. */
+export function modeFromEvent(item: CoderItem): string | null {
+  if (item.kind !== "event" || item.event.type !== "StatusUpdate") return null;
+  const mode = (item.event.payload as { permission_mode?: unknown } | undefined)?.permission_mode;
+  return typeof mode === "string" && mode ? mode : null;
 }
 
 /** Generic present-tense phrase per tool name — the fallback tier for
