@@ -51,6 +51,7 @@ from .jsonrpc import (
     JSONRPCPromptMessage,
     JSONRPCReplayMessage,
     JSONRPCRequestMessage,
+    JSONRPCSetPermissionModeMessage,
     JSONRPCSetPlanModeMessage,
     JSONRPCSteerMessage,
     JSONRPCSuccessResponse,
@@ -365,6 +366,8 @@ class WireServer:
                     resp = await self._handle_steer(msg)
                 case JSONRPCSetPlanModeMessage():
                     resp = await self._handle_set_plan_mode(msg)
+                case JSONRPCSetPermissionModeMessage():
+                    resp = await self._handle_set_permission_mode(msg)
                 case JSONRPCCancelMessage():
                     resp = await self._handle_cancel(msg)
                 case JSONRPCSuccessResponse() | JSONRPCErrorResponse():
@@ -792,6 +795,40 @@ class WireServer:
         return JSONRPCSuccessResponse(
             id=msg.id,
             result={"status": "ok", "plan_mode": new_state},
+        )
+
+    async def _handle_set_permission_mode(
+        self, msg: JSONRPCSetPermissionModeMessage
+    ) -> JSONRPCSuccessResponse | JSONRPCErrorResponse:
+        if not isinstance(self._soul, KimiSoul):
+            return JSONRPCErrorResponse(
+                id=msg.id,
+                error=JSONRPCErrorObject(
+                    code=ErrorCodes.INVALID_STATE,
+                    message="Permission modes are not supported",
+                ),
+            )
+
+        mode = msg.params.mode
+        if mode == "plan":
+            # Plan mode itself rides the existing plan-mode machinery;
+            # approvals are untouched (Approval.apply_permission_mode is not
+            # involved for this branch).
+            await self._soul.set_plan_mode_from_manual(True)
+        else:
+            # Switching to an approval posture while plan mode is on turns
+            # plan mode off first, then applies the new posture.
+            if self._soul.plan_mode:
+                await self._soul.set_plan_mode_from_manual(False)
+            self._soul.runtime.approval.apply_permission_mode(mode)
+
+        status = StatusUpdate(permission_mode=mode, plan_mode=self._soul.plan_mode)
+        await self._send_msg(JSONRPCEventMessage(params=status))
+        # Persist to wire file so replay reconstructs permission mode state
+        await self._soul.wire_file.append_message(status)
+        return JSONRPCSuccessResponse(
+            id=msg.id,
+            result={"status": "ok", "permission_mode": mode},
         )
 
     async def _handle_replay(
