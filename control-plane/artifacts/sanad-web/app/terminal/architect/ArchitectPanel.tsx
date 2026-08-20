@@ -355,10 +355,16 @@ export default function ArchitectPanel({
       }
       setReconnecting(false);
       setActivity(null);
-      try {
-        window.sessionStorage.removeItem(anchorKey);
-      } catch {
-        /* storage blocked */
+      if (flags.ended) {
+        // Clean end (finished/cancelled/failed) — the anchor's job is done.
+        // On reconnect GIVE-UP the turn may still be running server-side, so
+        // the anchor stays: a reload can re-attach via the resume effect,
+        // which validates against the live turn state and clears stale ones.
+        try {
+          window.sessionStorage.removeItem(anchorKey);
+        } catch {
+          /* storage blocked */
+        }
       }
       if (!flags.ended && turnId) {
         // Gave up re-attaching. The turn may still finish server-side — say
@@ -785,17 +791,26 @@ export default function ArchitectPanel({
                     );
                   })}
                   {phase === "streaming" && mi === messages.length - 1 && (
-                    <button
-                      style={s.architecting}
-                      onClick={() => setShowSteps((v) => !v)}
-                      title="Show the architect's live steps — reasoning and tool activity"
-                    >
-                      <span style={s.pulse} />
-                      Architecting…
-                      <span style={s.stepsHint}>
-                        {showSteps ? "hide steps" : "show steps"}
-                      </span>
-                    </button>
+                    <div style={s.activeRow}>
+                      <button
+                        style={s.architecting}
+                        onClick={() => setShowSteps((v) => !v)}
+                        title="Show the architect's live steps — reasoning and tool activity"
+                      >
+                        <span style={s.pulse} />
+                        Architecting…
+                        <span style={s.stepsHint}>
+                          {showSteps ? "hide steps" : "show steps"}
+                        </span>
+                      </button>
+                      <button
+                        style={s.stopInline}
+                        title="Stop this turn — drafts already made stay; queued messages send next"
+                        onClick={stopTurn}
+                      >
+                        Stop
+                      </button>
+                    </div>
                   )}
                 </div>
               )}
