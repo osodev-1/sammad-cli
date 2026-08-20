@@ -4,9 +4,11 @@ import {
   sendCoder,
   fetchCoderTurn,
   respondCoder,
+  setCoderMode,
   textFromEvent,
   thinkFromEvent,
   toolLabel,
+  modeFromEvent,
 } from "@/lib/coder/client";
 import type { CoderItem } from "@/lib/coder/types";
 
@@ -133,6 +135,31 @@ describe("fetchCoderTurn", () => {
     const state = await fetchCoderTurn("c_1", "sess1");
     expect(state).toEqual({ turn: null, alive: false, pendingRequests: [] });
   });
+
+  it("surfaces mode from the response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          turn: null,
+          alive: true,
+          pendingRequests: [],
+          mode: "accept-edits",
+        }),
+      ),
+    );
+    const state = await fetchCoderTurn("c_1", "sess1");
+    expect(state?.mode).toBe("accept-edits");
+  });
+
+  it("defaults mode to undefined when the response omits it", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(200, { turn: null, alive: false, mode: null })),
+    );
+    const state = await fetchCoderTurn("c_1", "sess1");
+    expect(state?.mode).toBeUndefined();
+  });
 });
 
 describe("ensureConversation", () => {
@@ -236,6 +263,36 @@ describe("respondCoder", () => {
   });
 });
 
+describe("setCoderMode", () => {
+  it("POSTs {mode} to the mode endpoint and returns {ok:true} on 200", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, mode: "accept-edits" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await setCoderMode("c_1", "accept-edits", "sess1");
+
+    expect(result).toEqual({ ok: true });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("/api/coder/conversations/c_1/mode?session=sess1");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ mode: "accept-edits" });
+  });
+
+  it("maps a 409 not_started body to {ok:false, code:'not_started'}", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(409, { error: { code: "not_started", message: "conversation is not running" } }),
+      ),
+    );
+    const result = await setCoderMode("c_1", "accept-edits", "sess1");
+    expect(result).toEqual({
+      ok: false,
+      code: "not_started",
+      message: "conversation is not running",
+    });
+  });
+});
+
 describe("coder event extractors", () => {
   it("labels coder tool calls with the coder toolset map", () => {
     expect(
@@ -273,6 +330,27 @@ describe("coder event extractors", () => {
       thinkFromEvent({
         kind: "event",
         event: { type: "TextPart", payload: { text: "hey" } },
+      }),
+    ).toBeNull();
+  });
+
+  it("modeFromEvent reads permission_mode off a StatusUpdate, null otherwise", () => {
+    expect(
+      modeFromEvent({
+        kind: "event",
+        event: { type: "StatusUpdate", payload: { permission_mode: "plan" } },
+      }),
+    ).toBe("plan");
+    expect(
+      modeFromEvent({
+        kind: "event",
+        event: { type: "ToolCall", payload: { function: { name: "Shell" } } },
+      }),
+    ).toBeNull();
+    expect(
+      modeFromEvent({
+        kind: "event",
+        event: { type: "StatusUpdate", payload: { permission_mode: null } },
       }),
     ).toBeNull();
   });

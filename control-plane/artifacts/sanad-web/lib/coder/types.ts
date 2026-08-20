@@ -28,6 +28,10 @@ export interface CoderTurnState {
   turn: CoderTurnSummary | null;
   alive: boolean;
   pendingRequests: PendingRequestSummary[];
+  /** Live permission mode ("plan" | "default" | "accept-edits"), when the
+   * server reports one. Undefined (not null) when absent — the panel treats
+   * that as "default". */
+  mode?: string;
 }
 
 /** Approval payload fields the card renders (wire snake_case). */
