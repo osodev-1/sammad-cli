@@ -581,7 +581,11 @@ export default function CoderPanel({
       setModeNotice(null);
       void setCoderMode(cid, next, sessionId).then((result) => {
         if (result.ok) return;
-        setMode(prev);
+        // Revert only if nothing superseded our optimistic value — a live
+        // StatusUpdate that already moved `mode` on (e.g. the server's real
+        // mode arrived mid-flight) is authoritative and must not be
+        // clobbered by this stale pre-click snapshot.
+        setMode((cur) => (cur === next ? prev : cur));
         setModeNotice(result.message ?? "Could not switch modes — try again.");
         if (modeNoticeTimerRef.current !== null) {
           window.clearTimeout(modeNoticeTimerRef.current);
