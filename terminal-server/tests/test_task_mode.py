@@ -98,6 +98,25 @@ def test_task_mode_settings_requirements():
                 "SANAD_WORKSPACE_USER": "user_1",
             }
         )
+    with pytest.raises(SettingsError, match="TRUST_STORE_KEY"):
+        TerminalSettings.load(
+            {
+                "WORKSPACE_MODE": "task",
+                "TERMINAL_SPAWN_ARGV": "/bin/echo",
+                "SANAD_WORKSPACE_USER": "user_1",
+                "AGENTD_TOKEN": "tok",
+            }
+        )
+    with pytest.raises(SettingsError, match="AGENT_USER"):
+        TerminalSettings.load(
+            {
+                "WORKSPACE_MODE": "task",
+                "TERMINAL_SPAWN_ARGV": "/bin/echo",
+                "SANAD_WORKSPACE_USER": "user_1",
+                "AGENTD_TOKEN": "tok",
+                "TRUST_STORE_KEY": "k",
+            }
+        )
     s = TerminalSettings.load(
         {
             "WORKSPACE_MODE": "task",
@@ -105,6 +124,8 @@ def test_task_mode_settings_requirements():
             "SANAD_WORKSPACE_USER": "user_1",
             "AGENTD_TOKEN": "tok",
             "MACHINE_NONCE": "n1",
+            "TRUST_STORE_KEY": "k",
+            "AGENT_USER": "dev",
         }
     )
     assert s.mode == "task"

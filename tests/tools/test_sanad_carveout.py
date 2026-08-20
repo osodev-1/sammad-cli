@@ -201,3 +201,37 @@ async def test_symlink_retarget_after_approval_writes_to_classified_location(
     # NOT at the retargeted decoy destination.
     assert (sanad_target_dir / "SKILL.md").read_text() == "pwned"
     assert not (decoy_dir / "SKILL.md").exists()
+
+
+# --- workspace-boundary hardening: classify EDIT vs EDIT_OUTSIDE on the RESOLVED
+#     target, so a workspace symlink pointing OUTSIDE can't be auto-approved as an
+#     in-workspace edit under the seeded default mode. ---
+
+
+async def test_symlink_out_of_workspace_classifies_edit_outside(
+    write_file_tool: WriteFile, temp_work_dir: KaosPath, approval: Approval, tmp_path
+):
+    """A workspace symlink whose target is OUTSIDE the workspace must classify
+    EDIT_OUTSIDE (gated), never EDIT (which default mode auto-approves)."""
+    import pathlib
+
+    local_work_dir = temp_work_dir.unsafe_to_local_path()
+    # A real directory outside the workspace root entirely.
+    outside = pathlib.Path(tmp_path) / "outside_ws"
+    outside.mkdir(parents=True, exist_ok=True)
+    escape = local_work_dir / "escape"
+    escape.symlink_to(outside, target_is_directory=True)
+
+    file_path = temp_work_dir / "escape" / "loot.txt"
+
+    task = asyncio.create_task(write_file_tool(Params(path=str(file_path), content="x")))
+    pending = await _await_pending(approval)
+    assert len(pending) == 1
+    # The write lands at outside/loot.txt, so it must be gated as EDIT_OUTSIDE,
+    # not the auto-approvable in-workspace EDIT.
+    assert pending[0].action == "edit file outside of working directory"
+    approval._runtime.resolve(pending[0].id, "approve")
+
+    result = await task
+    assert not result.is_error
+    assert (outside / "loot.txt").read_text() == "x"
