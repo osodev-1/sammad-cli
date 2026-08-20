@@ -272,7 +272,7 @@ export default function ArchitectPanel({
         { role: "user", text, at },
         { role: "assistant", blocks: [], at },
       ]);
-      const flags = { busy: false, failed: false, ended: false };
+      const flags = { busy: false, failed: false, ended: false, cancelled: false };
       let turnId: string | null = resume?.turnId ?? null;
       let lastSeq = -1;
       const saveAnchor = () => {
@@ -300,6 +300,7 @@ export default function ArchitectPanel({
         }
         if (item.kind === "end") {
           flags.ended = true;
+          if (item.status === "cancelled") flags.cancelled = true;
           return;
         }
         if (item.kind === "error" && item.code === "network") {
@@ -437,7 +438,9 @@ export default function ArchitectPanel({
                 ...last.blocks,
                 {
                   kind: "text",
-                  text: "⚠ No response arrived for this turn. If this keeps happening, use Reset (top of the file sidebar) to restart the workspace agents.",
+                  text: flags.cancelled
+                    ? "◼ Stopped."
+                    : "⚠ No response arrived for this turn. If this keeps happening, use Reset (top of the file sidebar) to restart the workspace agents.",
                 },
               ],
             };
