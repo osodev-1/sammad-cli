@@ -10,7 +10,13 @@ export type CoderItem =
 
 export interface CoderTurnSummary {
   turnId: string;
-  status: "running" | "finished" | "cancelled" | "failed";
+  /** "interrupted" is TERMINAL, not "running": a restart-recovery status
+   * (P3 Task 2) the server reconciles a crash-mid-turn to on reconstruction
+   * — the journal already carries a synthetic `request_cancelled` per
+   * dangling request, an explanatory `error`, and a closing `end`. A caller
+   * matching only `=== "running"` to decide whether to re-attach live
+   * correctly leaves this status alone (see CoderPanel.begin()). */
+  status: "running" | "finished" | "cancelled" | "failed" | "interrupted";
   userInput: string; // truncated to 200 chars server-side
   lastSeq: number;
   startedAt: number; // UNIX SECONDS
