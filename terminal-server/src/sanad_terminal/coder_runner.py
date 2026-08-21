@@ -95,9 +95,13 @@ class CoderRunner(WireRunner):
         # Durable index bookkeeping (P3) — the base's own `_turns`/`_turn_order`
         # RAM cache evicts terminal turns beyond `_TURN_KEEP` (5); this list is
         # the durable-retention view (bounded by `journal_turns_keep`, default
-        # 20) that becomes turns.json. Reconstructing it from disk on boot is
-        # P3 Task 2 — a freshly constructed runner starts empty here.
+        # 20) that becomes turns.json.
         self._journal_index: list[dict[str, Any]] = []
+        # Restart recovery (P3 Task 2): rebuild TurnStates from whatever is
+        # already on disk for this conversation, and reconcile any turn that
+        # was left "running" when the process died. A freshly minted
+        # conversation (no journal_dir, or an empty one) is a no-op here.
+        self._reconstruct_from_journal()
 
     # -- permission mode (P2a) -------------------------------------------------
 
@@ -216,6 +220,11 @@ class CoderRunner(WireRunner):
             "sendId": state.send_id,
             "startedAt": state.started_at,
             "lastSeq": state.last_seq,
+            # Carried so reconstruction (P3 Task 2) can rebuild a real
+            # TurnState.user_input — the NDJSON "turn" item itself only
+            # carries turnId, never the prompt text. Same [:200] clip
+            # `TurnState.summary()` already applies for display.
+            "userInput": state.user_input[:200],
         }
 
     def _journal_note_turn(self, state: TurnState) -> None:
@@ -234,6 +243,114 @@ class CoderRunner(WireRunner):
         if len(self._journal_index) > self._journal.turns_keep:
             self._journal_index = self._journal_index[-self._journal.turns_keep :]
         self._journal.write_index(list(self._journal_index))
+
+    # -- restart recovery (P3 Task 2 — load + reconcile on construction) ------
+
+    def _reconstruct_from_journal(self) -> None:
+        """Rebuild in-memory `TurnState`s from whatever is durably on disk
+        for this conversation — the restart-recovery core. Runs once, at
+        the tail of `__init__`, before this runner is handed to anyone.
+
+        Any turn whose last-written status is still "running" means the
+        process died mid-turn (crash, idle-stop, deploy): reconcile it to
+        the terminal "interrupted" status, cancelling any request left
+        dangling (nothing can ever answer it — the CLI process that owned
+        it is gone). Reconciliation writes through the journal sink too, so
+        disk and memory agree, and the terminal status is persisted back to
+        the index — a second construction over the same journal finds
+        nothing left running and is a no-op (idempotent).
+        """
+        if self._journal is None:
+            return
+        index, items_by_turn = self._journal.load()
+        if not index:
+            return
+        dirty = False
+        for entry in index:
+            turn_id = entry.get("turnId")
+            if not isinstance(turn_id, str):
+                continue
+            items = list(items_by_turn.get(turn_id, []))
+            started_at = entry.get("startedAt")
+            send_id = entry.get("sendId")
+            user_input = entry.get("userInput")
+            status = entry.get("status")
+            state = TurnState(
+                turn_id=turn_id,
+                user_input=user_input if isinstance(user_input, str) else "",
+                status=status if isinstance(status, str) else "failed",
+                started_at=started_at if isinstance(started_at, int | float) else time.time(),
+                send_id=send_id if isinstance(send_id, str) else None,
+                items=items,
+            )
+            state.steps = sum(
+                1
+                for item in items
+                if item.get("kind") == "event"
+                and isinstance(item.get("event"), dict)
+                and item["event"].get("type") == "StepBegin"
+            )
+            if state.status == "running":
+                self._reconcile_interrupted_turn(state)
+                dirty = True
+            self._turns[turn_id] = state
+            self._turn_order.append(turn_id)
+            self._journal_index.append(self._journal_entry(state))
+
+        self._evict_old_turns()
+        if len(self._journal_index) > self._journal.turns_keep:
+            self._journal_index = self._journal_index[-self._journal.turns_keep :]
+
+        if dirty:
+            self._journal.write_index(list(self._journal_index))
+
+    def _reconcile_interrupted_turn(self, state: TurnState) -> None:
+        """Close out a crash-interrupted turn honestly instead of leaving it
+        `"running"` forever (which would hang `follow()` on `_journal_cond`
+        for a turn nothing will ever advance again).
+
+        For every `request` item with no later `request_resolved`/
+        `request_cancelled` for the same `requestId`, journal a synthetic
+        `request_cancelled` (reason `interrupted_by_restart`) — deliberately
+        NOT registered into `_pending_requests`: the CLI process that could
+        answer it is gone, so there is nothing to keep pending. Then close
+        the turn with an explanatory `error` and a terminal `end`.
+        """
+        resolved_ids: set[str] = set()
+        requested_ids: list[str] = []
+        for item in state.items:
+            rid = item.get("requestId")
+            if not isinstance(rid, str):
+                continue
+            kind = item.get("kind")
+            if kind == "request":
+                requested_ids.append(rid)
+            elif kind in ("request_resolved", "request_cancelled"):
+                resolved_ids.add(rid)
+
+        cancelled: set[str] = set()
+        for rid in requested_ids:
+            if rid in resolved_ids or rid in cancelled:
+                continue
+            cancelled.add(rid)
+            self._append_sync(
+                state,
+                {
+                    "kind": "request_cancelled",
+                    "requestId": rid,
+                    "reason": "interrupted_by_restart",
+                },
+            )
+        self._append_sync(
+            state,
+            {
+                "kind": "error",
+                "code": "interrupted_by_restart",
+                "message": "This turn was interrupted by a workspace restart.",
+            },
+        )
+        self._append_sync(state, {"kind": "end", "status": "interrupted"})
+        state.status = "interrupted"
 
     async def start_turn(self, user_input: str, send_id: str | None = None) -> TurnState:
         state = await super().start_turn(user_input, send_id)

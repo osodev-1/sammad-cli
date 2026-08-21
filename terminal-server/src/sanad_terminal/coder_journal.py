@@ -120,17 +120,23 @@ class CoderJournal:
             logger.debug("coder journal: fsync failed for turn {}: {}", turn_id, exc)
 
     def prune(self, keep_turn_ids: list[str]) -> None:
-        """Delete turns/*.ndjson not in keep_turn_ids. Never raises."""
+        """Delete turns/*.ndjson not in keep_turn_ids, and drop the
+        matching `_sizes`/`_overflowed` bookkeeping so it doesn't grow
+        unbounded over a long-lived journal (P3 Task 2 minor fold-in).
+        Never raises."""
+        keep = set(keep_turn_ids)
         try:
-            keep = set(keep_turn_ids)
-            if not self.turns_dir.is_dir():
-                return
-            for path in self.turns_dir.glob("*.ndjson"):
-                if path.stem not in keep:
-                    with contextlib.suppress(OSError):
-                        path.unlink()
+            if self.turns_dir.is_dir():
+                for path in self.turns_dir.glob("*.ndjson"):
+                    if path.stem not in keep:
+                        with contextlib.suppress(OSError):
+                            path.unlink()
         except Exception as exc:  # broad: durability must never break a live turn
             logger.warning("coder journal: prune failed for {}: {}", self.turns_dir, exc)
+        for turn_id in list(self._sizes):
+            if turn_id not in keep:
+                self._sizes.pop(turn_id, None)
+        self._overflowed &= keep
 
     # -- read side (raw data only — reconstruction is P3 Task 2) --------
 

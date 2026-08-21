@@ -68,7 +68,11 @@ class TurnState:
 
     turn_id: str
     user_input: str
-    status: str = "running"  # running | finished | cancelled | failed
+    # running | finished | cancelled | failed | interrupted (a terminal
+    # status reached only by construction-time reconciliation, P3 Task 2:
+    # a turn still "running" when the durable journal was last written
+    # means the process crashed mid-turn).
+    status: str = "running"
     started_at: float = field(default_factory=time.time)
     send_id: str | None = None
     items: list[dict[str, Any]] = field(default_factory=list)
@@ -268,12 +272,7 @@ class WireRunner:
         )
         self._turns[state.turn_id] = state
         self._turn_order.append(state.turn_id)
-        while len(self._turn_order) > _TURN_KEEP:
-            oldest = self._turn_order[0]
-            if self._turns[oldest].status == "running":
-                break
-            self._turn_order.pop(0)
-            self._turns.pop(oldest, None)
+        self._evict_old_turns()
         self._current = state
 
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -371,6 +370,19 @@ class WireRunner:
             async with self._journal_cond:
                 self._journal_cond.notify_all()
 
+    def _evict_old_turns(self) -> None:
+        """Drop the oldest RAM-cached terminal turns beyond `_TURN_KEEP` —
+        shared by `start_turn` (as each new turn is appended) and by
+        journal reconstruction on boot (P3 Task 2, which populates several
+        turns at once and then applies the same cap in one pass). Never
+        evicts a still-`running` turn."""
+        while len(self._turn_order) > _TURN_KEEP:
+            oldest = self._turn_order[0]
+            if self._turns[oldest].status == "running":
+                break
+            self._turn_order.pop(0)
+            self._turns.pop(oldest, None)
+
     async def _budget_watch(self, state: TurnState, limit: float) -> None:
         await asyncio.sleep(limit)
         if state.status == "running" and not state.budget_tripped:
@@ -389,6 +401,24 @@ class WireRunner:
             {"kind": "error", "code": "turn_budget_exceeded", "message": reason},
         )
         await self.cancel()
+
+    def _append_sync(self, state: TurnState, item: dict[str, Any]) -> dict[str, Any]:
+        """Synchronous twin of `_append`, for the one context with no
+        running event loop: construction-time journal reconstruction (P3
+        Task 2's `CoderRunner.__init__`). Stamps + appends to memory and
+        writes through the journal sink exactly like `_append`, but skips
+        the `_journal_cond` notify — safe here because nothing can be
+        `follow()`ing a turn that doesn't exist outside of `__init__` yet."""
+        stamped = {"seq": len(state.items), **item}
+        state.items.append(stamped)
+        if self._journal_sink is not None:
+            try:
+                self._journal_sink(state.turn_id, stamped)
+            except Exception as exc:  # broad: a sink error must never break construction
+                logger.warning(
+                    "wire runner: journal sink raised for turn {}: {}", state.turn_id, exc
+                )
+        return stamped
 
     async def _append(self, state: TurnState, item: dict[str, Any]) -> None:
         stamped = {"seq": len(state.items), **item}
