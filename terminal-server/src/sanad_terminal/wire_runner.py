@@ -16,7 +16,7 @@ import os
 import resource
 import time
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -106,6 +106,7 @@ class WireRunner:
         capabilities: dict[str, bool],
         max_turn_seconds: float | None = None,
         max_steps_per_turn: int | None = None,
+        journal_sink: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self._argv = list(argv)
         self._cwd = cwd
@@ -118,6 +119,12 @@ class WireRunner:
         self._capabilities = dict(capabilities)
         self._max_turn_seconds = max_turn_seconds
         self._max_steps_per_turn = max_steps_per_turn
+        # Durable-journal write sink (P3) — None for the architect and any
+        # bare-runner construction; set by CoderRunner when journal_dir is
+        # given. Called synchronously from `_append`, wrapped so a sink
+        # failure never breaks a live turn (the sink itself already
+        # swallows too — belt and suspenders).
+        self._journal_sink = journal_sink
 
         self._proc: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task[None] | None = None
@@ -384,9 +391,17 @@ class WireRunner:
         await self.cancel()
 
     async def _append(self, state: TurnState, item: dict[str, Any]) -> None:
-        state.items.append({"seq": len(state.items), **item})
+        stamped = {"seq": len(state.items), **item}
+        state.items.append(stamped)
         async with self._journal_cond:
             self._journal_cond.notify_all()
+        if self._journal_sink is not None:
+            try:
+                self._journal_sink(state.turn_id, stamped)
+            except Exception as exc:  # broad: a sink error must never break the turn
+                logger.warning(
+                    "wire runner: journal sink raised for turn {}: {}", state.turn_id, exc
+                )
 
     def turn_summary(self) -> dict[str, Any] | None:
         """The most recent turn's state — how a reconnecting client learns
