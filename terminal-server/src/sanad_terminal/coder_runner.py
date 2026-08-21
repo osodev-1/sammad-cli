@@ -23,7 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sanad_terminal.wire_runner import WireRunner, WireRunnerError, register_registry
+from sanad_terminal.coder_journal import CoderJournal
+from sanad_terminal.wire_runner import TurnState, WireRunner, WireRunnerError, register_registry
 
 # Server-minted only (P0); the shape keeps ids path- and shell-safe.
 CONVERSATION_ID_RE = re.compile(r"^c_[a-f0-9]{12}$")
@@ -59,7 +60,21 @@ class CoderRunner(WireRunner):
         rlimit_fsize: int = 0,
         max_turn_seconds: float,
         max_steps_per_turn: int,
+        journal_dir: Path | None = None,
+        journal_turns_keep: int = 20,
+        journal_max_bytes: int = 20 * 1024 * 1024,
     ) -> None:
+        # Built before super().__init__() so its `.append` can be threaded
+        # in as the journal_sink. `journal_dir=None` (the architect, and any
+        # bare-runner test construction) keeps this None — no durable
+        # journal, no behavior change at all.
+        self._journal: CoderJournal | None = None
+        journal_sink = None
+        if journal_dir is not None:
+            self._journal = CoderJournal(
+                journal_dir, turns_keep=journal_turns_keep, max_bytes=journal_max_bytes
+            )
+            journal_sink = self._journal.append
         super().__init__(
             argv=argv,
             cwd=cwd,
@@ -72,10 +87,17 @@ class CoderRunner(WireRunner):
             capabilities={"supports_question": True, "supports_plan_mode": True},
             max_turn_seconds=max_turn_seconds,
             max_steps_per_turn=max_steps_per_turn,
+            journal_sink=journal_sink,
         )
         self.conversation_id = conversation_id
         self.permission_mode: str = "default"
         self._pending_requests: dict[str, PendingRequest] = {}
+        # Durable index bookkeeping (P3) — the base's own `_turns`/`_turn_order`
+        # RAM cache evicts terminal turns beyond `_TURN_KEEP` (5); this list is
+        # the durable-retention view (bounded by `journal_turns_keep`, default
+        # 20) that becomes turns.json. Reconstructing it from disk on boot is
+        # P3 Task 2 — a freshly constructed runner starts empty here.
+        self._journal_index: list[dict[str, Any]] = []
 
     # -- permission mode (P2a) -------------------------------------------------
 
@@ -184,11 +206,54 @@ class CoderRunner(WireRunner):
                 },
             )
 
+    # -- durable journal boundaries (P3 Task 1 — write side only) -------------
+
+    @staticmethod
+    def _journal_entry(state: TurnState) -> dict[str, Any]:
+        return {
+            "turnId": state.turn_id,
+            "status": state.status,
+            "sendId": state.send_id,
+            "startedAt": state.started_at,
+            "lastSeq": state.last_seq,
+        }
+
+    def _journal_note_turn(self, state: TurnState) -> None:
+        """Insert/update this turn's entry in the durable index and persist
+        it — called at both turn start and turn end. No-op when no durable
+        journal is configured."""
+        if self._journal is None:
+            return
+        entry = self._journal_entry(state)
+        for i, existing in enumerate(self._journal_index):
+            if existing.get("turnId") == state.turn_id:
+                self._journal_index[i] = entry
+                break
+        else:
+            self._journal_index.append(entry)
+        if len(self._journal_index) > self._journal.turns_keep:
+            self._journal_index = self._journal_index[-self._journal.turns_keep :]
+        self._journal.write_index(list(self._journal_index))
+
+    async def start_turn(self, user_input: str, send_id: str | None = None) -> TurnState:
+        state = await super().start_turn(user_input, send_id)
+        if self._journal is not None:
+            self._journal_note_turn(state)
+            # Retention: beyond `turns_keep`, drop the oldest turn files —
+            # done at turn start (not on every append) since that's the only
+            # point a conversation's turn count can grow.
+            self._journal.prune([e["turnId"] for e in self._journal_index])
+        return state
+
     async def _consume(self, state, queue) -> None:  # noqa: ANN001
         try:
             await super()._consume(state, queue)
         finally:
             await self._cancel_pending("turn_ended", state)
+            if self._journal is not None:
+                self._journal_note_turn(state)
+                # Not per-item (EFS latency) — one fsync when the turn closes.
+                self._journal.fsync_turn(state.turn_id)
 
     async def stop(self) -> None:
         await super().stop()

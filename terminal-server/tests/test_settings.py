@@ -118,3 +118,21 @@ def test_agent_rlimit_zero_disables(base_env):
     )
     assert s.agent_rlimit_nproc == 0
     assert s.agent_rlimit_fsize == 0
+
+
+def test_coder_journal_caps_default(base_env):
+    s = TerminalSettings.load(env=base_env)
+    assert s.coder_journal_turns_keep == 20
+    assert s.coder_journal_max_bytes == 20 * 1024 * 1024
+
+
+def test_coder_journal_caps_parse_from_env(base_env):
+    s = TerminalSettings.load(
+        env={
+            **base_env,
+            "CODER_JOURNAL_TURNS_KEEP": "5",
+            "CODER_JOURNAL_MAX_BYTES": "1048576",
+        }
+    )
+    assert s.coder_journal_turns_keep == 5
+    assert s.coder_journal_max_bytes == 1048576

@@ -57,6 +57,11 @@ class TerminalSettings:
     coder_max_steps_per_turn: int = 200
     # Live runner cap per workspace; write-lease arrives in P6.
     coder_max_conversations: int = 3
+    # Durable coder journal (P3) retention caps — newest N turn files kept
+    # per conversation, and a per-turn journal file size cap (breach stops
+    # appending that turn and journals one `journal_overflow` error item).
+    coder_journal_turns_keep: int = 20
+    coder_journal_max_bytes: int = 20 * 1024 * 1024
     # HMAC key for the blueprint trust store — agentd-env only, NEVER in the
     # child env. Empty = legacy unsigned store (local/dev/railway).
     trust_store_key: str = ""
@@ -154,6 +159,8 @@ class TerminalSettings:
             coder_max_turn_seconds=float(e.get("CODER_MAX_TURN_SECONDS", "3600")),
             coder_max_steps_per_turn=int(e.get("CODER_MAX_STEPS_PER_TURN", "200")),
             coder_max_conversations=int(e.get("CODER_MAX_CONVERSATIONS", "3")),
+            coder_journal_turns_keep=int(e.get("CODER_JOURNAL_TURNS_KEEP", "20")),
+            coder_journal_max_bytes=int(e.get("CODER_JOURNAL_MAX_BYTES", str(20 * 1024 * 1024))),
             trust_store_key=e.get("TRUST_STORE_KEY", ""),
             architect_max_turn_seconds=float(e.get("ARCHITECT_MAX_TURN_SECONDS", "1800")),
             worker_enabled=e.get("WORKER_ENABLED", "") == "1",
