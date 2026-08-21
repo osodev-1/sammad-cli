@@ -276,6 +276,41 @@ describe("coder transcript fold (reduce)", () => {
     expect(blocks).toEqual([{ kind: "text", text: "⚠ Network error." }]);
   });
 
+  it("restart-recovery: request -> request_cancelled(interrupted_by_restart) -> error -> end(interrupted) folds to a cancelled card + a ⚠ notice, no crash", () => {
+    let blocks: CoderBlock[] = reduce([], approvalRequest("r1"));
+    blocks = reduce(blocks, {
+      kind: "request_cancelled",
+      requestId: "r1",
+      reason: "interrupted_by_restart",
+    });
+    blocks = reduce(blocks, {
+      kind: "error",
+      code: "interrupted_by_restart",
+      message: "This turn was interrupted by a workspace restart.",
+    });
+    blocks = reduce(blocks, { kind: "end", status: "interrupted" });
+    expect(blocks).toEqual([
+      expect.objectContaining({ kind: "request", requestId: "r1", state: "cancelled" }),
+      { kind: "text", text: "⚠ This turn was interrupted by a workspace restart." },
+    ]);
+  });
+
+  it("a reconstructed turn missing its leading `turn` item (corrupt/missing index) still folds honestly, no crash", () => {
+    // Disclosed Task 2 edge: journal reconstruction can produce just
+    // [error, end] with no opening `turn` item. reduce() never depends on
+    // seeing "turn" first — it's ignored wherever it appears (or doesn't).
+    let blocks: CoderBlock[] = [];
+    blocks = reduce(blocks, {
+      kind: "error",
+      code: "interrupted_by_restart",
+      message: "This turn was interrupted by a workspace restart.",
+    });
+    blocks = reduce(blocks, { kind: "end", status: "interrupted" });
+    expect(blocks).toEqual([
+      { kind: "text", text: "⚠ This turn was interrupted by a workspace restart." },
+    ]);
+  });
+
   it("RequestOutcome events are not rendered (extractors return null; no block change)", () => {
     const outcomeItem: CoderItem = {
       kind: "event",

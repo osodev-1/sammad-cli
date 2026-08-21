@@ -226,6 +226,32 @@ export default function CoderPanel({
       );
       return;
     }
+    if (state?.turn?.status === "interrupted") {
+      // Restart-recovery (P3 Task 2/3): the server reconciled a crash-mid-turn
+      // to this TERMINAL status on reconstruction — the journal already ends
+      // in a synthetic `end`, nothing is still running. This must NOT go
+      // through runTurnRef's live resume above (that path sets phase
+      // "streaming", arms the reconnect loop, and shows a Stop affordance —
+      // all live-turn optics that would misrepresent an already-finished
+      // turn). Instead, replay it ONCE — folding whatever pre-crash content
+      // existed plus the reconstructed tail (a cancelled request card per
+      // P1b's reducer, then the "interrupted by restart" ⚠ notice) into a
+      // new message — so a reopened conversation never shows a stale,
+      // silent chat or a pending approval that was actually dropped.
+      const turnMeta = state.turn;
+      const at = turnMeta.startedAt ? turnMeta.startedAt * 1000 : Date.now();
+      let blocks: CoderBlock[] = [];
+      await followCoder(newCid, turnMeta.turnId, 0, sessionId, (item) => {
+        blocks = reduce(blocks, item);
+      });
+      setMessages((m) => [
+        ...m,
+        { role: "user", text: turnMeta.userInput || "(earlier request)", at },
+        { role: "assistant", blocks, at },
+      ]);
+      setPhase("ready");
+      return;
+    }
     if (state?.pendingRequests && state.pendingRequests.length > 0) {
       const blocks = state.pendingRequests.reduce<CoderBlock[]>(
         (acc, pr) =>

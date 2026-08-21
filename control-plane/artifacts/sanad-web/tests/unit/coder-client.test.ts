@@ -10,7 +10,7 @@ import {
   toolLabel,
   modeFromEvent,
 } from "@/lib/coder/client";
-import type { CoderItem } from "@/lib/coder/types";
+import type { CoderItem, CoderTurnSummary } from "@/lib/coder/types";
 
 function streamOf(...chunks: string[]): Response {
   const enc = new TextEncoder();
@@ -150,6 +150,32 @@ describe("fetchCoderTurn", () => {
     );
     const state = await fetchCoderTurn("c_1", "sess1");
     expect(state?.mode).toBe("accept-edits");
+  });
+
+  it("surfaces the restart-recovery 'interrupted' status (P3 Task 2/3) faithfully, with an empty pendingRequests", async () => {
+    // `CoderTurnSummary.status` must accept the literal "interrupted" — a
+    // type-level check via this assignment, not just a runtime one:
+    // pre-Task-4 this line would fail `tsc --noEmit`.
+    const status: CoderTurnSummary["status"] = "interrupted";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          turn: {
+            turnId: "t_1",
+            status,
+            userInput: "fix the bug",
+            lastSeq: 4,
+            startedAt: 100,
+          },
+          alive: true,
+          pendingRequests: [],
+        }),
+      ),
+    );
+    const state = await fetchCoderTurn("c_1", "sess1");
+    expect(state?.turn?.status).toBe("interrupted");
+    expect(state?.pendingRequests).toEqual([]);
   });
 
   it("defaults mode to undefined when the response omits it", async () => {
