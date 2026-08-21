@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from sanad_terminal import coder_runner
 from sanad_terminal.app import create_app
 from sanad_terminal.control_plane import ControlPlaneClient
 from sanad_terminal.settings import TerminalSettings
@@ -332,3 +333,196 @@ def test_open_existing_id_also_hits_the_cap(client: TestClient):
     )
     assert reopen.status_code == 409
     assert reopen.json()["error"]["code"] == "conversation_limit"
+
+
+# -- P3 Task 3: durable journal end-to-end through /open ---------------------
+#
+# `_spawn` now threads `journal_dir=root.parent/"agentd"/"coder"/cid` into
+# every `CoderRunner` it constructs (`/create` and `/open` alike). `/create`
+# always mints a fresh cid, so its journal starts empty (no reconstruction to
+# do); `/open` on an EXISTING cid whose runner already died is the
+# reconstruction path this section proves end-to-end over real HTTP + a real
+# on-disk journal (the `tmp_path`-backed `users_dir` from the `client`
+# fixture already IS a real writable directory — no extra wiring needed).
+
+
+def _root_for(tmp_path: Path) -> Path:
+    """The same workspace root `workspace_root()` derives server-side for
+    `USER`, computed the same way (`users_dir/<user>/workspace`) so
+    `coder_runner._key(root, cid)` matches the registry key `_spawn` uses."""
+    return tmp_path / "users" / USER / "workspace"
+
+
+def test_open_reconstructs_a_finished_turn_after_a_drop(client: TestClient, tmp_path: Path):
+    """The ordinary case: a turn that finished normally must survive a
+    drop + reopen (a graceful `stop()` never touches an already-terminal
+    turn — see the crash test below for the turn genuinely mid-flight)."""
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    first = _lines(
+        client.post(
+            f"/internal/coder/conversations/{cid}/send",
+            headers=HEADERS,
+            json={"input": "hello", "sendId": "m1"},
+        ).text
+    )
+    turn_id = first[0]["turnId"]
+
+    assert (
+        client.post(f"/internal/coder/conversations/{cid}/stop", headers=HEADERS).status_code
+        == 200
+    )
+    reopened = client.post(
+        f"/internal/coder/conversations/{cid}/open", headers=HEADERS, json={"ticket": "tt_good"}
+    )
+    assert reopened.status_code == 200, reopened.text
+    assert reopened.json() == {"ok": True, "started": True}
+
+    replay = client.get(
+        f"/internal/coder/conversations/{cid}/follow",
+        headers=HEADERS,
+        params={"turnId": turn_id, "from_seq": 0},
+    )
+    assert replay.status_code == 200
+    assert _lines(replay.text) == first
+
+
+def test_open_reconstructs_after_a_crash_with_a_pending_approval(
+    client: TestClient, tmp_path: Path
+):
+    """The restart-recovery deliverable: a turn crashes mid-flight with an
+    unresolved approval request, and `/open` brings it back as a durably
+    "interrupted" turn whose pending request was cancelled, not lost.
+
+    Driving a genuinely pending, never-resolved request across a simulated
+    process restart needs two deliberate departures from the obvious HTTP
+    idioms already in this file, both load-bearing:
+
+    1. Getting the turn "stuck" pending at all requires the same
+       background-thread trick `test_approval_round_trip_over_http` uses
+       (`/send` blocks until the turn ends) — except here nothing ever
+       resolves it, so the thread's call would block forever. That's fine
+       *during* the test (the turn keeps running server-side with zero
+       followers — see `_consume`'s docstring), but it means the request
+       must be explicitly un-stuck before the test function returns: the
+       `with TestClient(...)` context's teardown drains the app's ASGI
+       lifespan through the SAME event-loop portal that thread's `/send`
+       call is still in flight on, and it hangs forever waiting for that
+       call to finish. The fix is `client.portal.call(crashed.stop)` at
+       the end — `crashed`'s asyncio primitives (Queue/Condition/the
+       subprocess transport) are bound to the portal's loop, so a
+       plain `asyncio.run(crashed.stop())` from this thread would raise
+       ("Future attached to a different loop") instead of working.
+
+    2. The crash itself CANNOT be `drop_conversation(root, cid)` (which the
+       plan text names as the obvious choice) — that calls `runner.stop()`,
+       which *gracefully* resolves any pending request (journaled as
+       `request_cancelled reason=turn_ended`) and marks the turn "failed"
+       BEFORE the runner ever leaves the registry. That is a materially
+       different, and already-tested, code path from restart reconciliation
+       (`interrupted` / `interrupted_by_restart`, `CoderRunner.
+       _reconcile_interrupted_turn`), which only fires when a FRESH runner
+       is constructed over a journal whose last-written status is still
+       "running" — i.e. when the whole process died with no chance to run
+       any cleanup at all, not when it shut down in an orderly way. So the
+       crash here is simulated by reaching into the registry directly
+       (`coder_runner._conversations`) and popping the live runner out
+       WITHOUT calling `.stop()` — freezing the on-disk journal exactly
+       where the last real write left it, the same way a SIGKILL/host
+       reboot would. (Verified empirically before writing this test:
+       `drop_conversation` leaves status "failed" + reason "turn_ended" on
+       disk, never "interrupted"/"interrupted_by_restart".)
+    """
+    root = _root_for(tmp_path)
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+
+    send_thread = threading.Thread(
+        target=client.post,
+        args=(f"/internal/coder/conversations/{cid}/send",),
+        kwargs={"headers": HEADERS, "json": {"input": "ASK_APPROVAL"}},
+        daemon=True,
+    )
+    send_thread.start()
+    crashed = None
+    try:
+        turn_id = None
+        for _ in range(200):
+            turn = client.get(
+                f"/internal/coder/conversations/{cid}/turn", headers=HEADERS
+            ).json()
+            pending = turn.get("pendingRequests") or []
+            if pending:
+                turn_id = turn["turn"]["turnId"]
+                break
+            time.sleep(0.02)
+        assert turn_id is not None, "approval request never went pending"
+
+        # The crash: rip the live runner out of the registry with no graceful
+        # cleanup — see docstring point 2 above for why this (and not
+        # `drop_conversation`) is the correct simulation.
+        key = coder_runner._key(root, cid)
+        crashed = coder_runner._conversations.pop(key, None)
+        assert crashed is not None, "runner was not registered under the expected key"
+
+        # The on-disk journal is frozen mid-turn: status "running", the
+        # request item written but never resolved.
+        index_path = root.parent / "agentd" / "coder" / cid / "turns.json"
+        frozen_index = json.loads(index_path.read_text())
+        assert frozen_index[0]["turnId"] == turn_id
+        assert frozen_index[0]["status"] == "running"
+
+        # The "restart": /open spawns a brand new runner over the same
+        # journal_dir, which reconstructs + reconciles on construction
+        # (Task 2).
+        reopened = client.post(
+            f"/internal/coder/conversations/{cid}/open",
+            headers=HEADERS,
+            json={"ticket": "tt_good"},
+        )
+        assert reopened.status_code == 200, reopened.text
+        assert reopened.json() == {"ok": True, "started": True}
+
+        turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
+        assert turn["turn"]["turnId"] == turn_id
+        assert turn["turn"]["status"] == "interrupted"
+        assert turn["pendingRequests"] == []
+        assert turn["mode"] is not None
+
+        # Bounded read: a regression that made `follow()` hang on a turn
+        # that's already terminal in memory must fail this test, not hang
+        # the suite.
+        follow_result: dict = {}
+
+        def _do_follow() -> None:
+            follow_result["res"] = client.get(
+                f"/internal/coder/conversations/{cid}/follow",
+                headers=HEADERS,
+                params={"turnId": turn_id, "from_seq": 0},
+            )
+
+        follow_thread = threading.Thread(target=_do_follow, daemon=True)
+        follow_thread.start()
+        follow_thread.join(timeout=10)
+        assert not follow_thread.is_alive(), "follow() hung instead of closing"
+
+        replay = follow_result["res"]
+        assert replay.status_code == 200
+        items = _lines(replay.text)
+        kinds = [i["kind"] for i in items]
+        assert "request_cancelled" in kinds
+        cancelled = next(i for i in items if i["kind"] == "request_cancelled")
+        assert cancelled["reason"] == "interrupted_by_restart"
+        assert items[-1]["kind"] == "end" and items[-1]["status"] == "interrupted"
+    finally:
+        # Cleanup: unwedge the abandoned /send thread (see docstring point
+        # 1) so the `client` fixture's teardown never hangs — even if an
+        # assertion above failed, this MUST still run, or a single failing
+        # run of this test would hang the entire suite.
+        if crashed is not None:
+            assert client.portal is not None  # set for the life of `with TestClient(...)`
+            client.portal.call(crashed.stop)
+        send_thread.join(timeout=5)
+    assert not send_thread.is_alive()

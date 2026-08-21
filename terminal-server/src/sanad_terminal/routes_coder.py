@@ -128,6 +128,14 @@ async def _spawn(
         rlimit_fsize=settings.agent_rlimit_fsize,
         max_turn_seconds=settings.coder_max_turn_seconds,
         max_steps_per_turn=settings.coder_max_steps_per_turn,
+        # Durable journal (P3): every spawn — CREATE (fresh cid, empty
+        # journal) and OPEN alike (existing cid, reconstructs+reconciles
+        # from disk in CoderRunner.__init__) — gets the same on-disk root,
+        # keyed by conversation under this user's agentd dir. `root` is
+        # `<user_dir>/workspace`, so `root.parent` is `<user_dir>`.
+        journal_dir=root.parent / "agentd" / "coder" / cid,
+        journal_turns_keep=settings.coder_journal_turns_keep,
+        journal_max_bytes=settings.coder_journal_max_bytes,
     )
     try:
         await runner.start()
