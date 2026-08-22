@@ -203,7 +203,19 @@ def _recycling_stream(
 ) -> AsyncIterator[bytes]:
     """Serialize a turn stream, dropping the runner on a failed turn so the
     next open respawns with freshly redeemed auth (same trap as the
-    architect: a zombie whose every LLM call 401s)."""
+    architect: a zombie whose every LLM call 401s).
+
+    "interrupted" is EXCLUDED from that failure check (P3 Task 4 fix): it's
+    the restart-recovery terminal status (`CoderRunner.
+    _reconcile_interrupted_turn`) a turn gets reconciled to when a FRESH,
+    freshly-`start()`ed runner reconstructs it from the journal — i.e. this
+    fires on a healthy runner with live, just-redeemed auth, never on a
+    zombie whose LLM calls would 401. Treating it as `failed` used to drop
+    that healthy runner out from under the very `/follow` call that
+    surfaces the interrupted turn to the client, so the next `/send` 409'd
+    "not_started" and every subsequent reconnect had to re-`/open` (and, on
+    the frontend, re-replay the same turn — see CoderPanel.begin()'s
+    `lastInterruptedTurnId` guard)."""
 
     async def stream() -> AsyncIterator[bytes]:
         failed = False
@@ -212,6 +224,7 @@ def _recycling_stream(
                 if item.get("kind") == "end" and item.get("status") not in (
                     "finished",
                     "cancelled",
+                    "interrupted",
                 ):
                     failed = True
                 yield json.dumps(item).encode("utf-8") + b"\n"

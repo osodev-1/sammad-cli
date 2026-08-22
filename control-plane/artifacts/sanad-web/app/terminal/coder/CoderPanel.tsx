@@ -8,6 +8,7 @@ import {
   fetchCoderTurn,
   followCoder,
   modeFromEvent,
+  needsInterruptedReplay,
   respondCoder,
   sendCoder,
   setCoderMode,
@@ -75,6 +76,8 @@ export default function CoderPanel({
   onConversationId,
   initial,
   onPersist,
+  lastInterruptedTurnId,
+  onLastInterruptedTurnId,
 }: {
   sessionId?: string;
   visible: boolean;
@@ -87,6 +90,15 @@ export default function CoderPanel({
   initial?: StoredCoderMessage[];
   /** Called (debounced, at turn boundaries) with the serialized transcript. */
   onPersist?: (messages: StoredCoderMessage[]) => void;
+  /** Persisted turnId of the last "interrupted" (restart-recovery) turn
+   * this panel already surfaced (from the PRD session's uiState). Compared
+   * in begin() against the CURRENT interrupted turnId (P3 Task 4 Fix B) so
+   * a reload — or a begin() re-entry, e.g. the busy self-heal path — never
+   * replays the same interrupted turn twice. */
+  lastInterruptedTurnId?: string;
+  /** Called once an interrupted turn has been surfaced, to persist its
+   * turnId upward (mirrors onConversationId). */
+  onLastInterruptedTurnId?: (turnId: string) => void;
 }) {
   const [phase, setPhase] = useState<
     "idle" | "starting" | "ready" | "streaming" | "busy" | "error"
@@ -157,6 +169,16 @@ export default function CoderPanel({
      firing a fresh ensureConversation() each time while phase is "error". */
   const onConversationIdRef = useRef(onConversationId);
   onConversationIdRef.current = onConversationId;
+  /* Same latest-value treatment for the interrupted-turn idempotency guard
+   * (P3 Task 4 Fix B): begin() reads `lastInterruptedTurnIdRef.current` at
+   * call time rather than closing over the prop, so a value this same
+   * begin() call just persisted (via onLastInterruptedTurnIdRef, below) is
+   * never stale — and, symmetrically with onConversationIdRef above, begin()
+   * doesn't need this prop in its dependency array. */
+  const lastInterruptedTurnIdRef = useRef(lastInterruptedTurnId);
+  lastInterruptedTurnIdRef.current = lastInterruptedTurnId;
+  const onLastInterruptedTurnIdRef = useRef(onLastInterruptedTurnId);
+  onLastInterruptedTurnIdRef.current = onLastInterruptedTurnId;
 
   /* If the persisted transcript arrives after mount (hydration race), adopt
      it — but never over a conversation that already started. */
@@ -239,6 +261,16 @@ export default function CoderPanel({
       // new message — so a reopened conversation never shows a stale,
       // silent chat or a pending approval that was actually dropped.
       const turnMeta = state.turn;
+      if (!needsInterruptedReplay(turnMeta.turnId, lastInterruptedTurnIdRef.current)) {
+        // Fix B (review finding): this exact turnId was already surfaced —
+        // by THIS begin() call's own replay below (e.g. the busy self-heal
+        // path re-entering begin() mid-turn), or by an earlier reload that
+        // persisted `lastInterruptedTurnId` upward. Either way the restored
+        // `initial` transcript already carries it; replaying again would
+        // append a DUPLICATE turn. Stand pat.
+        setPhase("ready");
+        return;
+      }
       const at = turnMeta.startedAt ? turnMeta.startedAt * 1000 : Date.now();
       let blocks: CoderBlock[] = [];
       await followCoder(newCid, turnMeta.turnId, 0, sessionId, (item) => {
@@ -249,6 +281,8 @@ export default function CoderPanel({
         { role: "user", text: turnMeta.userInput || "(earlier request)", at },
         { role: "assistant", blocks, at },
       ]);
+      lastInterruptedTurnIdRef.current = turnMeta.turnId;
+      onLastInterruptedTurnIdRef.current?.(turnMeta.turnId);
       setPhase("ready");
       return;
     }

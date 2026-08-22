@@ -526,3 +526,99 @@ def test_open_reconstructs_after_a_crash_with_a_pending_approval(
             client.portal.call(crashed.stop)
         send_thread.join(timeout=5)
     assert not send_thread.is_alive()
+
+
+def test_interrupted_replay_does_not_drop_the_runner(client: TestClient, tmp_path: Path):
+    """Review-finding regression guard (P3 Task 4 Fix A): `_recycling_stream`
+    used to treat ANY `end.status` other than "finished"/"cancelled" as a
+    failed turn and drop the runner — including "interrupted", even though
+    a reconstructed runner is a freshly-`start()`ed one with freshly
+    redeemed auth (see `_recycling_stream`'s docstring — the point of
+    dropping on failure is a zombie whose LLM calls 401; a just-reconciled
+    runner is the opposite of that).
+
+    Dropping it meant the very `/follow` call that surfaces an interrupted
+    turn to the client also killed the runner out from under it: the next
+    `/send` 409'd "not_started", forcing a re-`/open` — and on the
+    frontend, the self-heal path for that 409 called `begin()` again
+    mid-turn, which re-replayed the SAME interrupted turn a second time (a
+    duplicate message in the transcript, or worse — the flicker on a
+    send-after-recovery race). This proves the fix directly at the HTTP
+    layer: after reconstruction + `/follow`ing the interrupted turn to
+    completion, a plain `/send` succeeds immediately — no 409, no re-`/open`
+    needed."""
+    root = _root_for(tmp_path)
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+
+    # "HANG" keeps the turn open indefinitely (until a cancel) — simplest
+    # way to get a turn genuinely stuck "running", no approval bridging
+    # needed (see _fake_coder_wire.py's docstring).
+    send_thread = threading.Thread(
+        target=client.post,
+        args=(f"/internal/coder/conversations/{cid}/send",),
+        kwargs={"headers": HEADERS, "json": {"input": "HANG"}},
+        daemon=True,
+    )
+    send_thread.start()
+    crashed = None
+    try:
+        turn_id = None
+        for _ in range(200):
+            turn = client.get(
+                f"/internal/coder/conversations/{cid}/turn", headers=HEADERS
+            ).json()
+            if turn.get("turn") and turn["turn"]["status"] == "running":
+                turn_id = turn["turn"]["turnId"]
+                break
+            time.sleep(0.02)
+        assert turn_id is not None, "turn never went running"
+
+        # The crash — same simulation as
+        # test_open_reconstructs_after_a_crash_with_a_pending_approval (see
+        # its docstring point 2 for why `drop_conversation` would NOT be a
+        # faithful stand-in for a SIGKILL/host-reboot here).
+        key = coder_runner._key(root, cid)
+        crashed = coder_runner._conversations.pop(key, None)
+        assert crashed is not None, "runner was not registered under the expected key"
+
+        reopened = client.post(
+            f"/internal/coder/conversations/{cid}/open",
+            headers=HEADERS,
+            json={"ticket": "tt_good"},
+        )
+        assert reopened.status_code == 200, reopened.text
+
+        turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
+        assert turn["turn"]["turnId"] == turn_id
+        assert turn["turn"]["status"] == "interrupted"
+
+        replay = client.get(
+            f"/internal/coder/conversations/{cid}/follow",
+            headers=HEADERS,
+            params={"turnId": turn_id, "from_seq": 0},
+        )
+        assert replay.status_code == 200
+        replay_items = _lines(replay.text)
+        assert replay_items[-1]["kind"] == "end"
+        assert replay_items[-1]["status"] == "interrupted"
+
+        # THE FIX under test: the runner must still be live and registered
+        # under `cid` — a plain /send right after the interrupted replay
+        # succeeds directly, with no 409 and no re-/open in between.
+        again = client.post(
+            f"/internal/coder/conversations/{cid}/send",
+            headers=HEADERS,
+            json={"input": "hello", "sendId": "m2"},
+        )
+        assert again.status_code == 200, again.text
+        again_items = _lines(again.text)
+        assert again_items[-1]["kind"] == "end"
+        assert again_items[-1]["status"] == "finished"
+    finally:
+        if crashed is not None:
+            assert client.portal is not None
+            client.portal.call(crashed.stop)
+        send_thread.join(timeout=5)
+    assert not send_thread.is_alive()
