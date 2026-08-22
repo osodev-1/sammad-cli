@@ -103,6 +103,33 @@ describe("session UI state", () => {
     expect(parseSessionState({ v: 1 }).coder).toBeUndefined();
   });
 
+  it("carries coder.lastInterruptedTurnId (P3 Task 4 Fix B); pre-Task-4 blobs parse without one", () => {
+    const withTurnId = parseSessionState({
+      v: 1,
+      coder: {
+        conversationId: "coder-1",
+        lastInterruptedTurnId: "t_1",
+      },
+    });
+    expect(withTurnId.coder?.lastInterruptedTurnId).toBe("t_1");
+    // Pre-Task-4 blob (conversationId/transcript only, no lastInterruptedTurnId
+    // field at all): absent field stays absent, everything else intact.
+    const preTask4 = parseSessionState({
+      v: 1,
+      coder: { conversationId: "coder-1" },
+    });
+    expect(preTask4.coder?.conversationId).toBe("coder-1");
+    expect(preTask4.coder?.lastInterruptedTurnId).toBeUndefined();
+    // An oversized turnId degrades the whole blob (same posture as every
+    // other coder field here — the blob is a record, not a source of truth).
+    expect(
+      parseSessionState({
+        v: 1,
+        coder: { lastInterruptedTurnId: "x".repeat(129) },
+      }),
+    ).toEqual(EMPTY_SESSION_STATE);
+  });
+
   it("rejects pending request blocks in coder transcript; entire blob degrades to EMPTY_SESSION_STATE", () => {
     // A blob with a pending request MUST degrade completely (never-persist-pending invariant).
     const withPending = parseSessionState({

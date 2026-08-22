@@ -244,6 +244,20 @@ export async function fetchCoderTurn(
   }
 }
 
+/** Whether an "interrupted" turn's reconstructed tail still needs replaying
+ * into the transcript (P3 Task 4 Fix B). `lastInterruptedTurnId` is the
+ * turnId CoderPanel.begin() already surfaced and persisted (uiState's
+ * `coder.lastInterruptedTurnId`) — comparing against it is what keeps a
+ * reload (or a begin() re-entry, e.g. the busy self-heal path) from
+ * re-replaying the SAME interrupted turn and appending a duplicate message.
+ * Pure so the idempotency rule is testable without mounting the panel. */
+export function needsInterruptedReplay(
+  turnId: string,
+  lastInterruptedTurnId: string | undefined,
+): boolean {
+  return turnId !== lastInterruptedTurnId;
+}
+
 /** Resolve a pending approval/question request. Never throws — the panel
  * treats a failed respond as "still pending" and lets the user retry. */
 export async function respondCoder(

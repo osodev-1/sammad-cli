@@ -9,6 +9,7 @@ import {
   thinkFromEvent,
   toolLabel,
   modeFromEvent,
+  needsInterruptedReplay,
 } from "@/lib/coder/client";
 import type { CoderItem, CoderTurnSummary } from "@/lib/coder/types";
 
@@ -316,6 +317,20 @@ describe("setCoderMode", () => {
       code: "not_started",
       message: "conversation is not running",
     });
+  });
+});
+
+describe("needsInterruptedReplay (P3 Task 4 Fix B idempotency guard)", () => {
+  it("needs a replay when no turn has been surfaced yet", () => {
+    expect(needsInterruptedReplay("t_1", undefined)).toBe(true);
+  });
+
+  it("needs a replay for a NEW interrupted turnId, even after a prior one was surfaced", () => {
+    expect(needsInterruptedReplay("t_2", "t_1")).toBe(true);
+  });
+
+  it("does NOT need a replay once this exact turnId was already surfaced — the fix for the duplicate-on-reload/self-heal finding", () => {
+    expect(needsInterruptedReplay("t_1", "t_1")).toBe(false);
   });
 });
 

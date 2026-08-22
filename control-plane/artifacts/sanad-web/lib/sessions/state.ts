@@ -110,6 +110,15 @@ export const sessionUiState = z.object({
   coder: z.object({
     conversationId: z.string().max(64).optional(),
     transcript: z.array(coderMessageState).max(60).optional(),
+    // Restart-recovery idempotency (P3 Task 4 Fix B) — the turnId of the
+    // last "interrupted" turn CoderPanel.begin() already surfaced (folded
+    // its reconstructed items into `transcript` above and persisted it).
+    // Optional so pre-Task-4 blobs parse unchanged; a reload compares this
+    // against fetchCoderTurn()'s current turnId to decide whether to
+    // replay again — without it, every reload of a conversation whose last
+    // turn crashed would re-replay (and re-persist a duplicate of) the
+    // same interrupted turn.
+    lastInterruptedTurnId: z.string().max(128).optional(),
   }).optional(),
 });
 

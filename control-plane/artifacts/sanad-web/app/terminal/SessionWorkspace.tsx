@@ -104,6 +104,12 @@ export default function SessionWorkspace({
   const [coderTranscript, setCoderTranscript] = useState<
     StoredCoderMessage[] | undefined
   >(undefined);
+  /* Restart-recovery idempotency (P3 Task 4 Fix B): the turnId of the last
+     "interrupted" turn CoderPanel already surfaced, so a reload doesn't
+     re-replay (and re-persist a duplicate of) the same crash-interrupted
+     turn — see CoderPanel's `needsInterruptedReplay` guard. */
+  const [coderLastInterruptedTurnId, setCoderLastInterruptedTurnId] =
+    useState<string | undefined>(undefined);
   /* Context dock (R4): open state persists; reviews + activity feed it. */
   const [dockOpen, setDockOpen] = useState(true);
   const [pendingReviews, setPendingReviews] = useState<string[]>([]);
@@ -171,6 +177,9 @@ export default function SessionWorkspace({
         if (s.coder.conversationId) setCoderConvId(s.coder.conversationId);
         if (s.coder.transcript && s.coder.transcript.length > 0) {
           setCoderTranscript(s.coder.transcript);
+        }
+        if (s.coder.lastInterruptedTurnId) {
+          setCoderLastInterruptedTurnId(s.coder.lastInterruptedTurnId);
         }
       }
       if (s.dockOpen === false) setDockOpen(false);
@@ -269,6 +278,7 @@ export default function SessionWorkspace({
               coder: {
                 conversationId: coderConvId,
                 transcript: coderTranscript,
+                lastInterruptedTurnId: coderLastInterruptedTurnId,
               },
             }
           : {}),
@@ -285,6 +295,7 @@ export default function SessionWorkspace({
     dockOpen,
     coderConvId,
     coderTranscript,
+    coderLastInterruptedTurnId,
     sessionId,
   ]);
 
@@ -630,6 +641,8 @@ export default function SessionWorkspace({
                 onConversationId={setCoderConvId}
                 initial={coderTranscript}
                 onPersist={setCoderTranscript}
+                lastInterruptedTurnId={coderLastInterruptedTurnId}
+                onLastInterruptedTurnId={setCoderLastInterruptedTurnId}
               />
             </div>
           )}
