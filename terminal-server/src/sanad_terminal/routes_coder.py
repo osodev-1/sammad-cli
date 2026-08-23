@@ -15,6 +15,7 @@ credential (`workspace_root`).
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated, Any
@@ -62,6 +63,10 @@ class TicketBody(BaseModel):
 class SendBody(BaseModel):
     input: str = Field(min_length=1, max_length=32_000)
     sendId: str | None = Field(default=None, max_length=64)
+    # Force-queue instead of starting immediately, even on an idle runner
+    # (P4b) — the ordinary busy case auto-queues regardless of this flag;
+    # see `send()` below.
+    queue: bool = False
 
 
 class RespondBody(BaseModel):
@@ -253,6 +258,24 @@ async def send(_: Gated, root: Root, cid: str, body: SendBody) -> StreamingRespo
     runner = get_conversation(root, cid)
     if runner is None or not runner.alive:
         return _err(409, "not_started", "conversation is not running")
+    if body.queue or runner.busy:
+        # A busy send now auto-queues instead of 409ing "busy" for the
+        # client to re-queue itself (the old dance) — and an explicit
+        # `queue:true` forces the same path even on an idle runner, so a
+        # follow-up survives a closed tab. `sendId` is required for the
+        # queue's own idempotency key; synthesize one when the caller
+        # didn't send one (mirrors `new_conversation_id`'s minting style).
+        send_id = body.sendId or f"q_{uuid.uuid4().hex[:12]}"
+        position = runner.enqueue(send_id, body.input)
+        if not runner.busy:
+            # Queued onto an idle runner: nothing will ever end a turn to
+            # trigger the drain hook, so kick it off directly here — the
+            # same "no await between busy-check and start" gap-free path
+            # `_maybe_drain_queue` itself relies on.
+            await runner._maybe_drain_queue()
+        return JSONResponse(
+            status_code=202, content={"ok": True, "queued": True, "position": position}
+        )
     try:
         state = await runner.start_turn(body.input, body.sendId)
     except WireRunnerError as exc:
@@ -273,6 +296,17 @@ async def send(_: Gated, root: Root, cid: str, body: SendBody) -> StreamingRespo
         _recycling_stream(root, runner, runner.follow(state.turn_id, 0)),
         media_type="application/x-ndjson",
     )
+
+
+@router.delete("/conversations/{cid}/queue/{sendId}")
+async def dequeue(_: Gated, root: Root, cid: str, sendId: str) -> JSONResponse:
+    if bad := _bad_cid(cid):
+        return bad
+    runner = get_conversation(root, cid)
+    if runner is None:
+        return _err(409, "not_started", "conversation is not running")
+    removed = runner.dequeue(sendId)
+    return JSONResponse({"ok": True, "removed": removed})
 
 
 @router.post("/conversations/{cid}/respond")
@@ -303,13 +337,16 @@ async def turn(_: Gated, root: Root, cid: str) -> JSONResponse:
         return bad
     runner = get_conversation(root, cid)
     if runner is None:
-        return JSONResponse({"turn": None, "alive": False, "pendingRequests": [], "mode": None})
+        return JSONResponse(
+            {"turn": None, "alive": False, "pendingRequests": [], "mode": None, "queue": []}
+        )
     return JSONResponse(
         {
             "turn": runner.turn_summary(),
             "alive": runner.alive,
             "pendingRequests": runner.pending_summaries(),
             "mode": runner.permission_mode,
+            "queue": runner.queue_summary(),
         }
     )
 

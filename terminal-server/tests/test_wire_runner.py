@@ -454,3 +454,189 @@ async def test_request_with_no_running_turn_is_rejected(tmp_path):
         assert runner.pending_summaries() == []
     finally:
         await runner.stop()
+
+
+# -- P4b: server-side per-conversation queue ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_enqueue_while_busy_returns_position_and_appears_in_summary(tmp_path):
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        await runner.start_turn("HANG", send_id="running")
+        position = runner.enqueue("s1", "do this next")
+        assert position == 1
+        assert runner.queue_summary() == [{"sendId": "s1", "input": "do this next"}]
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_journals_a_queued_item_into_the_current_turn(tmp_path):
+    """So a follower can see queue depth grow without a separate poll."""
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        state = await runner.start_turn("HANG", send_id="running")
+        runner.enqueue("s1", "next up")
+        queued_items = [
+            (i.get("sendId"), i.get("input")) for i in state.items if i.get("kind") == "queued"
+        ]
+        assert queued_items == [("s1", "next up")]
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_is_idempotent_on_duplicate_send_id(tmp_path):
+    """A resend of the same sendId while it's still queued must not double-add
+    — mirrors `start_turn`'s own idempotency intent."""
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        await runner.start_turn("HANG", send_id="running")
+        first = runner.enqueue("dup", "do the thing")
+        again = runner.enqueue("dup", "different text, same id")
+        assert first == 1
+        assert again == 1
+        assert runner.queue_summary() == [{"sendId": "dup", "input": "do the thing"}]
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_matching_the_running_turns_send_id_is_a_noop(tmp_path):
+    """A resend of the in-flight turn's own sendId is already being handled —
+    it must not also land in the queue."""
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        await runner.start_turn("HANG", send_id="running")
+        result = runner.enqueue("running", "resend of the same in-flight message")
+        assert result == 0
+        assert runner.queue_summary() == []
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_matching_the_last_finished_turns_send_id_is_a_noop(tmp_path):
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        state = await runner.start_turn("hello", send_id="done1")
+        await asyncio.wait_for(_drain(runner, state.turn_id), timeout=5.0)
+        assert state.status == "finished"
+        result = runner.enqueue("done1", "resend of the already-finished turn")
+        assert result == 0
+        assert runner.queue_summary() == []
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_dequeue_removes_a_not_yet_started_item(tmp_path):
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        await runner.start_turn("HANG", send_id="running")
+        runner.enqueue("s1", "one")
+        runner.enqueue("s2", "two")
+        assert runner.dequeue("s1") is True
+        assert runner.queue_summary() == [{"sendId": "s2", "input": "two"}]
+        assert runner.dequeue("s1") is False  # already gone
+        assert runner.dequeue("nope") is False
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_maybe_drain_queue_noop_when_empty_or_busy(tmp_path):
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        await runner._maybe_drain_queue()  # empty queue: no-op, no crash
+        assert runner._turn_order == []
+
+        state = await runner.start_turn("HANG", send_id="running")
+        runner.enqueue("later", "do this next")
+        await runner._maybe_drain_queue()  # busy: must not touch the queue
+        assert runner.queue_summary() == [{"sendId": "later", "input": "do this next"}]
+        summary = runner.turn_summary()
+        assert summary is not None
+        assert summary["turnId"] == state.turn_id
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_maybe_drain_queue_noop_when_not_alive(tmp_path):
+    runner = _coder(tmp_path)
+    # Never started — `alive` is False.
+    runner._queue.append({"sendId": "s1", "input": "hi"})
+    await runner._maybe_drain_queue()
+    assert runner.queue_summary() == [{"sendId": "s1", "input": "hi"}]
+
+
+@pytest.mark.asyncio
+async def test_queue_drains_automatically_when_the_running_turn_ends(tmp_path):
+    """The core P4b deliverable: a follow-up queued while a turn is running
+    starts for real once that turn ends — no manual drain call, `_consume`'s
+    own `finally` (CoderRunner's override) does it via `_maybe_drain_queue`."""
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        first = await runner.start_turn("HANG", send_id="s1")
+        position = runner.enqueue("s2", "queued input")
+        assert position == 1
+
+        await runner.cancel()
+        items = await asyncio.wait_for(_drain(runner, first.turn_id), timeout=5.0)
+        assert items[-1]["kind"] == "end" and items[-1]["status"] == "cancelled"
+
+        # `_maybe_drain_queue` fires from `_consume`'s `finally`, a
+        # continuation of a background task independent of `follow()` — poll
+        # briefly instead of assuming it's already landed the instant
+        # `follow()` returns.
+        summary = None
+        for _ in range(100):
+            summary = runner.turn_summary()
+            if summary is not None and summary["turnId"] != first.turn_id:
+                break
+            await asyncio.sleep(0.02)
+        assert summary is not None
+        assert summary["turnId"] != first.turn_id
+        assert summary["userInput"] == "queued input"
+        assert runner.queue_summary() == []
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_drain_calls_never_double_pop(tmp_path):
+    """Empirical proof of the no-await-gap safety claim in `_maybe_drain_queue`'s
+    docstring: two calls fired concurrently (`asyncio.gather`) against an idle
+    runner with two queued items must start exactly ONE new turn. asyncio is
+    single-threaded and there is no `await` between the not-busy check and the
+    `start_turn` call that flips `busy` — so whichever call's synchronous
+    prefix reaches `start_turn` first flips `busy` True before the other one
+    ever gets scheduled to run its own check, and that second call's busy
+    check then sees it and no-ops instead of double-popping."""
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        runner.enqueue("s1", "hello")
+        runner.enqueue("s2", "also queued")
+        assert len(runner.queue_summary()) == 2
+
+        await asyncio.gather(runner._maybe_drain_queue(), runner._maybe_drain_queue())
+
+        assert len(runner.queue_summary()) == 1
+        assert runner.queue_summary()[0]["sendId"] == "s2"
+        assert len(runner._turn_order) == 1
+        started = runner._turns[runner._turn_order[0]]
+        assert started.user_input == "hello"
+        assert started.send_id == "s1"
+    finally:
+        await runner.stop()

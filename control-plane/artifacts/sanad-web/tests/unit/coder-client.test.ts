@@ -6,6 +6,8 @@ import {
   respondCoder,
   setCoderMode,
   steerCoder,
+  queueCoder,
+  dequeueCoder,
   textFromEvent,
   thinkFromEvent,
   toolLabel,
@@ -188,6 +190,31 @@ describe("fetchCoderTurn", () => {
     const state = await fetchCoderTurn("c_1", "sess1");
     expect(state?.mode).toBeUndefined();
   });
+
+  it("surfaces the server-side queue (P4b) from the response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          turn: { turnId: "t_1", status: "running", userInput: "hi", lastSeq: 0, startedAt: 1 },
+          alive: true,
+          pendingRequests: [],
+          queue: [{ sendId: "q_1", input: "next thing" }],
+        }),
+      ),
+    );
+    const state = await fetchCoderTurn("c_1", "sess1");
+    expect(state?.queue).toEqual([{ sendId: "q_1", input: "next thing" }]);
+  });
+
+  it("defaults queue to undefined when the response omits it", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(200, { turn: null, alive: false })),
+    );
+    const state = await fetchCoderTurn("c_1", "sess1");
+    expect(state?.queue).toBeUndefined();
+  });
 });
 
 describe("ensureConversation", () => {
@@ -348,6 +375,82 @@ describe("steerCoder", () => {
       code: "no_turn",
       message: "no turn is in progress",
     });
+  });
+});
+
+describe("queueCoder", () => {
+  it("POSTs {input,sendId,queue:true} to /send and returns {ok,queued,position} on 202", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(202, { ok: true, queued: true, position: 2 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await queueCoder("c_1", "hi", "q_1", "sess1");
+
+    expect(result).toEqual({ ok: true, queued: true, position: 2 });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("/api/coder/conversations/c_1/send?session=sess1");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ input: "hi", sendId: "q_1", queue: true });
+  });
+
+  it("unwraps a double-enveloped {data:{...}} success body the same way", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, { data: { ok: true, queued: true, position: 1 } }),
+      ),
+    );
+    const result = await queueCoder("c_1", "hi", "q_1", "sess1");
+    expect(result).toEqual({ ok: true, queued: true, position: 1 });
+  });
+
+  it("maps a failure response to {ok:false, code}", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(409, { error: { code: "not_started", message: "conversation is not running" } }),
+      ),
+    );
+    const result = await queueCoder("c_1", "hi", "q_1", "sess1");
+    expect(result).toEqual({ ok: false, code: "not_started" });
+  });
+
+  it("maps a network failure to {ok:false, code:'network'}", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    const result = await queueCoder("c_1", "hi", "q_1", "sess1");
+    expect(result).toEqual({ ok: false, code: "network" });
+  });
+});
+
+describe("dequeueCoder", () => {
+  it("DELETEs the queue entry and returns {ok,removed} on 200", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, removed: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await dequeueCoder("c_1", "q_1", "sess1");
+
+    expect(result).toEqual({ ok: true, removed: true });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("/api/coder/conversations/c_1/queue/q_1?session=sess1");
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("maps a failure response to {ok:false}", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(409, { error: { code: "not_started", message: "conversation is not running" } }),
+      ),
+    );
+    const result = await dequeueCoder("c_1", "q_1", "sess1");
+    expect(result).toEqual({ ok: false });
+  });
+
+  it("maps a network failure to {ok:false}", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    const result = await dequeueCoder("c_1", "q_1", "sess1");
+    expect(result).toEqual({ ok: false });
   });
 });
 
