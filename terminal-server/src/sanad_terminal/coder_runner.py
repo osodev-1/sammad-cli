@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -92,6 +93,10 @@ class CoderRunner(WireRunner):
         self.conversation_id = conversation_id
         self.permission_mode: str = "default"
         self._pending_requests: dict[str, PendingRequest] = {}
+        # Server-side follow-up queue (P4b) — RAM-only (lost on crash/restart,
+        # re-typable): a `collections.deque` of `{"sendId": str, "input": str}`,
+        # drained one-at-a-time by `_maybe_drain_queue` as each turn ends.
+        self._queue: deque[dict[str, Any]] = deque()
         # Durable index bookkeeping (P3) — the base's own `_turns`/`_turn_order`
         # RAM cache evicts terminal turns beyond `_TURN_KEEP` (5); this list is
         # the durable-retention view (bounded by `journal_turns_keep`, default
@@ -128,6 +133,76 @@ class CoderRunner(WireRunner):
         if not self.alive or not self.busy:
             raise WireRunnerError("no_turn", "no turn is in progress")
         await self.call("steer", {"user_input": text})
+
+    # -- server-side queue (P4b) -----------------------------------------------
+
+    def enqueue(self, send_id: str, input: str) -> int:
+        """Queue a follow-up for after the running turn ends — RAM-only, so
+        a crash/restart loses it (re-typable, not a data-loss concern).
+
+        Idempotent on `send_id`, mirroring `start_turn`'s own idempotency
+        intent: a resend already sitting in the queue, already the running
+        turn, or already the last turn that just finished is never
+        double-added. Returns the item's 1-based position in the queue (the
+        `"position"` the `/send` route reports), or `0` when nothing was
+        queued because the send_id was already handled elsewhere.
+
+        Journals a `{"kind":"queued", ...}` item into the CURRENT turn's
+        journal (`self._current`, if any) so a later replay can see queue
+        depth grow — via `_append_sync`/the sink directly rather than
+        `_append`: this runs outside the turn's own consume loop, and queue
+        depth is read through `/turn` (`queue_summary`), not streamed, so no
+        `_journal_cond` notify is needed here. Deliberately leaves room for a
+        future `"reason"` key (P6: e.g. `waiting_for_lease`) without adding
+        its logic now.
+        """
+        for i, item in enumerate(self._queue):
+            if item["sendId"] == send_id:
+                return i + 1
+        cur = self._current
+        if cur is not None and cur.status == "running" and cur.send_id == send_id:
+            return 0
+        if self._turn_order:
+            last = self._turns[self._turn_order[-1]]
+            if last.send_id == send_id:
+                return 0
+        self._queue.append({"sendId": send_id, "input": input})
+        if cur is not None:
+            self._append_sync(cur, {"kind": "queued", "sendId": send_id, "input": input})
+        return len(self._queue)
+
+    def dequeue(self, send_id: str) -> bool:
+        """Remove a not-yet-started queued item by `send_id`. Returns
+        whether anything was actually removed."""
+        for i, item in enumerate(self._queue):
+            if item["sendId"] == send_id:
+                del self._queue[i]
+                return True
+        return False
+
+    def queue_summary(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self._queue]
+
+    async def _maybe_drain_queue(self) -> None:
+        """Start the next queued follow-up once the current turn has ended.
+
+        A single overridable hook — P6 interposes a write-lease check here
+        without touching `_consume` itself. Called from `_consume`'s
+        `finally`, AFTER the existing turn-end bookkeeping.
+
+        Concurrency: the not-busy check and the `start_turn` call below have
+        NO `await` between them. `start_turn` flips `busy` True the moment
+        it runs — synchronously, before its own first internal `await` (it
+        sets `self._current = state` several lines before touching anything
+        async) — and asyncio is single-threaded, so no other coroutine can
+        run between this method's check and that flip. A gapless
+        check-then-start here can therefore never let two concurrent drains
+        double-pop the same queue entry.
+        """
+        if not self._queue or not self.alive or self.busy:
+            return
+        item = self._queue.popleft()
+        await self.start_turn(item["input"], send_id=item["sendId"])
 
     # -- request bridge (P1) --------------------------------------------------
 
@@ -385,6 +460,10 @@ class CoderRunner(WireRunner):
                 self._journal_note_turn(state)
                 # Not per-item (EFS latency) — one fsync when the turn closes.
                 self._journal.fsync_turn(state.turn_id)
+            # Turn-end boundary (P4b): drain the next queued follow-up, if
+            # any — AFTER the bookkeeping above so a queued turn's own
+            # journal/fsync never races the one just closing out.
+            await self._maybe_drain_queue()
 
     async def stop(self) -> None:
         await super().stop()

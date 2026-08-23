@@ -38,6 +38,10 @@ export interface CoderTurnState {
    * server reports one. Undefined (not null) when absent — the panel treats
    * that as "default". */
   mode?: string;
+  /** Server-side follow-up queue (P4b) — RAM-only, drains automatically as
+   * each turn ends. Undefined (not null/[]) when the server response omits
+   * it, mirroring `mode`'s pass-through convention. */
+  queue?: { sendId: string; input: string }[];
 }
 
 /** Approval payload fields the card renders (wire snake_case). */

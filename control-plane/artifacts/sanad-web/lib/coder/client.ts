@@ -188,6 +188,68 @@ export async function sendCoder(
   await streamNdjson<CoderItem>(res, onItem);
 }
 
+/**
+ * Queue a follow-up message server-side instead of starting it now (P4b) —
+ * it drains automatically once the running turn ends, even with this tab
+ * closed. RAM-only server-side: lost on a crash/restart (re-typable, not a
+ * data-loss concern). `sendId` is required here (unlike `sendCoder`'s
+ * optional one) — it's the queue entry's own key, and how `dequeueCoder`
+ * removes it later. Never throws — a failed queue attempt surfaces as
+ * `{ok:false, code}` for the caller to fall back on (e.g. re-showing the
+ * composer).
+ */
+export async function queueCoder(
+  cid: string,
+  input: string,
+  sendId: string,
+  sessionId?: string,
+): Promise<{ ok: boolean; queued?: boolean; position?: number; code?: string }> {
+  try {
+    const res = await fetch(
+      withSession(`/api/coder/conversations/${encodeURIComponent(cid)}/send`, sessionId),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input, sendId, queue: true }),
+      },
+    );
+    const b = await res.json().catch(() => null);
+    if (res.ok) {
+      const data = b?.data ?? b;
+      return { ok: true, queued: Boolean(data?.queued), position: data?.position };
+    }
+    return { ok: false, code: b?.error?.code };
+  } catch {
+    return { ok: false, code: "network" };
+  }
+}
+
+/** Remove a not-yet-started queued follow-up. Never throws — a failed
+ * dequeue surfaces as `{ok:false}` and the item just stays queued. */
+export async function dequeueCoder(
+  cid: string,
+  sendId: string,
+  sessionId?: string,
+): Promise<{ ok: boolean; removed?: boolean }> {
+  try {
+    const res = await fetch(
+      withSession(
+        `/api/coder/conversations/${encodeURIComponent(cid)}/queue/${encodeURIComponent(sendId)}`,
+        sessionId,
+      ),
+      { method: "DELETE" },
+    );
+    const b = await res.json().catch(() => null);
+    if (res.ok) {
+      const data = b?.data ?? b;
+      return { ok: true, removed: Boolean(data?.removed) };
+    }
+    return { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
 /** Re-attach to a journaled turn from a seq (replay the gap, then live). */
 export async function followCoder(
   cid: string,
@@ -238,6 +300,7 @@ export async function fetchCoderTurn(
       alive: Boolean(data?.alive),
       pendingRequests: data?.pendingRequests ?? [],
       mode: data?.mode ?? undefined,
+      queue: data?.queue ?? undefined,
     };
   } catch {
     return null;

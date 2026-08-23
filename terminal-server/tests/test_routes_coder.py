@@ -394,6 +394,198 @@ def test_steer_malformed_cid_is_400(client: TestClient):
     assert res.status_code in (400, 404)
 
 
+# -- P4b: server-side per-conversation queue ---------------------------------
+
+
+def _wait_for_running_turn(client: TestClient, cid: str) -> str:
+    for _ in range(200):
+        turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
+        if turn.get("turn") and turn["turn"]["status"] == "running":
+            return turn["turn"]["turnId"]
+        time.sleep(0.02)
+    pytest.fail("turn never went running")
+
+
+def test_send_while_busy_auto_queues_and_drains_on_turn_end(client: TestClient):
+    """A busy /send no longer 409s — it auto-queues (202) and /turn shows the
+    queued item; once the running turn ends, the queue drains automatically
+    (no client action needed) and the queued input becomes a real new turn."""
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+
+    send_thread = threading.Thread(
+        target=client.post,
+        args=(f"/internal/coder/conversations/{cid}/send",),
+        kwargs={"headers": HEADERS, "json": {"input": "HANG", "sendId": "s1"}},
+        daemon=True,
+    )
+    send_thread.start()
+    try:
+        turn_id = _wait_for_running_turn(client, cid)
+
+        queued = client.post(
+            f"/internal/coder/conversations/{cid}/send",
+            headers=HEADERS,
+            json={"input": "queued follow-up", "sendId": "s2"},
+        )
+        assert queued.status_code == 202
+        assert queued.json() == {"ok": True, "queued": True, "position": 1}
+
+        turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
+        assert turn["queue"] == [{"sendId": "s2", "input": "queued follow-up"}]
+
+        cancel_res = client.post(f"/internal/coder/conversations/{cid}/cancel", headers=HEADERS)
+        assert cancel_res.status_code == 200
+    finally:
+        send_thread.join(timeout=10)
+    assert not send_thread.is_alive()
+
+    new_turn = None
+    for _ in range(200):
+        turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
+        if turn.get("turn") and turn["turn"]["turnId"] != turn_id:
+            new_turn = turn
+            break
+        time.sleep(0.02)
+    assert new_turn is not None, "queue never drained into a new turn"
+    assert new_turn["turn"]["userInput"] == "queued follow-up"
+    assert new_turn["queue"] == []
+
+
+def test_send_with_queue_true_on_idle_runner_drains_promptly(client: TestClient):
+    """`queue:true` on an otherwise-idle runner must still run promptly —
+    nothing will ever end a turn to trigger the usual drain-on-turn-end
+    hook, so `/send` itself kicks the drain off directly."""
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+
+    res = client.post(
+        f"/internal/coder/conversations/{cid}/send",
+        headers=HEADERS,
+        json={"input": "hello", "sendId": "q1", "queue": True},
+    )
+    assert res.status_code == 202
+    assert res.json() == {"ok": True, "queued": True, "position": 1}
+
+    turn = None
+    for _ in range(200):
+        candidate = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
+        if candidate.get("turn") is not None:
+            turn = candidate
+            break
+        time.sleep(0.02)
+    assert turn is not None, "queued send on an idle runner never drained"
+    assert turn["turn"]["userInput"] == "hello"
+    assert turn["queue"] == []
+
+
+def test_send_enqueue_is_idempotent_on_send_id_over_http(client: TestClient):
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+
+    send_thread = threading.Thread(
+        target=client.post,
+        args=(f"/internal/coder/conversations/{cid}/send",),
+        kwargs={"headers": HEADERS, "json": {"input": "HANG", "sendId": "s1"}},
+        daemon=True,
+    )
+    send_thread.start()
+    try:
+        _wait_for_running_turn(client, cid)
+
+        first = client.post(
+            f"/internal/coder/conversations/{cid}/send",
+            headers=HEADERS,
+            json={"input": "dup", "sendId": "q1", "queue": True},
+        )
+        second = client.post(
+            f"/internal/coder/conversations/{cid}/send",
+            headers=HEADERS,
+            json={"input": "dup again", "sendId": "q1", "queue": True},
+        )
+        assert first.status_code == 202 and first.json()["position"] == 1
+        assert second.status_code == 202 and second.json()["position"] == 1
+
+        turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
+        assert turn["queue"] == [{"sendId": "q1", "input": "dup"}]
+
+        client.post(f"/internal/coder/conversations/{cid}/cancel", headers=HEADERS)
+    finally:
+        send_thread.join(timeout=10)
+    assert not send_thread.is_alive()
+
+
+def test_dequeue_removes_a_queued_item(client: TestClient):
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+
+    send_thread = threading.Thread(
+        target=client.post,
+        args=(f"/internal/coder/conversations/{cid}/send",),
+        kwargs={"headers": HEADERS, "json": {"input": "HANG", "sendId": "s1"}},
+        daemon=True,
+    )
+    send_thread.start()
+    try:
+        _wait_for_running_turn(client, cid)
+
+        queued = client.post(
+            f"/internal/coder/conversations/{cid}/send",
+            headers=HEADERS,
+            json={"input": "x", "sendId": "q1", "queue": True},
+        )
+        assert queued.status_code == 202
+
+        turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
+        assert turn["queue"] == [{"sendId": "q1", "input": "x"}]
+
+        deleted = client.delete(f"/internal/coder/conversations/{cid}/queue/q1", headers=HEADERS)
+        assert deleted.status_code == 200
+        assert deleted.json() == {"ok": True, "removed": True}
+
+        turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
+        assert turn["queue"] == []
+
+        again = client.delete(f"/internal/coder/conversations/{cid}/queue/q1", headers=HEADERS)
+        assert again.status_code == 200
+        assert again.json() == {"ok": True, "removed": False}
+
+        client.post(f"/internal/coder/conversations/{cid}/cancel", headers=HEADERS)
+    finally:
+        send_thread.join(timeout=10)
+    assert not send_thread.is_alive()
+
+
+def test_dequeue_missing_runner_is_409(client: TestClient):
+    res = client.delete("/internal/coder/conversations/c_000000000000/queue/q1", headers=HEADERS)
+    assert res.status_code == 409
+    assert res.json()["error"]["code"] == "not_started"
+
+
+def test_dequeue_malformed_cid_is_400(client: TestClient):
+    res = client.delete("/internal/coder/conversations/..%2Fetc/queue/q1", headers=HEADERS)
+    assert res.status_code in (400, 404)
+
+
+def test_turn_exposes_queue_field(client: TestClient):
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
+    assert turn["queue"] == []
+
+
+def test_turn_carries_queue_field_when_no_runner(client: TestClient):
+    turn = client.get(
+        "/internal/coder/conversations/c_000000000000/turn", headers=HEADERS
+    ).json()
+    assert turn["queue"] == []
+
+
 def test_open_existing_id_also_hits_the_cap(client: TestClient):
     """`open` consumes a live-process slot exactly like create (controller ruling, P1a)."""
     cids = [
