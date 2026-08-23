@@ -197,3 +197,58 @@ async def test_empty_journal_dir_reconstructs_nothing(tmp_path):
     runner = _make_runner(journal_dir, tmp_path)
     assert runner.turn_summary() is None
     assert runner.pending_summaries() == []
+
+
+@pytest.mark.asyncio
+async def test_poison_non_dict_index_entry_does_not_crash_reconstruction(tmp_path):
+    """A corrupt turns.json holding a non-dict element must NOT crash
+    CoderRunner.__init__ (which would wedge /open at a permanent 500). The
+    poison entry is skipped; a valid sibling turn still reconstructs."""
+    import json
+
+    journal_dir = tmp_path / "agentd" / "coder" / "c_poison"
+    journal = CoderJournal(journal_dir, turns_keep=20, max_bytes=20 * 1024 * 1024)
+    journal.append("t_ok", {"seq": 0, "kind": "turn", "turnId": "t_ok"})
+    journal.append("t_ok", {"seq": 1, "kind": "end", "status": "finished"})
+    # Hand-write a turns.json whose root is a list but contains a non-dict
+    # element (the corrupt/hostile shape write_index never produces).
+    (journal_dir / "turns.json").write_text(
+        json.dumps(
+            [
+                "not-a-dict",
+                42,
+                {
+                    "turnId": "t_ok",
+                    "status": "finished",
+                    "sendId": "s1",
+                    "startedAt": 1.0,
+                    "lastSeq": 1,
+                    "userInput": "survivor",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    # Must not raise.
+    runner = _make_runner(journal_dir, tmp_path)
+    state = runner.get_turn("t_ok")
+    assert state is not None and state.status == "finished"
+    assert state.user_input == "survivor"
+    # follow() of the survivor closes cleanly.
+    items = await asyncio.wait_for(_drain(runner, "t_ok"), timeout=5.0)
+    assert items and items[-1]["kind"] == "end"
+
+
+def test_load_filters_non_dict_index_entries(tmp_path):
+    """CoderJournal.load() returns only dict entries in the index (never a
+    raw list that could feed entry.get() to a crash)."""
+    import json
+
+    journal_dir = tmp_path / "agentd" / "coder" / "c_filter"
+    journal = CoderJournal(journal_dir, turns_keep=20, max_bytes=20 * 1024 * 1024)
+    (journal_dir / "turns.json").write_text(
+        json.dumps(["x", 7, {"turnId": "t_1", "status": "finished"}]), encoding="utf-8"
+    )
+    index, _ = journal.load()
+    assert index == [{"turnId": "t_1", "status": "finished"}]
