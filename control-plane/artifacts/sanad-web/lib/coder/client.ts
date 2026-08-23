@@ -287,6 +287,36 @@ export async function respondCoder(
   }
 }
 
+/** Inject a follow-up into the active turn without ending it. Never throws —
+ * the panel treats a failed steer as "not delivered" (409 `no_turn` once the
+ * turn has already finished is the common race) and lets the user fall back
+ * to a normal send. */
+export async function steerCoder(
+  cid: string,
+  input: string,
+  sessionId?: string,
+): Promise<{ ok: boolean; code?: string; message?: string }> {
+  try {
+    const res = await fetch(
+      withSession(`/api/coder/conversations/${encodeURIComponent(cid)}/steer`, sessionId),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input }),
+      },
+    );
+    if (res.ok) return { ok: true };
+    const b = await res.json().catch(() => null);
+    return { ok: false, code: b?.error?.code, message: b?.error?.message };
+  } catch {
+    return {
+      ok: false,
+      code: "network",
+      message: "Network error — check your connection.",
+    };
+  }
+}
+
 /** Switch the live permission mode ("plan" | "default" | "accept-edits").
  * Never throws — the caller (CoderPanel) treats a failed switch as "stay on
  * the prior mode" and reverts its optimistic UI state. */

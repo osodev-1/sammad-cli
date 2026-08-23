@@ -75,6 +75,10 @@ class ModeBody(BaseModel):
     mode: str = Field(min_length=1, max_length=32)
 
 
+class SteerBody(BaseModel):
+    input: str = Field(min_length=1, max_length=32_000)
+
+
 def _err(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": {"code": code, "message": message}})
 
@@ -346,6 +350,20 @@ async def cancel(_: Gated, root: Root, cid: str) -> JSONResponse:
     runner = get_conversation(root, cid)
     if runner is not None and runner.alive:
         await runner.cancel()
+    return JSONResponse({"ok": True})
+
+
+@router.post("/conversations/{cid}/steer")
+async def steer(_: Gated, root: Root, cid: str, body: SteerBody) -> JSONResponse:
+    if bad := _bad_cid(cid):
+        return bad
+    runner = get_conversation(root, cid)
+    if runner is None:
+        return _err(409, "no_turn", "no turn is in progress")
+    try:
+        await runner.steer(body.input)
+    except WireRunnerError as exc:
+        return _err(409, exc.code, exc.message)
     return JSONResponse({"ok": True})
 
 

@@ -309,6 +309,91 @@ def test_mode_route_malformed_cid_is_400(client: TestClient):
     assert res.status_code in (400, 404)
 
 
+def test_steer_while_turn_runs_returns_ok_and_follow_shows_steer_input(client: TestClient):
+    """The steer route while a STEERABLE turn is streaming: 200 {"ok": true}
+    immediately, and a subsequent /follow of that same turn carries the
+    SteerInput event followed by a normal finish — no new turn started."""
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+
+    # "STEERABLE" keeps the turn open (like HANG) until a steer arrives —
+    # /send blocks until the turn ends, so drive it from a thread (same
+    # trick test_interrupted_replay_does_not_drop_the_runner uses for HANG).
+    send_thread = threading.Thread(
+        target=client.post,
+        args=(f"/internal/coder/conversations/{cid}/send",),
+        kwargs={"headers": HEADERS, "json": {"input": "STEERABLE"}},
+        daemon=True,
+    )
+    send_thread.start()
+    try:
+        turn_id = None
+        for _ in range(200):
+            turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
+            if turn.get("turn") and turn["turn"]["status"] == "running":
+                turn_id = turn["turn"]["turnId"]
+                break
+            time.sleep(0.02)
+        assert turn_id is not None, "turn never went running"
+
+        res = client.post(
+            f"/internal/coder/conversations/{cid}/steer",
+            headers=HEADERS,
+            json={"input": "go left"},
+        )
+        assert res.status_code == 200
+        assert res.json() == {"ok": True}
+    finally:
+        send_thread.join(timeout=10)
+    assert not send_thread.is_alive()
+
+    replay = client.get(
+        f"/internal/coder/conversations/{cid}/follow",
+        headers=HEADERS,
+        params={"turnId": turn_id, "from_seq": 0},
+    )
+    assert replay.status_code == 200
+    items = _lines(replay.text)
+    steer_inputs = [
+        i["event"]["payload"]["user_input"]
+        for i in items
+        if i.get("kind") == "event" and i["event"].get("type") == "SteerInput"
+    ]
+    assert steer_inputs == ["go left"]
+    assert items[-1]["kind"] == "end" and items[-1]["status"] == "finished"
+
+
+def test_steer_with_no_live_turn_is_409(client: TestClient):
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    res = client.post(
+        f"/internal/coder/conversations/{cid}/steer",
+        headers=HEADERS,
+        json={"input": "go left"},
+    )
+    assert res.status_code == 409
+    assert res.json()["error"]["code"] == "no_turn"
+
+
+def test_steer_unknown_conversation_is_409(client: TestClient):
+    res = client.post(
+        "/internal/coder/conversations/c_000000000000/steer",
+        headers=HEADERS,
+        json={"input": "go left"},
+    )
+    assert res.status_code == 409
+    assert res.json()["error"]["code"] == "no_turn"
+
+
+def test_steer_malformed_cid_is_400(client: TestClient):
+    res = client.post(
+        "/internal/coder/conversations/..%2Fetc/steer", headers=HEADERS, json={"input": "x"}
+    )
+    assert res.status_code in (400, 404)
+
+
 def test_open_existing_id_also_hits_the_cap(client: TestClient):
     """`open` consumes a live-process slot exactly like create (controller ruling, P1a)."""
     cids = [

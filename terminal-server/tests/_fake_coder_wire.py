@@ -16,9 +16,15 @@ Modes are keyed on the prompt text:
                   for the client's response line, echoes it back as a
                   RequestOutcome event, then finishes — the question bridge
                   round-trip proof.
+- "STEERABLE":    TurnBegin, then the turn stays open (like HANG) until a
+                  `steer` arrives, at which point it replies, emits a
+                  `SteerInput` event, and finishes — the steer round-trip
+                  proof (mirrors the real soul: the follow-up lands as an
+                  event on the same turn instead of starting a new one).
 
-Outside the prompt loop, `set_permission_mode` is handled directly (mirrors
-the real CLI: a StatusUpdate event first, then the success response) —
+Outside the prompt loop, `set_permission_mode` and `steer` are handled
+directly (mirrors the real CLI: `set_permission_mode` emits a StatusUpdate
+event first, `steer` emits a SteerInput event first, then each replies) —
 `WireRunner.call()` is a standalone request/response, not tied to a turn.
 Any other unknown top-level method is silently ignored (no response), which
 is what proves `call()`'s timeout path.
@@ -63,6 +69,29 @@ def _hang_until_cancel(prompt_id) -> None:
             return
 
 
+def _reply_steered(mid, user_input: str) -> None:
+    _write({"jsonrpc": "2.0", "id": mid, "result": {"status": "steered"}})
+    _event("SteerInput", {"user_input": user_input})
+
+
+def _hang_until_steer(prompt_id) -> None:
+    """Keep the turn open; on a steer, reply, emit SteerInput, then finish
+    the turn (the follow-up landed on the SAME turn — no new prompt)."""
+    while True:
+        msg = _read()
+        if msg is None:
+            return
+        if msg.get("method") == "steer":
+            user_input = msg.get("params", {}).get("user_input", "")
+            _reply_steered(msg.get("id"), user_input)
+            _write({"jsonrpc": "2.0", "id": prompt_id, "result": {"status": "finished"}})
+            return
+        if msg.get("method") == "cancel":
+            _write({"jsonrpc": "2.0", "id": msg.get("id"), "result": {}})
+            _write({"jsonrpc": "2.0", "id": prompt_id, "result": {"status": "cancelled"}})
+            return
+
+
 def main() -> None:
     while True:
         msg = _read()
@@ -90,6 +119,8 @@ def main() -> None:
                 for i in range(int(user_input.split(":", 1)[1])):
                     _event("StepBegin", {"step": i})
                 _hang_until_cancel(mid)
+            elif "STEERABLE" in user_input:
+                _hang_until_steer(mid)
             elif "HANG" in user_input:
                 _hang_until_cancel(mid)
             elif "ASK_TOOLCALL" in user_input:
@@ -173,6 +204,9 @@ def main() -> None:
                     "result": {"status": "ok", "permission_mode": mode},
                 }
             )
+        elif method == "steer":
+            user_input = msg.get("params", {}).get("user_input", "")
+            _reply_steered(mid, user_input)
 
 
 if __name__ == "__main__":

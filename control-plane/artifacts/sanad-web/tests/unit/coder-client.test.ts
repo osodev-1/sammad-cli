@@ -5,6 +5,7 @@ import {
   fetchCoderTurn,
   respondCoder,
   setCoderMode,
+  steerCoder,
   textFromEvent,
   thinkFromEvent,
   toolLabel,
@@ -316,6 +317,36 @@ describe("setCoderMode", () => {
       ok: false,
       code: "not_started",
       message: "conversation is not running",
+    });
+  });
+});
+
+describe("steerCoder", () => {
+  it("POSTs {input} to the steer endpoint and returns {ok:true} on 200", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await steerCoder("c_1", "go left", "sess1");
+
+    expect(result).toEqual({ ok: true });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("/api/coder/conversations/c_1/steer?session=sess1");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ input: "go left" });
+  });
+
+  it("maps a 409 no_turn body to {ok:false, code:'no_turn'}", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(409, { error: { code: "no_turn", message: "no turn is in progress" } }),
+      ),
+    );
+    const result = await steerCoder("c_1", "go left", "sess1");
+    expect(result).toEqual({
+      ok: false,
+      code: "no_turn",
+      message: "no turn is in progress",
     });
   });
 });
