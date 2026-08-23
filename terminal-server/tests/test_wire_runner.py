@@ -382,6 +382,58 @@ async def test_set_permission_mode_rejects_unknown_mode(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_steer_while_turn_runs_emits_steer_input(tmp_path):
+    """`CoderRunner.steer()` round-trips over the wire's generic `call()`
+    machinery while a turn is running: the fake's STEERABLE mode hangs until
+    the steer arrives, then journals a SteerInput event on the SAME turn and
+    finishes it — no new turn is started."""
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        state = await runner.start_turn("STEERABLE")
+        await runner.steer("go left")
+        items = await asyncio.wait_for(_drain(runner, state.turn_id), timeout=5.0)
+        steer_inputs = [
+            i["event"]["payload"]["user_input"]
+            for i in items
+            if i.get("kind") == "event" and i["event"].get("type") == "SteerInput"
+        ]
+        assert steer_inputs == ["go left"]
+        assert state.status == "finished"
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_steer_with_no_turn_raises_no_turn(tmp_path):
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        with pytest.raises(WireRunnerError) as exc:
+            await runner.steer("go left")
+        assert exc.value.code == "no_turn"
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_steer_after_turn_finished_raises_no_turn(tmp_path):
+    """A stale steer against a turn that already finished must fail closed
+    locally — never round-trip to the CLI only to be rejected there."""
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        state = await runner.start_turn("hello")
+        await asyncio.wait_for(_drain(runner, state.turn_id), timeout=5.0)
+        assert state.status == "finished"
+        with pytest.raises(WireRunnerError) as exc:
+            await runner.steer("go left")
+        assert exc.value.code == "no_turn"
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
 async def test_request_with_no_running_turn_is_rejected(tmp_path):
     """Bridged types still reject when no turn is running (background lane = P3/P4)."""
     runner = CoderRunner(

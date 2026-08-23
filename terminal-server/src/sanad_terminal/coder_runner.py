@@ -115,6 +115,20 @@ class CoderRunner(WireRunner):
         await self.call("set_permission_mode", {"mode": mode})
         self.permission_mode = mode
 
+    # -- steering (P4a) --------------------------------------------------------
+
+    async def steer(self, text: str) -> None:
+        """Inject a follow-up into the active turn without ending it. Guarded
+        locally exactly like the wire layer's own `_handle_steer` (an active
+        streaming turn is required) so a stale/finished turn fails closed
+        here instead of round-tripping to the CLI only to be rejected there.
+        The soul injects `text` as a user message at the next step boundary
+        and emits a `SteerInput` event back over the wire — journaled onto
+        the SAME turn like any other event, no new turn started."""
+        if not self.alive or not self.busy:
+            raise WireRunnerError("no_turn", "no turn is in progress")
+        await self.call("steer", {"user_input": text})
+
     # -- request bridge (P1) --------------------------------------------------
 
     _BRIDGED_TYPES = {"ApprovalRequest": "approval", "QuestionRequest": "question"}
