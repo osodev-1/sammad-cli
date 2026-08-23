@@ -155,15 +155,21 @@ class CoderJournal:
                 logger.warning("coder journal: corrupt index at {}: {}", index_path, exc)
             return [], {}
 
+        # Return only dict entries — a non-dict element (corrupt/hostile index)
+        # must not reach a consumer that does entry.get(...) and would crash.
+        valid_index: list[dict[str, Any]] = []
         items_by_turn: dict[str, list[dict[str, Any]]] = {}
         for entry in index:
-            turn_id = entry.get("turnId") if isinstance(entry, dict) else None
+            if not isinstance(entry, dict):
+                continue
+            valid_index.append(entry)
+            turn_id = entry.get("turnId")
             if not isinstance(turn_id, str):
                 continue
             items = self._load_turn_file(turn_id)
             if items is not None:
                 items_by_turn[turn_id] = items
-        return index, items_by_turn
+        return valid_index, items_by_turn
 
     def _load_turn_file(self, turn_id: str) -> list[dict[str, Any]] | None:
         path = self._turn_path(turn_id)
