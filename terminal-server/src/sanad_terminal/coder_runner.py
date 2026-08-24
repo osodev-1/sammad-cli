@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from sanad_terminal.coder_journal import CoderJournal
 from sanad_terminal.wire_runner import TurnState, WireRunner, WireRunnerError, register_registry
 
@@ -64,6 +66,7 @@ class CoderRunner(WireRunner):
         journal_dir: Path | None = None,
         journal_turns_keep: int = 20,
         journal_max_bytes: int = 20 * 1024 * 1024,
+        max_queue_depth: int = 50,
     ) -> None:
         # Built before super().__init__() so its `.append` can be threaded
         # in as the journal_sink. `journal_dir=None` (the architect, and any
@@ -97,6 +100,11 @@ class CoderRunner(WireRunner):
         # re-typable): a `collections.deque` of `{"sendId": str, "input": str}`,
         # drained one-at-a-time by `_maybe_drain_queue` as each turn ends.
         self._queue: deque[dict[str, Any]] = deque()
+        # Depth cap (P4 final-review, Important C) — every sibling resource
+        # (journal turns kept, steps per turn, live conversations, journal
+        # bytes) is capped; an authenticated `POST /send {queue:true}` spam
+        # loop must not be the one that grows RAM unbounded.
+        self._max_queue_depth = max_queue_depth
         # Durable index bookkeeping (P3) — the base's own `_turns`/`_turn_order`
         # RAM cache evicts terminal turns beyond `_TURN_KEEP` (5); this list is
         # the durable-retention view (bounded by `journal_turns_keep`, default
@@ -155,6 +163,16 @@ class CoderRunner(WireRunner):
         `_journal_cond` notify is needed here. Deliberately leaves room for a
         future `"reason"` key (P6: e.g. `waiting_for_lease`) without adding
         its logic now.
+
+        Depth-capped at `self._max_queue_depth` (P4 final-review, Important
+        C): a genuinely NEW item (not an idempotent resend of one already
+        queued/running/just-finished) is refused once the queue is already
+        at the cap — raises `WireRunnerError("queue_full", ...)` rather than
+        silently dropping it, so `/send` can surface a real error instead of
+        lying about having queued something it didn't. The cap check runs
+        AFTER the idempotency checks above so a resend of an already-queued
+        send_id never trips it, and refusal never appends to either
+        `self._queue` or the running turn's `state.items`.
         """
         for i, item in enumerate(self._queue):
             if item["sendId"] == send_id:
@@ -166,6 +184,10 @@ class CoderRunner(WireRunner):
             last = self._turns[self._turn_order[-1]]
             if last.send_id == send_id:
                 return 0
+        if len(self._queue) >= self._max_queue_depth:
+            raise WireRunnerError(
+                "queue_full", f"the follow-up queue is full (max {self._max_queue_depth})"
+            )
         self._queue.append({"sendId": send_id, "input": input})
         if cur is not None:
             self._append_sync(cur, {"kind": "queued", "sendId": send_id, "input": input})
@@ -198,11 +220,38 @@ class CoderRunner(WireRunner):
         run between this method's check and that flip. A gapless
         check-then-start here can therefore never let two concurrent drains
         double-pop the same queue entry.
+
+        `start_turn` CAN still raise after the `popleft()` below — most
+        plausibly `_send`'s pipe write failing while `self.alive` was still
+        True (the subprocess died in the narrow gap between this method's
+        alive-check and the write). Left unguarded, that would both strand
+        the popped item (gone from `self._queue`, never actually started)
+        and propagate a raw `WireRunnerError` out of this method — which
+        matters because this is called from TWO places: `_consume`'s
+        `finally` (fire-and-forget; an unhandled exception there just leaks
+        as an unretrieved task exception) and `/send`'s idle-drain path in
+        routes_coder.py (a live request context, where an unhandled
+        exception becomes an opaque 500 instead of the sibling
+        `{"error":{"code","message"}}` envelope every other failure here
+        uses). Guarding HERE, once, fixes both call sites identically: put
+        the item back at the head of the queue (so it retries on the next
+        drain — turn-end, or a later idle `/send` — instead of vanishing)
+        and swallow the error after logging, so neither caller ever sees an
+        exception propagate out of this method.
         """
         if not self._queue or not self.alive or self.busy:
             return
         item = self._queue.popleft()
-        await self.start_turn(item["input"], send_id=item["sendId"])
+        try:
+            await self.start_turn(item["input"], send_id=item["sendId"])
+        except WireRunnerError as exc:
+            self._queue.appendleft(item)
+            logger.warning(
+                "coder queue drain failed for conversation {} (sendId={}): {}",
+                self.conversation_id,
+                item["sendId"],
+                exc.message,
+            )
 
     # -- request bridge (P1) --------------------------------------------------
 

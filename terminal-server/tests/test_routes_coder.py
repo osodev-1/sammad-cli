@@ -42,7 +42,9 @@ def _control_plane(tickets: dict[str, dict]) -> ControlPlaneClient:
     return ControlPlaneClient("https://cp.test", SECRET, transport=httpx.MockTransport(handler))
 
 
-def _make_client(tmp_path: Path, *, enabled: bool) -> TestClient:
+def _make_client(
+    tmp_path: Path, *, enabled: bool, coder_max_queue_depth: int = 50
+) -> TestClient:
     settings = TerminalSettings(
         shared_secret=SECRET,
         users_dir=tmp_path / "users",
@@ -51,6 +53,7 @@ def _make_client(tmp_path: Path, *, enabled: bool) -> TestClient:
         coder_max_turn_seconds=3600.0,
         coder_max_steps_per_turn=200,
         coder_max_conversations=2,
+        coder_max_queue_depth=coder_max_queue_depth,
     )
     app = create_app(settings, _control_plane({"tt_good": IDENTITY}))
     return TestClient(app)
@@ -584,6 +587,60 @@ def test_turn_carries_queue_field_when_no_runner(client: TestClient):
         "/internal/coder/conversations/c_000000000000/turn", headers=HEADERS
     ).json()
     assert turn["queue"] == []
+
+
+def test_send_queue_true_past_the_cap_is_409_and_does_not_grow_the_queue(tmp_path: Path):
+    """Important C, HTTP layer: `/send {queue:true}` past
+    `coder_max_queue_depth` must 409 with `queue_full` — not silently accept
+    an unbounded number of RAM-only queue entries — and the server queue
+    must stay at the cap, not grow past it."""
+    with _make_client(tmp_path, enabled=True, coder_max_queue_depth=2) as client:
+        cid = client.post(
+            "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+        ).json()["conversationId"]
+
+        send_thread = threading.Thread(
+            target=client.post,
+            args=(f"/internal/coder/conversations/{cid}/send",),
+            kwargs={"headers": HEADERS, "json": {"input": "HANG", "sendId": "s1"}},
+            daemon=True,
+        )
+        send_thread.start()
+        try:
+            _wait_for_running_turn(client, cid)
+
+            first = client.post(
+                f"/internal/coder/conversations/{cid}/send",
+                headers=HEADERS,
+                json={"input": "one", "sendId": "q1", "queue": True},
+            )
+            second = client.post(
+                f"/internal/coder/conversations/{cid}/send",
+                headers=HEADERS,
+                json={"input": "two", "sendId": "q2", "queue": True},
+            )
+            assert first.status_code == 202 and second.status_code == 202
+
+            third = client.post(
+                f"/internal/coder/conversations/{cid}/send",
+                headers=HEADERS,
+                json={"input": "three", "sendId": "q3", "queue": True},
+            )
+            assert third.status_code == 409
+            assert third.json()["error"]["code"] == "queue_full"
+
+            turn = client.get(
+                f"/internal/coder/conversations/{cid}/turn", headers=HEADERS
+            ).json()
+            assert turn["queue"] == [
+                {"sendId": "q1", "input": "one"},
+                {"sendId": "q2", "input": "two"},
+            ]
+
+            client.post(f"/internal/coder/conversations/{cid}/cancel", headers=HEADERS)
+        finally:
+            send_thread.join(timeout=10)
+        assert not send_thread.is_alive()
 
 
 def test_open_existing_id_also_hits_the_cap(client: TestClient):

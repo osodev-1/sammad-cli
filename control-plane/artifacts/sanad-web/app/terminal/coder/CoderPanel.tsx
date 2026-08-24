@@ -127,13 +127,33 @@ export default function CoderPanel({
      doesn't; activity = the always-on "what is it doing" line. */
   const [reconnecting, setReconnecting] = useState(false);
   const [activity, setActivity] = useState<string | null>(null);
-  /* Editing a queued message — index into `queue`. Committing re-enqueues
-     under a fresh sendId (dequeue old + queue new); it no longer pauses a
-     local drain (there is none), it just optimistically edits the strip. */
+  /* Editing a queued message — keyed by `sendId`, NOT array index (P4
+     final-review, Important A). `queue` is overwritten wholesale by
+     settleAfterTurn() and the streaming poll below any time the server
+     reconciles (another item auto-draining, an edit/removal from another
+     tab, …) — an index captured when the edit began can point at a
+     DIFFERENT item by the time the edit commits (queue=[A,B,C], edit B at
+     index 1, A drains, queue becomes [B,C], index 1 now means C). Keying by
+     sendId and re-deriving the index at commit time (see
+     `commitQueuedEdit`) makes the lookup correct regardless of how many
+     times `queue` was overwritten in between. Committing re-enqueues under
+     a fresh sendId (dequeue old + queue new); it no longer pauses a local
+     drain (there is none), it just optimistically edits the strip. */
   const [editingQueued, setEditingQueued] = useState<{
-    index: number;
+    sendId: string;
     draft: string;
   } | null>(null);
+  /* Latest-value ref for the guard below — read (never depended on) by the
+     streaming poll and settleAfterTurn() so neither one's periodic/turn-end
+     `setQueue` overwrite fires while an edit is in flight (defense in depth
+     alongside the sendId-keying above; mirrors the old client-outbox
+     model's "pause the drain while editing" invariant). A `useEffect`
+     dependency would restart the poll's interval on every keystroke, so
+     this is a ref, not a dependency. */
+  const editingQueuedRef = useRef<{ sendId: string; draft: string } | null>(
+    null,
+  );
+  editingQueuedRef.current = editingQueued;
   const [stalled, setStalled] = useState(false);
   /* Clicking the working indicator reveals live steps (reasoning + tools). */
   const [showSteps, setShowSteps] = useState(false);
@@ -531,11 +551,17 @@ export default function CoderPanel({
         if (!state) {
           // Couldn't reach the workspace to reconcile — don't silently
           // drop back to "ready" as if nothing were queued; the busy-retry
-          // timer picks this up shortly.
+          // effect below re-runs this SAME reconciliation shortly (P4
+          // final-review, Important B — it used to just flip back to
+          // "ready" unconditionally, stranding the QueueStrip out of sync;
+          // it now actually retries fetchCoderTurn+setQueue until it lands).
           setPhase("busy");
           return;
         }
-        setQueue(state.queue ?? []);
+        // Guarded (Important A): a poll/settle landing mid-edit must not
+        // blow away `editingQueued`'s target queue entry out from under
+        // the user's in-progress edit — see `editingQueuedRef` above.
+        if (!editingQueuedRef.current) setQueue(state.queue ?? []);
         if (state.turn?.status === "running") {
           // Attach to the RUNNING turn and render it live — the bottom of
           // the chat shows the CURRENT state, with Stop on the active
@@ -641,12 +667,19 @@ export default function CoderPanel({
      in sync with the server-authoritative queue — it has no live event
      channel of its own (unlike mode, which rides StatusUpdate events), so
      an edit/removal from another tab, or a drain the moment this turn
-     ends, would otherwise only show up on the next reload. */
+     ends, would otherwise only show up on the next reload.
+
+     Skips the `setQueue` overwrite while an edit is in flight
+     (`editingQueuedRef`, P4 final-review Important A) — a tick landing
+     between the user's edit and their commit must not blow away
+     `editingQueued`'s target out from under `commitQueuedEdit`'s
+     about-to-run sendId lookup (defense in depth; the sendId-keying above
+     is the primary fix). */
   useEffect(() => {
     if (phase !== "streaming" || !cid) return;
     const t = window.setInterval(() => {
       void fetchCoderTurn(cid, sessionId).then((state) => {
-        if (state) setQueue(state.queue ?? []);
+        if (state && !editingQueuedRef.current) setQueue(state.queue ?? []);
       });
     }, 5000);
     return () => window.clearInterval(t);
@@ -724,22 +757,45 @@ export default function CoderPanel({
      the text just removes the entry; edited text re-enqueues under a fresh
      sendId (it's a new item, not the old one resent). Optimistic: the
      server queue is the source of truth and gets reconciled on the next
-     `/turn` (begin(), the streaming poll above, or settleAfterTurn()). */
+     `/turn` (begin(), the streaming poll above, or settleAfterTurn()).
+
+     Looks the edited item up by `editingQueued.sendId` in the CURRENT
+     `queue`, re-deriving its index at commit time (P4 final-review,
+     Important A) — `queue` may have been overwritten one or more times
+     since the edit began (an auto-drain, another tab, the streaming poll),
+     so the index captured when the textarea opened can no longer be
+     trusted to name the same item. */
   const commitQueuedEdit = useCallback(() => {
     if (!editingQueued || !cid) return;
-    const { index, draft } = editingQueued;
+    const { sendId, draft } = editingQueued;
     const text = draft.trim();
-    const old = queue[index];
+    const index = queue.findIndex((e) => e.sendId === sendId);
     setEditingQueued(null);
-    if (!old) return;
+    if (index === -1) {
+      // The item is gone from our local snapshot — it may have already
+      // drained into a running turn, been removed from another tab, or
+      // simply reconciled away between the edit opening and this commit.
+      // There's no server-side item left to attach the edit to (queuing it
+      // fresh risks double-executing an original that already started, the
+      // same hazard `!removed.removed` below guards against) — reconcile
+      // `queue` against the server, and hand the draft back to the
+      // composer rather than silently lose it (mirrors submitQueue's and
+      // submitSteer's "never lose the text" fallback).
+      void fetchCoderTurn(cid, sessionId).then((state) => {
+        if (state) setQueue(state.queue ?? []);
+      });
+      if (text) setInput((cur) => (cur ? cur : text));
+      return;
+    }
+    const old = queue[index];
     if (!text) {
-      setQueue((prev) => prev.filter((_, i) => i !== index));
+      setQueue((prev) => prev.filter((e) => e.sendId !== sendId));
       void dequeueCoder(cid, old.sendId, sessionId);
       return;
     }
     const newSendId = crypto.randomUUID();
     setQueue((prev) =>
-      prev.map((e, i) => (i === index ? { sendId: newSendId, input: text } : e)),
+      prev.map((e) => (e.sendId === sendId ? { sendId: newSendId, input: text } : e)),
     );
     void (async () => {
       const removed = await dequeueCoder(cid, old.sendId, sessionId);
@@ -765,29 +821,79 @@ export default function CoderPanel({
     })();
   }, [editingQueued, queue, cid, sessionId]);
 
+  /* Remove a queued message. Mirrors `commitQueuedEdit`'s care (P4
+     final-review, Minor E — this used to be pure fire-and-forget: it
+     optimistically filtered the item out of `queue` and never looked at
+     `dequeueCoder`'s result, so a failed DELETE or a `removed:false` no-op
+     (already drained between render and click) left the item alive
+     server-side while the UI showed it gone). Gate on `removed`, not `ok`,
+     same as `commitQueuedEdit`, and reconcile from `/turn` rather than
+     trust the optimistic removal when it doesn't hold. */
   const removeQueued = useCallback(
     (index: number) => {
       if (!cid) return;
       const item = queue[index];
-      setQueue((prev) => prev.filter((_, i) => i !== index));
-      setEditingQueued((cur) =>
-        cur && cur.index === index
-          ? null
-          : cur && cur.index > index
-            ? { ...cur, index: cur.index - 1 }
-            : cur,
-      );
-      if (item) void dequeueCoder(cid, item.sendId, sessionId);
+      if (!item) return;
+      setQueue((prev) => prev.filter((e) => e.sendId !== item.sendId));
+      setEditingQueued((cur) => (cur && cur.sendId === item.sendId ? null : cur));
+      void dequeueCoder(cid, item.sendId, sessionId).then((result) => {
+        if (result.removed) return;
+        void fetchCoderTurn(cid, sessionId).then((state) => {
+          if (state) setQueue(state.queue ?? []);
+        });
+      });
     },
     [queue, cid, sessionId],
   );
 
-  /* Busy backoff: try again shortly — the earlier turn may have finished. */
+  /* Busy backoff (P4 final-review, Important B): "busy" means
+     settleAfterTurn()'s `fetchCoderTurn` transiently failed to reach the
+     workspace while reconciling — a send/queue may have already landed
+     server-side with NO local `setQueue` to show it. This effect used to
+     just flip back to "ready" after a timeout with no fetch and no
+     setQueue at all — the QueueStrip could silently miss a just-queued
+     item, and a user who saw no queued bubble could resend, double-
+     executing it server-side. It now actually RE-RUNS the same
+     reconciliation settleAfterTurn does (fetchCoderTurn, then setQueue or
+     attach to a running turn) instead of asserting "ready" blind; on
+     another failed fetch it stays busy and retries again after
+     BUSY_RETRY_MS rather than giving up. Self-scheduling (a local
+     recursive setTimeout) rather than depending on `phase` to re-trigger:
+     `setPhase("busy")` while already "busy" is a same-value update React
+     bails out of, so re-running via the effect's own dependency array
+     alone would silently stop retrying after the first failed attempt. */
   useEffect(() => {
-    if (phase !== "busy") return;
-    const t = window.setTimeout(() => setPhase("ready"), BUSY_RETRY_MS);
-    return () => window.clearTimeout(t);
-  }, [phase]);
+    if (phase !== "busy" || !cid) return;
+    let cancelled = false;
+    let timer: number | null = null;
+    const attempt = async () => {
+      const state = await fetchCoderTurn(cid, sessionId);
+      if (cancelled) return;
+      if (!state) {
+        timer = window.setTimeout(() => void attempt(), BUSY_RETRY_MS);
+        return;
+      }
+      if (!editingQueuedRef.current) setQueue(state.queue ?? []);
+      if (state.turn?.status === "running") {
+        void runTurnRef.current?.(
+          state.turn.userInput || "(earlier request)",
+          true,
+          undefined,
+          {
+            turnId: state.turn.turnId,
+            at: state.turn.startedAt ? state.turn.startedAt * 1000 : Date.now(),
+          },
+        );
+        return;
+      }
+      setPhase("ready");
+    };
+    timer = window.setTimeout(() => void attempt(), BUSY_RETRY_MS);
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [phase, cid, sessionId]);
 
   /* Watchdog: a turn that has gone quiet gets a visible Stop control. */
   useEffect(() => {
@@ -1094,14 +1200,14 @@ export default function CoderPanel({
             between the last turn and the composer. */}
         {queue.map((entry, i) => (
           <div key={entry.sendId} style={s.userRow}>
-            {editingQueued?.index === i ? (
+            {editingQueued?.sendId === entry.sendId ? (
               <textarea
                 autoFocus
                 style={s.queuedEdit}
                 value={editingQueued.draft}
                 rows={2}
                 onChange={(e) =>
-                  setEditingQueued({ index: i, draft: e.target.value })
+                  setEditingQueued({ sendId: entry.sendId, draft: e.target.value })
                 }
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
@@ -1124,7 +1230,7 @@ export default function CoderPanel({
                     title="Edit before it sends"
                     aria-label="Edit queued message"
                     onClick={() =>
-                      setEditingQueued({ index: i, draft: entry.input })
+                      setEditingQueued({ sendId: entry.sendId, draft: entry.input })
                     }
                   >
                     ✎
