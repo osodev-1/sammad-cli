@@ -2,6 +2,7 @@ import type {
   ApprovalPayload,
   CoderItem,
   DisplayBlock,
+  PlanDisplayPayload,
   QuestionPayload,
   ToolCallPayload,
   ToolResultPayload,
@@ -45,7 +46,14 @@ export type CoderBlock =
       payload: ApprovalPayload | QuestionPayload;
       state: RequestState;
       resolution?: Record<string, unknown>;
-    };
+    }
+  /** The plan markdown from `PlanDisplay`, emitted right before the
+   * ExitPlanMode approve/refine `QuestionRequest` — the two sit adjacent in
+   * the same turn, which is the whole "merged PlanCard" experience (no
+   * correlation plumbing between them). Live-only: dropped from `toStored`
+   * (see below) and rebuilt from the journal on reload, same as tool
+   * detail. */
+  | { kind: "plan"; content: string; filePath: string };
 
 export type CoderMessage =
   | { role: "user"; text: string; at?: number }
@@ -121,6 +129,21 @@ export function reduce(blocks: CoderBlock[], item: CoderItem): CoderBlock[] {
       },
     };
     return [...blocks.slice(0, idx), updated, ...blocks.slice(idx + 1)];
+  }
+
+  if (item.kind === "event" && item.event.type === "PlanDisplay") {
+    const payload = item.event.payload as unknown as PlanDisplayPayload | undefined;
+    // Each PlanDisplay is its own card — no dedupe/merge with a prior one
+    // (a revised plan after "Revise" is a fresh block, same as a tool
+    // called twice in a row gets two cards).
+    return [
+      ...blocks,
+      {
+        kind: "plan",
+        content: typeof payload?.content === "string" ? payload.content : "",
+        filePath: typeof payload?.file_path === "string" ? payload.file_path : "",
+      },
+    ];
   }
 
   if (item.kind === "request") {
@@ -241,7 +264,15 @@ export type StoredCoderMessage =
 
 /** Serialize for uiState (caps mirror the architect: 60 msgs / 80 blocks /
  * 6000 chars; think dropped; ⚠ lines dropped; PENDING requests downgraded to
- * "cancelled" — a restored card must never look answerable). */
+ * "cancelled" — a restored card must never look answerable). Plan blocks are
+ * ALSO dropped outright (no lean stub, unlike tool blocks which keep a
+ * `label`) — there's no compact, still-useful summary of a whole plan
+ * document worth the `coderBlockState` schema surface, and the plan is
+ * inherently tied to the live ExitPlanMode question anyway (itself
+ * downgraded to "cancelled" below, since a restored chat is read-only): a
+ * restored transcript shows that the plan happened via the request block's
+ * summary, not the markdown itself. See P2b's tool-detail precedent this
+ * mirrors (rich detail is live-only, rebuilt from the journal on reload). */
 export function toStored(messages: CoderMessage[]): StoredCoderMessage[] {
   return messages.slice(-MAX_MESSAGES).map((m): StoredCoderMessage => {
     if (m.role === "user") {
@@ -255,12 +286,15 @@ export function toStored(messages: CoderMessage[]): StoredCoderMessage[] {
       role: "assistant",
       ...(m.at ? { at: m.at } : {}),
       // Reasoning steps are ephemeral, and so are transient status lines
-      // (⚠ network/turn errors): a restored chat keeps answers and actions —
-      // never yesterday's connection trouble presented as if it were current.
+      // (⚠ network/turn errors); the plan markdown is live-only (see above).
+      // A restored chat keeps answers and actions — never yesterday's
+      // connection trouble presented as if it were current.
       blocks: m.blocks
         .filter(
-          (b): b is Exclude<CoderBlock, { kind: "think" }> =>
-            b.kind !== "think" && !(b.kind === "text" && b.text.startsWith("⚠")),
+          (b): b is Exclude<CoderBlock, { kind: "think" } | { kind: "plan" }> =>
+            b.kind !== "think" &&
+            b.kind !== "plan" &&
+            !(b.kind === "text" && b.text.startsWith("⚠")),
         )
         .slice(0, MAX_BLOCKS)
         .map((b): StoredCoderBlock => {
