@@ -4,17 +4,22 @@ import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import {
   cancelCoder,
+  composerButtonsForPhase,
+  dequeueCoder,
   ensureConversation,
   fetchCoderTurn,
   followCoder,
   modeFromEvent,
   needsInterruptedReplay,
+  queueCoder,
   respondCoder,
   sendCoder,
   setCoderMode,
+  steerCoder,
   textFromEvent,
   thinkFromEvent,
   toolLabel,
+  type CoderPhase,
 } from "@/lib/coder/client";
 import {
   fromStored,
@@ -101,9 +106,7 @@ export default function CoderPanel({
    * turnId upward (mirrors onConversationId). */
   onLastInterruptedTurnId?: (turnId: string) => void;
 }) {
-  const [phase, setPhase] = useState<
-    "idle" | "starting" | "ready" | "streaming" | "busy" | "error"
-  >("idle");
+  const [phase, setPhase] = useState<CoderPhase>("idle");
   const [startError, setStartError] = useState<string | null>(null);
   const [startErrorCode, setStartErrorCode] = useState<string | null>(null);
   const [cid, setCid] = useState<string | undefined>(conversationId);
@@ -114,15 +117,19 @@ export default function CoderPanel({
     () => initial?.length ?? 0,
   );
   const [input, setInput] = useState("");
-  const [outbox, setOutbox] = useState<
-    { text: string; retry?: boolean; sendId?: string }[]
-  >([]);
+  /* The server-side follow-up queue (P4b), mirrored from `/turn`'s `queue` —
+     THIS is the QueueStrip's source of truth; there is no client outbox
+     anymore. Seeded/reconciled in begin(), after enqueue/dequeue, and on the
+     periodic /turn poll below (and, incidentally, every time runTurn checks
+     whether a follow-up turn already drained in). */
+  const [queue, setQueue] = useState<{ sendId: string; input: string }[]>([]);
   /* R6-style resilience: reconnecting = the turn lives server-side, our pipe
      doesn't; activity = the always-on "what is it doing" line. */
   const [reconnecting, setReconnecting] = useState(false);
   const [activity, setActivity] = useState<string | null>(null);
-  /* Editing a queued message pauses the drain so a finishing turn can't send
-     the old text out from under the edit. */
+  /* Editing a queued message — index into `queue`. Committing re-enqueues
+     under a fresh sendId (dequeue old + queue new); it no longer pauses a
+     local drain (there is none), it just optimistically edits the strip. */
   const [editingQueued, setEditingQueued] = useState<{
     index: number;
     draft: string;
@@ -160,7 +167,6 @@ export default function CoderPanel({
       ) => Promise<void>)
     | null
   >(null);
-  const drainingRef = useRef(false);
   const lastItemAtRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   /* Latest-value ref for the persist-upward callback (AP's onStatusPhaseRef
@@ -211,8 +217,11 @@ export default function CoderPanel({
   /* Open (or create) the conversation, then catch the panel up on whatever
      the server already knows: a turn still running (resume it live) or
      requests still awaiting an answer (fold them in as an answerable
-     message) — so a reload never shows a stale, silent chat. */
-  const begin = useCallback(async () => {
+     message) — so a reload never shows a stale, silent chat. Returns
+     whether the conversation is now open (`cidRef` valid) — runTurn's
+     turn_failed/not_started self-heal (P4 Task 4) uses this to decide
+     whether it's safe to resend, instead of the retired client outbox. */
+  const begin = useCallback(async (): Promise<boolean> => {
     setPhase("starting");
     setStartError(null);
     setStartErrorCode(null);
@@ -222,7 +231,7 @@ export default function CoderPanel({
       setStartError(res.error ?? "Could not start the coding agent.");
       setStartErrorCode(res.errorCode ?? null);
       startedRef.current = false; // allow retry
-      return;
+      return false;
     }
     const newCid = res.conversationId;
     cidRef.current = newCid;
@@ -237,6 +246,10 @@ export default function CoderPanel({
     ) {
       setMode(state.mode);
     }
+    // Server queue (P4b) — seed the QueueStrip regardless of which turn
+    // branch below fires; a queued follow-up can exist alongside a running,
+    // interrupted, or idle turn alike.
+    setQueue(state?.queue ?? []);
     if (state?.turn?.status === "running") {
       await runTurnRef.current?.(
         state.turn.userInput || "(earlier request)",
@@ -247,7 +260,7 @@ export default function CoderPanel({
           at: state.turn.startedAt ? state.turn.startedAt * 1000 : Date.now(),
         },
       );
-      return;
+      return true;
     }
     if (state?.turn?.status === "interrupted") {
       // Restart-recovery (P3 Task 2/3): the server reconciled a crash-mid-turn
@@ -270,7 +283,7 @@ export default function CoderPanel({
         // `initial` transcript already carries it; replaying again would
         // append a DUPLICATE turn. Stand pat.
         setPhase("ready");
-        return;
+        return true;
       }
       const at = turnMeta.startedAt ? turnMeta.startedAt * 1000 : Date.now();
       let blocks: CoderBlock[] = [];
@@ -285,7 +298,7 @@ export default function CoderPanel({
       lastInterruptedTurnIdRef.current = turnMeta.turnId;
       onLastInterruptedTurnIdRef.current?.(turnMeta.turnId);
       setPhase("ready");
-      return;
+      return true;
     }
     if (state?.pendingRequests && state.pendingRequests.length > 0) {
       const blocks = state.pendingRequests.reduce<CoderBlock[]>(
@@ -302,6 +315,7 @@ export default function CoderPanel({
       setMessages((m) => [...m, { role: "assistant", blocks, at: Date.now() }]);
     }
     setPhase("ready");
+    return true;
   }, [sessionId]);
 
   /* Start on first reveal — opening the tab is intent to use it (like a
@@ -315,7 +329,7 @@ export default function CoderPanel({
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [messages, outbox]);
+  }, [messages, queue]);
 
   /* Persist at turn boundaries (never per streamed chunk). */
   useEffect(() => {
@@ -327,7 +341,14 @@ export default function CoderPanel({
   /* One turn — SERVER-AUTHORITATIVE: the machine journals every item, so
      this function is only a follower.
      Self-healing paths:
-     - "busy": requeue at the front and retry shortly.
+     - "busy" (409, a narrow client/server phase-view TOCTOU race — the
+       COMMON busy case now auto-queues server-side, see "queued" below):
+       the send was rejected outright and never recorded server-side, so
+       queue it ourselves (`queueCoder`) rather than lose it, then reconcile.
+     - "queued" (202): the server already recorded this send — either
+       auto-queued behind the running turn, or started immediately if the
+       runner had gone idle by the time it landed. Nothing to resend; just
+       reconcile (`settleAfterTurn` below).
      - "turn_failed"/"not_started": the conversation was dropped server-side
        — re-mint via begin() (which re-opens, or re-creates if the id is
        gone) and resend ONCE.
@@ -337,7 +358,10 @@ export default function CoderPanel({
        begin()'s server-authoritative fetchCoderTurn (using the persisted
        conversationId), NOT via the sessionStorage anchor below — those
        writes are currently vestigial (nothing reads the anchor back),
-       ledgered for a P2 cleanup rather than removed here. */
+       ledgered for a P2 cleanup rather than removed here.
+     There is no client outbox (P4 Task 4 retired it): every one of the
+     above paths reconciles against the SERVER queue (`queue` state, synced
+     from `/turn`) instead of a local array. */
   const runTurn = useCallback(
     async (
       text: string,
@@ -356,7 +380,7 @@ export default function CoderPanel({
         { role: "assistant", blocks: [], at },
       ]);
       const activeCid = cidRef.current;
-      const flags = { busy: false, failed: false, ended: false };
+      const flags = { busy: false, queued: false, failed: false, ended: false };
       let turnId: string | null = resume?.turnId ?? null;
       let lastSeq = -1;
       const saveAnchor = () => {
@@ -442,7 +466,11 @@ export default function CoderPanel({
       } else if (resume) {
         await followCoder(activeCid, resume.turnId, 0, sessionId, consume);
       } else {
-        await sendCoder(activeCid, text, sendId, sessionId, consume);
+        const sendResult = await sendCoder(activeCid, text, sendId, sessionId, consume);
+        if (sendResult.kind === "queued") {
+          flags.queued = true;
+          flags.ended = true;
+        }
       }
       // Re-attach while the turn lives but our connection didn't.
       let attempts = 0;
@@ -483,36 +511,84 @@ export default function CoderPanel({
         setPhase("ready");
         return;
       }
-      if (flags.busy) {
-        // Roll back the optimistic bubbles; the text waits in the queue.
-        setMessages((prev) => prev.slice(0, -2));
-        setOutbox((prev) => [{ text, retry: isRetry, sendId }, ...prev]);
-        if (!resume && activeCid) {
+      /* Reconcile against the server queue after a turn we were following
+         is no longer running — whether it just ended normally (in which
+         case a queued follow-up may have ALREADY auto-drained into a fresh
+         turn server-side, P4b's `_maybe_drain_queue`) or we're resolving a
+         busy/queued collision. The server queue is the source of truth. */
+      const settleAfterTurn = async (): Promise<void> => {
+        if (!activeCid) {
+          setPhase("ready");
+          return;
+        }
+        const state = await fetchCoderTurn(activeCid, sessionId);
+        if (!state) {
+          // Couldn't reach the workspace to reconcile — don't silently
+          // drop back to "ready" as if nothing were queued; the busy-retry
+          // timer picks this up shortly.
+          setPhase("busy");
+          return;
+        }
+        setQueue(state.queue ?? []);
+        if (state.turn?.status === "running") {
           // Attach to the RUNNING turn and render it live — the bottom of
           // the chat shows the CURRENT state, with Stop on the active
-          // message. When that turn ends (or is stopped), the queue drains
-          // naturally.
-          const state = await fetchCoderTurn(activeCid, sessionId);
-          if (state?.turn?.status === "running") {
-            await runTurnRef.current?.(
-              state.turn.userInput || "(earlier request)",
-              true,
-              undefined,
-              {
-                turnId: state.turn.turnId,
-                at: state.turn.startedAt
-                  ? state.turn.startedAt * 1000
-                  : Date.now(),
-              },
-            );
-            return;
-          }
+          // message.
+          await runTurnRef.current?.(
+            state.turn.userInput || "(earlier request)",
+            true,
+            undefined,
+            {
+              turnId: state.turn.turnId,
+              at: state.turn.startedAt ? state.turn.startedAt * 1000 : Date.now(),
+            },
+          );
+          return;
         }
-        setPhase("busy");
+        setPhase("ready");
+      };
+
+      if (flags.busy) {
+        // 409 TOCTOU race: the send was rejected outright and never
+        // recorded server-side (the common busy case auto-queues via 202
+        // instead — see `flags.queued`). Roll back the optimistic bubbles
+        // and queue it ourselves so the text isn't lost.
+        setMessages((prev) => prev.slice(0, -2));
+        const qSendId = sendId ?? crypto.randomUUID();
+        const queued = activeCid
+          ? await queueCoder(activeCid, text, qSendId, sessionId)
+          : { ok: false as const };
+        if (!queued.ok) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              blocks: [
+                {
+                  kind: "text",
+                  text: `⚠ Could not queue "${text}" — the coding agent may be unreachable. Try sending it again.`,
+                },
+              ],
+              at: Date.now(),
+            },
+          ]);
+          setPhase("ready");
+          return;
+        }
+        await settleAfterTurn();
+      } else if (flags.queued) {
+        // 202: the server already recorded this send (auto-queued behind
+        // the running turn, or started immediately if the runner had gone
+        // idle by the time it landed) — roll back the optimistic bubbles
+        // and reconcile the UI against the server.
+        setMessages((prev) => prev.slice(0, -2));
+        await settleAfterTurn();
       } else if (flags.failed && !isRetry) {
         setMessages((prev) => prev.slice(0, -2));
-        setOutbox((prev) => [{ text, retry: true, sendId }, ...prev]);
-        await begin(); // re-mints a ticket, re-opens (or re-creates) the conversation
+        const reopened = await begin(); // re-mints a ticket, re-opens (or re-creates) the conversation
+        if (reopened) {
+          await runTurnRef.current?.(text, true, sendId);
+        }
       } else {
         // A turn that ended with NOTHING (no content, no error item) must
         // never leave a blank message: explain, and invite a retry.
@@ -538,58 +614,148 @@ export default function CoderPanel({
           }
           return prev;
         });
-        setPhase("ready");
+        // A queued follow-up may have already auto-drained into a fresh
+        // turn the instant this one closed (P4b) — catch up to it live
+        // instead of leaving the panel stuck on "ready" while a turn is
+        // actually running.
+        await settleAfterTurn();
       }
     },
     [sessionId, begin, anchorKey],
   );
   runTurnRef.current = runTurn;
 
-  /* Drain the queue whenever the coder is free (paused mid-edit). */
+  /* Lightly poll /turn while a turn streams, purely to keep the QueueStrip
+     in sync with the server-authoritative queue — it has no live event
+     channel of its own (unlike mode, which rides StatusUpdate events), so
+     an edit/removal from another tab, or a drain the moment this turn
+     ends, would otherwise only show up on the next reload. */
   useEffect(() => {
-    if (
-      phase !== "ready" ||
-      outbox.length === 0 ||
-      drainingRef.current ||
-      editingQueued !== null
-    ) {
+    if (phase !== "streaming" || !cid) return;
+    const t = window.setInterval(() => {
+      void fetchCoderTurn(cid, sessionId).then((state) => {
+        if (state) setQueue(state.queue ?? []);
+      });
+    }, 5000);
+    return () => window.clearInterval(t);
+  }, [phase, cid, sessionId]);
+
+  /* Queue a follow-up (P4b) instead of starting it now — server-backed, so
+     it survives this tab closing. Shows immediately as a queued bubble;
+     reconciled against the server on failure. */
+  const submitQueue = useCallback(() => {
+    const text = input.trim();
+    if (!text || !cid) return;
+    setInput("");
+    const sendId = crypto.randomUUID();
+    setQueue((prev) => [...prev, { sendId, input: text }]);
+    void queueCoder(cid, text, sendId, sessionId).then((res) => {
+      if (res.ok) return;
+      // Never delivered — drop the optimistic bubble and hand the text
+      // back to the composer rather than lose it.
+      setQueue((prev) => prev.filter((e) => e.sendId !== sendId));
+      setInput((cur) => (cur ? cur : text));
+    });
+  }, [input, cid, sessionId]);
+
+  /* Redirect the RUNNING turn without ending it (P4a). Clearing the input
+     immediately is the optimistic feedback; the actual "steered: <text>"
+     marker row renders itself once the SteerInput event flows back through
+     the already-open turn stream (transcript.ts's reduce()). On a `no_turn`
+     race (the turn ended between click and call), fall back rather than
+     drop the text: queue behind whatever is now running, or send it fresh
+     if the coder has gone idle. */
+  const submitSteer = useCallback(async () => {
+    const text = input.trim();
+    if (!text || !cid) return;
+    setInput("");
+    const result = await steerCoder(cid, text, sessionId);
+    if (result.ok) return;
+    if (result.code === "no_turn") {
+      const state = await fetchCoderTurn(cid, sessionId);
+      if (state?.turn?.status === "running") {
+        const sendId = crypto.randomUUID();
+        setQueue((prev) => [...prev, { sendId, input: text }]);
+        void queueCoder(cid, text, sendId, sessionId).then((res) => {
+          if (res.ok) return;
+          setQueue((prev) => prev.filter((e) => e.sendId !== sendId));
+          setInput((cur) => (cur ? cur : text));
+        });
+      } else {
+        void runTurn(text, false, crypto.randomUUID());
+      }
       return;
     }
-    drainingRef.current = true;
-    const [next, ...rest] = outbox;
-    setOutbox(rest);
-    void runTurn(next.text, next.retry ?? false, next.sendId).finally(() => {
-      drainingRef.current = false;
-    });
-  }, [phase, outbox, runTurn, editingQueued]);
+    // Some other failure (network, etc.) — restore the text so it isn't lost.
+    setInput((cur) => (cur ? cur : text));
+  }, [input, cid, sessionId, runTurn]);
 
-  /* Commit/cancel/remove for queued messages. An edit that empties the text
-     removes the message; edited text drops any retry marker (it's new). */
+  /* Start a fresh turn from idle. */
+  const submitSend = useCallback(() => {
+    const text = input.trim();
+    if (!text || phase === "error" || !cid) return;
+    setInput("");
+    void runTurn(text, false, crypto.randomUUID());
+  }, [input, phase, cid, runTurn]);
+
+  const composerButtons = composerButtonsForPhase(phase);
+
+  /* The composer's primary action (Enter, or the primary button) routes by
+     phase — see `composerButtonsForPhase`. */
+  const submitPrimary = useCallback(() => {
+    if (composerButtons.primaryAction === "steer") void submitSteer();
+    else submitSend();
+  }, [composerButtons.primaryAction, submitSteer, submitSend]);
+
+  /* Commit/cancel/remove for queued messages — backed by the server queue
+     (`dequeueCoder`/`queueCoder`), not a local array. An edit that empties
+     the text just removes the entry; edited text re-enqueues under a fresh
+     sendId (it's a new item, not the old one resent). Optimistic: the
+     server queue is the source of truth and gets reconciled on the next
+     `/turn` (begin(), the streaming poll above, or settleAfterTurn()). */
   const commitQueuedEdit = useCallback(() => {
-    if (!editingQueued) return;
-    const text = editingQueued.draft.trim();
-    setOutbox((prev) =>
-      text
-        ? prev.map((e, i) =>
-            i === editingQueued.index
-              ? { text, sendId: crypto.randomUUID() }
-              : e,
-          )
-        : prev.filter((_, i) => i !== editingQueued.index),
-    );
+    if (!editingQueued || !cid) return;
+    const { index, draft } = editingQueued;
+    const text = draft.trim();
+    const old = queue[index];
     setEditingQueued(null);
-  }, [editingQueued]);
-
-  const removeQueued = useCallback((index: number) => {
-    setOutbox((prev) => prev.filter((_, i) => i !== index));
-    setEditingQueued((cur) =>
-      cur && cur.index === index
-        ? null
-        : cur && cur.index > index
-          ? { ...cur, index: cur.index - 1 }
-          : cur,
+    if (!old) return;
+    if (!text) {
+      setQueue((prev) => prev.filter((_, i) => i !== index));
+      void dequeueCoder(cid, old.sendId, sessionId);
+      return;
+    }
+    const newSendId = crypto.randomUUID();
+    setQueue((prev) =>
+      prev.map((e, i) => (i === index ? { sendId: newSendId, input: text } : e)),
     );
-  }, []);
+    void (async () => {
+      const removed = await dequeueCoder(cid, old.sendId, sessionId);
+      const added = removed.ok ? await queueCoder(cid, text, newSendId, sessionId) : null;
+      if (removed.ok && added?.ok) return;
+      // Either half of the re-enqueue didn't land — reconcile against the
+      // server rather than trust our optimistic edit.
+      const state = await fetchCoderTurn(cid, sessionId);
+      setQueue(state?.queue ?? []);
+    })();
+  }, [editingQueued, queue, cid, sessionId]);
+
+  const removeQueued = useCallback(
+    (index: number) => {
+      if (!cid) return;
+      const item = queue[index];
+      setQueue((prev) => prev.filter((_, i) => i !== index));
+      setEditingQueued((cur) =>
+        cur && cur.index === index
+          ? null
+          : cur && cur.index > index
+            ? { ...cur, index: cur.index - 1 }
+            : cur,
+      );
+      if (item) void dequeueCoder(cid, item.sendId, sessionId);
+    },
+    [queue, cid, sessionId],
+  );
 
   /* Busy backoff: try again shortly — the earlier turn may have finished. */
   useEffect(() => {
@@ -606,13 +772,6 @@ export default function CoderPanel({
     }, 10_000);
     return () => window.clearInterval(t);
   }, [phase]);
-
-  const submit = useCallback(() => {
-    const text = input.trim();
-    if (!text || phase === "error") return;
-    setInput("");
-    setOutbox((prev) => [...prev, { text, sendId: crypto.randomUUID() }]);
-  }, [input, phase]);
 
   const stopTurn = useCallback(() => {
     if (!cid) return;
@@ -770,7 +929,7 @@ export default function CoderPanel({
       </div>
 
       <div style={s.transcript} ref={scrollRef}>
-        {messages.length === 0 && outbox.length === 0 && phase !== "error" && (
+        {messages.length === 0 && queue.length === 0 && phase !== "error" && (
           <div style={s.empty}>
             {phase === "starting" ? (
               "Starting the coding agent…"
@@ -865,6 +1024,12 @@ export default function CoderPanel({
                       return <ToolCard key={bi} block={b} />;
                     if (b.kind === "plan")
                       return <PlanCard key={bi} block={b} />;
+                    if (b.kind === "steer")
+                      return (
+                        <div key={bi} style={s.steerMarker}>
+                          steered: {b.text}
+                        </div>
+                      );
                     return b.requestType === "approval" ? (
                       <ApprovalCard
                         key={bi}
@@ -900,8 +1065,10 @@ export default function CoderPanel({
           );
         })}
 
-        {outbox.map((entry, i) => (
-          <div key={`q-${i}`} style={s.userRow}>
+        {/* QueueStrip (P4b) — the SERVER queue, editable/removable, sitting
+            between the last turn and the composer. */}
+        {queue.map((entry, i) => (
+          <div key={entry.sendId} style={s.userRow}>
             {editingQueued?.index === i ? (
               <textarea
                 autoFocus
@@ -923,7 +1090,7 @@ export default function CoderPanel({
               />
             ) : (
               <div style={s.queuedBubble}>
-                {entry.text}
+                {entry.input}
                 <span style={s.queuedTag}>queued</span>
                 <span style={s.queuedActions}>
                   <button
@@ -932,7 +1099,7 @@ export default function CoderPanel({
                     title="Edit before it sends"
                     aria-label="Edit queued message"
                     onClick={() =>
-                      setEditingQueued({ index: i, draft: entry.text })
+                      setEditingQueued({ index: i, draft: entry.input })
                     }
                   >
                     ✎
@@ -1009,30 +1176,36 @@ export default function CoderPanel({
         <textarea
           style={s.textarea}
           placeholder={
-            phase === "starting"
-              ? "Starting… (your message will queue)"
-              : "Ask the coder…"
+            phase === "starting" ? "Starting the coding agent…" : "Ask the coder…"
           }
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
-              submit();
+              submitPrimary();
             }
           }}
           disabled={composerDisabled}
           rows={2}
         />
+        {composerButtons.showQueue && (
+          <button
+            type="button"
+            style={s.queueBtn}
+            onClick={submitQueue}
+            disabled={!input.trim() || composerDisabled}
+            title="Queue this message for after the current turn ends"
+          >
+            Queue
+          </button>
+        )}
         <button
-          style={{
-            ...s.sendBtn,
-            ...(phase === "streaming" ? s.sendBusy : null),
-          }}
-          onClick={submit}
+          style={s.sendBtn}
+          onClick={submitPrimary}
           disabled={!input.trim() || composerDisabled}
         >
-          {phase === "streaming" || phase === "busy" ? "Queue" : "Send"}
+          {composerButtons.primaryLabel}
         </button>
       </div>
     </div>
@@ -1236,6 +1409,13 @@ const s: Record<string, CSSProperties> = {
     borderLeft: "2px solid var(--rule-strong)",
     paddingLeft: "0.6rem",
   },
+  steerMarker: {
+    fontSize: "0.76rem",
+    fontStyle: "italic",
+    color: "var(--ink-muted)",
+    borderLeft: "2px solid var(--rule-strong)",
+    paddingLeft: "0.6rem",
+  },
   text: {
     fontSize: "0.88rem",
     lineHeight: 1.6,
@@ -1345,5 +1525,14 @@ const s: Record<string, CSSProperties> = {
     padding: "0.45rem 1.1rem",
     cursor: "pointer",
   },
-  sendBusy: { opacity: 0.6, cursor: "default" },
+  queueBtn: {
+    background: "var(--paper)",
+    color: "var(--ink)",
+    border: "1px solid var(--rule-strong)",
+    borderRadius: "var(--radius-pill)",
+    fontSize: "0.82rem",
+    fontWeight: 600,
+    padding: "0.45rem 1.1rem",
+    cursor: "pointer",
+  },
 };

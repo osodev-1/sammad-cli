@@ -4,6 +4,7 @@ import type {
   DisplayBlock,
   PlanDisplayPayload,
   QuestionPayload,
+  SteerInputPayload,
   ToolCallPayload,
   ToolResultPayload,
 } from "./types";
@@ -53,7 +54,13 @@ export type CoderBlock =
    * correlation plumbing between them). Live-only: dropped from `toStored`
    * (see below) and rebuilt from the journal on reload, same as tool
    * detail. */
-  | { kind: "plan"; content: string; filePath: string };
+  | { kind: "plan"; content: string; filePath: string }
+  /** A mid-turn steer's follow-up text (P4a `SteerInput` event) — rendered
+   * as a small "steered: <text>" marker row inline in the running turn,
+   * honest about what happened without pretending it's a fresh user turn.
+   * Live-only: dropped from `toStored` (see below), same treatment as
+   * `plan`. */
+  | { kind: "steer"; text: string };
 
 export type CoderMessage =
   | { role: "user"; text: string; at?: number }
@@ -142,6 +149,21 @@ export function reduce(blocks: CoderBlock[], item: CoderItem): CoderBlock[] {
         kind: "plan",
         content: typeof payload?.content === "string" ? payload.content : "",
         filePath: typeof payload?.file_path === "string" ? payload.file_path : "",
+      },
+    ];
+  }
+
+  if (item.kind === "event" && item.event.type === "SteerInput") {
+    const payload = item.event.payload as unknown as SteerInputPayload | undefined;
+    // Each steer is its own marker row — no merge/dedupe, mirroring
+    // PlanDisplay: a second mid-turn redirect is a distinct event, not a
+    // continuation of the first (and definitely not a `text` block — it
+    // must stay visually and structurally separate from the model's prose).
+    return [
+      ...blocks,
+      {
+        kind: "steer",
+        text: typeof payload?.user_input === "string" ? payload.user_input : "",
       },
     ];
   }
@@ -271,8 +293,11 @@ export type StoredCoderMessage =
  * inherently tied to the live ExitPlanMode question anyway (itself
  * downgraded to "cancelled" below, since a restored chat is read-only): a
  * restored transcript shows that the plan happened via the request block's
- * summary, not the markdown itself. See P2b's tool-detail precedent this
- * mirrors (rich detail is live-only, rebuilt from the journal on reload). */
+ * summary, not the markdown itself. Steer blocks (P4 Task 4) get the same
+ * outright drop — a mid-turn redirect is meaningless outside the live turn
+ * it steered, and the turn's own resulting content already reflects it.
+ * See P2b's tool-detail precedent this mirrors (rich detail is live-only,
+ * rebuilt from the journal on reload). */
 export function toStored(messages: CoderMessage[]): StoredCoderMessage[] {
   return messages.slice(-MAX_MESSAGES).map((m): StoredCoderMessage => {
     if (m.role === "user") {
@@ -291,9 +316,15 @@ export function toStored(messages: CoderMessage[]): StoredCoderMessage[] {
       // connection trouble presented as if it were current.
       blocks: m.blocks
         .filter(
-          (b): b is Exclude<CoderBlock, { kind: "think" } | { kind: "plan" }> =>
+          (
+            b,
+          ): b is Exclude<
+            CoderBlock,
+            { kind: "think" } | { kind: "plan" } | { kind: "steer" }
+          > =>
             b.kind !== "think" &&
             b.kind !== "plan" &&
+            b.kind !== "steer" &&
             !(b.kind === "text" && b.text.startsWith("⚠")),
         )
         .slice(0, MAX_BLOCKS)

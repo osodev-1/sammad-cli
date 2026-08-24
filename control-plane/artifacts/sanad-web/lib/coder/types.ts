@@ -102,6 +102,15 @@ export interface PlanDisplayPayload {
   file_path: string;
 }
 
+/** `SteerInput` event payload (wire, P4a) — the follow-up text a mid-turn
+ * steer injects into the running turn. `steerCoder` (lib/coder/client.ts)
+ * posts the steer; the CLI folds it in and journals this event back onto
+ * the SAME turn (no new turn started) — that's what `reduce()` renders as
+ * a small "steered: <text>" marker row. */
+export interface SteerInputPayload {
+  user_input: string;
+}
+
 /** A shell command the tool ran (or is about to run). */
 export interface ShellDisplayBlock {
   type: "shell";

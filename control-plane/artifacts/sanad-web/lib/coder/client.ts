@@ -3,6 +3,17 @@ import { withSession } from "@/lib/terminal/workspace-model";
 import { streamNdjson } from "@/lib/ndjson";
 import type { CoderItem, CoderTurnState, RespondPayload } from "./types";
 
+/** CoderPanel's phase machine (P1b + P4). Exported so pure routing helpers
+ * below (and their tests) share the exact same type the component uses —
+ * no risk of the two drifting apart. */
+export type CoderPhase =
+  | "idle"
+  | "starting"
+  | "ready"
+  | "streaming"
+  | "busy"
+  | "error";
+
 export interface EnsureResult {
   ok: boolean;
   conversationId?: string;
@@ -142,11 +153,36 @@ export async function ensureConversation(
   return { ok: true, conversationId };
 }
 
+/** Outcome of a `sendCoder` call: either it streamed a turn live, or the
+ * server answered "queued" instead (see `isQueuedSendResponse` below) — the
+ * caller reconciles the latter against the server queue (`/turn`'s `queue`)
+ * rather than treating it as turn content. */
+export type SendResult = { kind: "streamed" } | { kind: "queued"; position?: number };
+
+/**
+ * LOAD-BEARING (P4 Task 2 review finding): a busy `/send` now auto-queues
+ * server-side instead of 409ing — it answers HTTP 202 with a JSON envelope
+ * `{"ok":true,"queued":true,"position":n}`, not an NDJSON stream. Because of
+ * the client/server phase-view race, `sendCoder` (the IDLE send path) CAN
+ * still hit a running turn and get this 202 back. A 202 must NEVER reach
+ * `streamNdjson` — `res.status === 202` is the authoritative signal; a
+ * non-ndjson content-type on any other 2xx is a defense-in-depth backstop
+ * for the same failure mode. Pure so it's testable without a live Response. */
+export function isQueuedSendResponse(status: number, contentType: string | null): boolean {
+  if (status === 202) return true;
+  return status >= 200 && status < 300 && !(contentType ?? "").includes("ndjson");
+}
+
 /**
  * Start one turn, invoking `onItem` per streamed item. The server journals
  * the turn independently of this connection: on a drop, the caller re-attaches
  * with `followCoder` from the last seen seq — nothing is lost.
  * `sendId` makes the POST idempotent (a retry re-attaches, never re-prompts).
+ *
+ * Returns `{kind:"streamed"}` once the stream (or an error item pushed via
+ * `onItem`) has been fully handled, or `{kind:"queued", position}` when the
+ * send landed on a busy runner and got auto-queued instead (see
+ * `isQueuedSendResponse` above) — `onItem` is never called in that case.
  */
 export async function sendCoder(
   cid: string,
@@ -155,7 +191,7 @@ export async function sendCoder(
   sessionId: string | undefined,
   onItem: (i: CoderItem) => void,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<SendResult> {
   let res: Response;
   try {
     res = await fetch(
@@ -173,7 +209,15 @@ export async function sendCoder(
       code: "network",
       message: "Network error — check your connection.",
     });
-    return;
+    return { kind: "streamed" };
+  }
+  if (isQueuedSendResponse(res.status, res.headers.get("content-type"))) {
+    const b = await res.json().catch(() => null);
+    const data = b?.data ?? b;
+    return {
+      kind: "queued",
+      position: typeof data?.position === "number" ? data.position : undefined,
+    };
   }
   if (!res.ok || !res.body) {
     const b = await res.json().catch(() => null);
@@ -183,9 +227,10 @@ export async function sendCoder(
       turnId: b?.error?.turnId,
       message: b?.error?.message ?? "The coding agent could not respond.",
     });
-    return;
+    return { kind: "streamed" };
   }
   await streamNdjson<CoderItem>(res, onItem);
+  return { kind: "streamed" };
 }
 
 /**
@@ -319,6 +364,29 @@ export function needsInterruptedReplay(
   lastInterruptedTurnId: string | undefined,
 ): boolean {
   return turnId !== lastInterruptedTurnId;
+}
+
+/** What the composer's buttons do for a given phase (P4 Task 4) — the
+ * client outbox is retired, so this is the sole place the "steer-now vs
+ * queue vs send" split is decided. While a turn is live (`streaming`, or
+ * `busy` — a turn IS running server-side in both, `busy` just means THIS
+ * client isn't currently attached to it) the primary action redirects the
+ * running turn (`steerCoder`) and a secondary Queue button offers
+ * `queueCoder` instead; otherwise (idle, starting, error) the composer
+ * falls back to starting a fresh turn (`sendCoder`) — the composer itself
+ * only ever disables on `error` (CoderPanel's `composerDisabled`), not
+ * here. Pure so the routing rule is testable without mounting the panel. */
+export interface ComposerButtons {
+  primaryLabel: "Send" | "Steer now";
+  primaryAction: "send" | "steer";
+  showQueue: boolean;
+}
+
+export function composerButtonsForPhase(phase: CoderPhase): ComposerButtons {
+  if (phase === "streaming" || phase === "busy") {
+    return { primaryLabel: "Steer now", primaryAction: "steer", showQueue: true };
+  }
+  return { primaryLabel: "Send", primaryAction: "send", showQueue: false };
 }
 
 /** Resolve a pending approval/question request. Never throws — the panel
