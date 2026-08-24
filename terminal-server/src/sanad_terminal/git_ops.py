@@ -460,21 +460,39 @@ class GitRepo:
             )
             if rc != 0:
                 raise GitError("diff_failed", err.strip() or "diff failed")
+            # -z (NUL-separated, unquoted paths): plain --name-status would
+            # return core.quotePath-escaped paths for filenames with spaces/
+            # unicode/special chars (e.g. `café.txt` -> `"caf\303\251.txt"`),
+            # and these paths feed downstream per-file matching (the /diff
+            # route + UI), so they must round-trip exactly.
             _, namestatus_out, _ = await self._run(
-                "diff", "--name-status", base, target_ref, *path_args, check=False
+                "diff", "--name-status", "-z", base, target_ref, *path_args, check=False
             )
             _, patch_out, _ = await self._run("diff", base, target_ref, *path_args, check=False)
         finally:
             if index_path is not None:
                 index_path.unlink(missing_ok=True)
 
+        # -z name-status is a flat NUL-separated token stream: `<status>\0
+        # <path>\0` normally, but `<status>\0<oldpath>\0<newpath>\0` for a
+        # rename/copy (status "R###"/"C###") — use the NEW path for those.
         name_status = []
-        for line in namestatus_out.splitlines():
-            if not line.strip():
-                continue
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                name_status.append({"status": parts[0], "path": parts[-1]})
+        tokens = [t for t in namestatus_out.split("\0") if t != ""]
+        i = 0
+        while i < len(tokens):
+            status = tokens[i]
+            i += 1
+            if status[:1] in ("R", "C"):
+                if i + 1 >= len(tokens):
+                    break
+                new_path = tokens[i + 1]
+                i += 2
+            else:
+                if i >= len(tokens):
+                    break
+                new_path = tokens[i]
+                i += 1
+            name_status.append({"status": status, "path": new_path})
 
         files_changed = additions = deletions = 0
         for line in numstat_out.splitlines():

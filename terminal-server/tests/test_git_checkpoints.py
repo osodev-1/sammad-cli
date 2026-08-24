@@ -268,6 +268,34 @@ async def test_checkpoint_diff_against_worktree_reflects_uncommitted_edit(repo: 
 
 
 @pytest.mark.asyncio
+async def test_checkpoint_diff_name_status_unescapes_unicode_paths(repo: Path):
+    """`--name-status` must run with `-z`: plain (non -z) output would return
+    the core.quotePath-escaped form (`"caf\\303\\251.txt"`) for a unicode
+    filename, which would break per-file matching in the /diff route + UI
+    that key off `nameStatus[].path`."""
+    head, branch = _seed_repo(repo)
+    git = GitRepo(repo)
+    ref1 = _checkpoint_ref(CID, TURN_1, "pre")
+    sha1 = await git.create_checkpoint(ref1, "cp1")
+    assert sha1 is not None
+
+    (repo / "café.txt").write_text("bonjour\n")
+    ref2 = _checkpoint_ref(CID, TURN_1, "post")
+    sha2 = await git.create_checkpoint(ref2, "cp2", parent=sha1)
+    assert sha2 is not None
+    status_before = _status(repo)
+
+    result = await git.checkpoint_diff(sha1, sha2, max_bytes=1_000_000)
+
+    by_path = {e["path"]: e["status"] for e in result["nameStatus"]}
+    assert by_path == {"café.txt": "A"}
+
+    assert _head(repo) == head
+    assert _branch(repo) == branch
+    assert _status(repo) == status_before
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_diff_rejects_non_hex_refs(repo: Path):
     _seed_repo(repo)
     git = GitRepo(repo)
@@ -316,6 +344,68 @@ async def test_restore_to_restores_modified_recreates_deleted_removes_added(repo
     # index that was never touched by restore_to.
     status_lines = {line for line in _status(repo).splitlines() if line.strip()}
     assert status_lines == {" M a.txt", "?? c.txt"}
+
+
+@pytest.mark.asyncio
+async def test_restore_to_removes_special_char_filenames(repo: Path):
+    """Regression test for the -z fix: `ls-files`/`ls-tree --name-only`
+    without `-z` return a core.quotePath-escaped string for a filename with
+    a space/unicode char, which never matches a real on-disk path, so the
+    removal in restore_to would silently no-op for exactly this case."""
+    head, branch = _seed_repo(repo)  # a.txt=one, b.txt=two, committed
+    git = GitRepo(repo)
+
+    ref = _checkpoint_ref(CID, TURN_1, "pre")
+    target_sha = await git.create_checkpoint(ref, "target")  # tree == a.txt/b.txt only
+    assert target_sha is not None
+
+    # A file with BOTH a space and a unicode character, plus an ordinary
+    # later file — both were added AFTER the target and must be removed.
+    (repo / "a café.txt").write_text("special\n")
+    (repo / "later.txt").write_text("later\n")
+
+    await git.restore_to(target_sha)
+
+    assert not (repo / "a café.txt").exists()
+    assert not (repo / "later.txt").exists()
+    # Target files are untouched.
+    assert (repo / "a.txt").read_text() == "one\n"
+    assert (repo / "b.txt").read_text() == "two\n"
+
+    assert _head(repo) == head
+    assert _branch(repo) == branch
+
+
+@pytest.mark.asyncio
+async def test_restore_to_handles_nested_subdirectory_paths(repo: Path):
+    """Exercises `_remove_worktree_relpath`'s containment join on a NESTED
+    path, and `checkout-index` recreating leading directories that don't
+    exist yet in the worktree."""
+    head, branch = _seed_repo(repo)  # a.txt=one, b.txt=two, committed
+    git = GitRepo(repo)
+
+    nested = repo / "sub" / "dir"
+    nested.mkdir(parents=True)
+    (nested / "file.txt").write_text("nested-one\n")
+
+    ref = _checkpoint_ref(CID, TURN_1, "pre")
+    target_sha = await git.create_checkpoint(ref, "target")  # captures sub/dir/file.txt too
+    assert target_sha is not None
+
+    # (a) modify the nested file after the checkpoint.
+    (nested / "file.txt").write_text("nested-one\nEDITED\n")
+    # (b) add a new nested file after the checkpoint.
+    (nested / "new.txt").write_text("brand new nested\n")
+
+    await git.restore_to(target_sha)
+
+    assert (nested / "file.txt").read_text() == "nested-one\n"  # (a) restored
+    assert not (nested / "new.txt").exists()  # (b) removed — exactly it
+    assert (repo / "a.txt").read_text() == "one\n"  # unrelated files untouched
+    assert (repo / "b.txt").read_text() == "two\n"
+
+    assert _head(repo) == head
+    assert _branch(repo) == branch
 
 
 @pytest.mark.asyncio
