@@ -13,6 +13,8 @@ import {
   toolLabel,
   modeFromEvent,
   needsInterruptedReplay,
+  isQueuedSendResponse,
+  composerButtonsForPhase,
 } from "@/lib/coder/client";
 import type { CoderItem, CoderTurnSummary } from "@/lib/coder/types";
 
@@ -92,6 +94,104 @@ describe("sendCoder stream parsing", () => {
       code: "busy",
       turnId: "t_1",
     });
+  });
+
+  it("returns {kind:'streamed'} after a normal 200 ndjson stream", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(streamOf('{"kind":"end","status":"finished"}\n')),
+    );
+    const result = await sendCoder("c_1", "hi", undefined, "sess1", () => {});
+    expect(result).toEqual({ kind: "streamed" });
+  });
+
+  // LOAD-BEARING (Task 2 review finding): a busy `/send` now auto-queues
+  // server-side and answers 202 with a JSON envelope `{"ok":true,"queued":
+  // true,"position":n}` — NOT an NDJSON stream. Because of the client/
+  // server phase-view race, the IDLE send path can still hit a running
+  // turn and get this 202. A 202 must NEVER be fed to `streamNdjson`: this
+  // proves `onItem` is never called and the JSON envelope is surfaced as a
+  // typed "queued" result instead.
+  it("a 202 queued response is NEVER streamed — onItem is never called, and the envelope surfaces as a queued result", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(202, { ok: true, queued: true, position: 3 }),
+      ),
+    );
+    const items: CoderItem[] = [];
+    const result = await sendCoder("c_1", "hi", "sid_1", "sess1", (i: CoderItem) =>
+      items.push(i),
+    );
+    expect(items).toHaveLength(0);
+    expect(result).toEqual({ kind: "queued", position: 3 });
+  });
+
+  it("a 202 queued response with a double-enveloped body {data:{...}} still maps to a queued result", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(202, { data: { ok: true, queued: true, position: 1 } }),
+      ),
+    );
+    const items: CoderItem[] = [];
+    const result = await sendCoder("c_1", "hi", "sid_1", "sess1", (i: CoderItem) =>
+      items.push(i),
+    );
+    expect(items).toHaveLength(0);
+    expect(result).toEqual({ kind: "queued", position: 1 });
+  });
+});
+
+describe("isQueuedSendResponse (the 202-safety guard, pure)", () => {
+  it("a 202 status is always queued, regardless of content-type", () => {
+    expect(isQueuedSendResponse(202, "application/json")).toBe(true);
+    expect(isQueuedSendResponse(202, null)).toBe(true);
+  });
+
+  it("a normal 200 ndjson stream is NOT queued", () => {
+    expect(isQueuedSendResponse(200, "application/x-ndjson")).toBe(false);
+  });
+
+  it("a 200/2xx response with a non-ndjson content-type is treated as queued (defense in depth)", () => {
+    expect(isQueuedSendResponse(200, "application/json")).toBe(true);
+    expect(isQueuedSendResponse(200, null)).toBe(true);
+  });
+
+  it("a non-2xx status (error responses) is never treated as queued", () => {
+    expect(isQueuedSendResponse(409, "application/json")).toBe(false);
+    expect(isQueuedSendResponse(500, null)).toBe(false);
+  });
+});
+
+describe("composerButtonsForPhase (the composer's steer-vs-send-vs-queue routing, pure)", () => {
+  it("idle (ready) routes to Send, no Queue button", () => {
+    expect(composerButtonsForPhase("ready")).toEqual({
+      primaryLabel: "Send",
+      primaryAction: "send",
+      showQueue: false,
+    });
+  });
+
+  it("a streaming turn routes the primary action to Steer now, with Queue offered alongside", () => {
+    expect(composerButtonsForPhase("streaming")).toEqual({
+      primaryLabel: "Steer now",
+      primaryAction: "steer",
+      showQueue: true,
+    });
+  });
+
+  it("busy (a turn is running elsewhere) routes the same as streaming — the turn is still live", () => {
+    expect(composerButtonsForPhase("busy")).toEqual({
+      primaryLabel: "Steer now",
+      primaryAction: "steer",
+      showQueue: true,
+    });
+  });
+
+  it("starting and error both fall back to the idle Send routing (the composer itself disables only on error)", () => {
+    expect(composerButtonsForPhase("starting").primaryAction).toBe("send");
+    expect(composerButtonsForPhase("error").primaryAction).toBe("send");
   });
 });
 

@@ -365,6 +365,40 @@ describe("coder transcript fold (reduce)", () => {
       { kind: "plan", content: "# Plan v2", filePath: "/tmp/plan.md" },
     ]);
   });
+
+  const steerInputEvent = (userInput: string): CoderItem => ({
+    kind: "event",
+    event: { type: "SteerInput", payload: { user_input: userInput } },
+  });
+
+  it("a SteerInput event folds into a `steer` block carrying the follow-up text", () => {
+    const blocks = reduce([], steerInputEvent("actually, use pnpm"));
+    expect(blocks).toEqual([{ kind: "steer", text: "actually, use pnpm" }]);
+  });
+
+  it("a SteerInput event mid-turn appends after existing content, not merged into a text block", () => {
+    let blocks: CoderBlock[] = reduce([], {
+      kind: "event",
+      event: { type: "TextPart", payload: { text: "Working on it…" } },
+    });
+    blocks = reduce(blocks, steerInputEvent("wait, stop"));
+    expect(blocks.map((b) => b.kind)).toEqual(["text", "steer"]);
+    expect(blocks[1]).toEqual({ kind: "steer", text: "wait, stop" });
+  });
+
+  it("two SteerInput events each append their own block — no dedupe/merge (mirrors PlanDisplay)", () => {
+    let blocks: CoderBlock[] = reduce([], steerInputEvent("first redirect"));
+    blocks = reduce(blocks, steerInputEvent("second redirect"));
+    expect(blocks).toEqual([
+      { kind: "steer", text: "first redirect" },
+      { kind: "steer", text: "second redirect" },
+    ]);
+  });
+
+  it("a SteerInput event with a malformed payload folds to an empty-text steer block, no crash", () => {
+    const blocks = reduce([], { kind: "event", event: { type: "SteerInput", payload: {} } });
+    expect(blocks).toEqual([{ kind: "steer", text: "" }]);
+  });
 });
 
 describe("coder transcript persistence (toStored / fromStored)", () => {
@@ -630,6 +664,32 @@ describe("coder transcript persistence (toStored / fromStored)", () => {
         role: "assistant",
         blocks: [{ kind: "plan", content: "# Plan", filePath: "/tmp/plan.md" }],
       },
+    ];
+    const stored = toStored(live);
+    expect(stored[0]).toEqual({ role: "assistant", blocks: [] });
+  });
+
+  it("toStored drops `steer` blocks entirely — live-only marker, same treatment as `plan`; surviving blocks still validate", () => {
+    const live: CoderMessage[] = [
+      {
+        role: "assistant",
+        blocks: [
+          { kind: "steer", text: "actually, use pnpm" },
+          { kind: "text", text: "Switching to pnpm." },
+        ],
+      },
+    ];
+    const stored = toStored(live);
+    const blocks = stored[0].role === "assistant" ? stored[0].blocks : [];
+    expect(blocks.map((b) => b.kind)).toEqual(["text"]);
+    for (const b of blocks) {
+      expect(coderBlockState.safeParse(b).success).toBe(true);
+    }
+  });
+
+  it("a message consisting ONLY of a steer block stores as an assistant message with zero blocks (not dropped/crashed)", () => {
+    const live: CoderMessage[] = [
+      { role: "assistant", blocks: [{ kind: "steer", text: "wait, stop" }] },
     ];
     const stored = toStored(live);
     expect(stored[0]).toEqual({ role: "assistant", blocks: [] });
