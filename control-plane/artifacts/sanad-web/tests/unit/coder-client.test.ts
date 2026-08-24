@@ -141,6 +141,31 @@ describe("sendCoder stream parsing", () => {
     expect(items).toHaveLength(0);
     expect(result).toEqual({ kind: "queued", position: 1 });
   });
+
+  // Task 4 review finding (Critical #1): the Next.js proxy (`app/api/coder/
+  // conversations/[cid]/send/route.ts`) does NOT preserve the upstream 202 —
+  // it re-wraps a queued response through `relayJson`, which answers
+  // `200 + application/json` with the envelope double-wrapped under `data`
+  // (see `coder-send-route.test.ts` for the route-level half of this proof).
+  // This is the REALISTIC shape `sendCoder` actually receives in production;
+  // without `isQueuedSendResponse`'s non-ndjson-content-type fallback this
+  // would silently fall through to `streamNdjson` (status 200 looks like a
+  // normal stream at a glance) — proving the fallback branch, not just the
+  // `status===202` fast path, is load-bearing.
+  it("the POST-FIX proxy shape (200 + application/json, {data:{...}} envelope) is still caught as queued, never streamed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, { data: { ok: true, queued: true, position: 4 } }),
+      ),
+    );
+    const items: CoderItem[] = [];
+    const result = await sendCoder("c_1", "hi", "sid_1", "sess1", (i: CoderItem) =>
+      items.push(i),
+    );
+    expect(items).toHaveLength(0);
+    expect(result).toEqual({ kind: "queued", position: 4 });
+  });
 });
 
 describe("isQueuedSendResponse (the 202-safety guard, pure)", () => {
