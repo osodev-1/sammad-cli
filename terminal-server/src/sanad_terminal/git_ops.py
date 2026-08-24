@@ -14,10 +14,40 @@ from porcelain formats chosen for stability.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import re
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# The checkpoint ref namespace lives entirely OUTSIDE refs/heads — it is
+# never checked out, never merged, and never visible to `git branch`.
+_CHECKPOINTS_NS = "refs/sanad/checkpoints/"
+
+# Mirrors CONVERSATION_ID_RE (coder_runner.py) and the `t_<12 hex>` shape
+# minted for turn ids (wire_runner.py). Duplicated here rather than imported
+# so this low-level primitive stays free of a dependency on the runner
+# layer; both must be kept in sync if either shape ever changes.
+_CID_RE = re.compile(r"^c_[a-f0-9]{12}$")
+_TURN_ID_RE = re.compile(r"^t_[a-f0-9]{12}$")
+_CHECKPOINT_KIND_RE = re.compile(r"^(pre|post|safety-\d+)$")
+
+# The full `<cid>/<turnId>-<kind>` shape a checkpoint ref suffix must match —
+# validated again inside create_checkpoint() itself (defense in depth: a
+# caller could pass a ref string that never went through _checkpoint_ref()).
+_CHECKPOINT_SUFFIX_RE = re.compile(r"^c_[a-f0-9]{12}/t_[a-f0-9]{12}-(pre|post|safety-\d+)$")
+_CHECKPOINT_SUFFIX_PART_RE = re.compile(r"^(?P<turn_id>t_[a-f0-9]{12})-(?:pre|post|safety-\d+)$")
+
+# commit-tree needs an author + committer identity, but the scratch env
+# carries no git config (never inherits ambient config) — set one directly.
+_CHECKPOINT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "sanad",
+    "GIT_AUTHOR_EMAIL": "checkpoints@sanadcode.com",
+    "GIT_COMMITTER_NAME": "sanad",
+    "GIT_COMMITTER_EMAIL": "checkpoints@sanadcode.com",
+}
 
 
 class GitError(Exception):
@@ -72,7 +102,9 @@ class GitRepo:
         self._gid = gid
         self._home = home
 
-    async def _run(self, *args: str, check: bool = True) -> tuple[int, str, str]:
+    async def _run(
+        self, *args: str, check: bool = True, extra_env: dict[str, str] | None = None
+    ) -> tuple[int, str, str]:
         base = [
             "git",
             "-C",
@@ -85,6 +117,11 @@ class GitRepo:
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": str(self._home) if self._home else str(self._root),
         }
+        if extra_env:
+            # e.g. GIT_INDEX_FILE (throwaway-index discipline) or the
+            # commit-tree author/committer identity — layered on top of the
+            # base env, never replacing it.
+            env.update(extra_env)
         proc = await asyncio.create_subprocess_exec(
             *base,
             *args,
@@ -298,8 +335,7 @@ class GitRepo:
         """One commit's unified diff (with subject header), optionally scoped
         to a path. The ref is validated to a short/full hex hash — never an
         arbitrary revision expression."""
-        if not all(c in "0123456789abcdef" for c in ref.lower()) or not (4 <= len(ref) <= 40):
-            raise GitError("invalid_ref", "not a commit hash")
+        _validate_hex_ref(ref)
         args = ["show", "--stat=72", "--patch", "--format=%h %an %aI%n%s%n", ref]
         if path:
             args += ["--", path]
@@ -317,6 +353,237 @@ class GitRepo:
     async def discard_all(self) -> None:
         await self._run("reset", "--hard", check=False)
         await self._run("clean", "-fd", check=False)
+
+    # -- Checkpoints -------------------------------------------------------
+    #
+    # Whole-workspace shadow commits under refs/sanad/checkpoints/*, kept
+    # OUTSIDE refs/heads so they never appear as branches, are never checked
+    # out, and never touch HEAD or the real .git/index. Every tree/commit/
+    # restore op below runs against a throwaway GIT_INDEX_FILE (never the
+    # real index) and is always cleaned up in a `finally`.
+
+    def _new_scratch_index(self) -> Path:
+        """A fresh, empty temp file for `GIT_INDEX_FILE` — every checkpoint
+        tree/commit/restore op below runs against one of these, never the
+        real `.git/index`. Created via mkstemp (atomic, race-free) under the
+        CURRENT (unprivileged-split-agentd, i.e. root in task mode) process
+        identity, then chowned to the agent uid/gid so the setuid'd git
+        subprocess can still read/write it. Callers MUST unlink it in a
+        `finally` — cleanup always succeeds: with uid split, agentd runs as
+        root (bypasses ownership/sticky-bit checks); without uid split, the
+        file is never chowned away from the caller's own uid."""
+        fd, raw = tempfile.mkstemp(prefix="sanad-checkpoint-idx-")
+        os.close(fd)
+        if self._uid is not None:
+            os.chown(raw, self._uid, self._gid if self._gid is not None else -1)
+        return Path(raw)
+
+    def _remove_worktree_relpath(self, rel: str) -> None:
+        """Delete one path relative to `root` — used only for paths `git`
+        itself reported (via `ls-files` on a throwaway index), never raw
+        user input. Still refuses to leave root, as defense in depth."""
+        if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+            return
+        root = self._root.resolve()
+        target = (root / rel).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            return
+        with contextlib.suppress(FileNotFoundError, IsADirectoryError):
+            target.unlink()
+
+    async def create_checkpoint(
+        self, ref: str, message: str, *, parent: str | None = None
+    ) -> str | None:
+        """Snapshot the CURRENT worktree (tracked + untracked, via a
+        throwaway index) into a commit under refs/sanad/checkpoints/<ref>,
+        chained onto `parent` if given. Returns the new commit SHA, or None
+        (creating nothing) when `parent` is given and the tree is unchanged
+        since it — HEAD, the current branch, and the real index are never
+        touched."""
+        if not _CHECKPOINT_SUFFIX_RE.fullmatch(ref):
+            raise GitError("invalid_ref", "invalid checkpoint ref")
+        if parent is not None:
+            _validate_hex_ref(parent, max_len=64)
+
+        index_path = self._new_scratch_index()
+        try:
+            idx_env = {"GIT_INDEX_FILE": str(index_path)}
+            await self._run("read-tree", "--empty", extra_env=idx_env)
+            await self._run("add", "-A", extra_env=idx_env)
+            _, tree_out, _ = await self._run("write-tree", extra_env=idx_env)
+            tree = tree_out.strip()
+
+            if parent is not None:
+                _, parent_tree_out, _ = await self._run("rev-parse", parent + "^{tree}")
+                if parent_tree_out.strip() == tree:
+                    return None  # skip-when-clean: nothing changed since parent
+
+            commit_args = ["commit-tree", tree]
+            if parent is not None:
+                commit_args += ["-p", parent]
+            commit_args += ["-m", message]
+            _, sha_out, _ = await self._run(*commit_args, extra_env=_CHECKPOINT_IDENTITY)
+            sha = sha_out.strip()
+
+            await self._run("update-ref", _CHECKPOINTS_NS + ref, sha)
+            return sha
+        finally:
+            index_path.unlink(missing_ok=True)
+
+    async def checkpoint_diff(
+        self, base: str, target: str | None, *, path: str | None = None, max_bytes: int
+    ) -> dict:
+        """Diff two checkpoints, or one checkpoint against the current
+        worktree (`target=None`) — read-only, but the worktree-snapshot step
+        still goes through a throwaway index so the real one is untouched."""
+        _validate_hex_ref(base, max_len=64)
+        if target is not None:
+            _validate_hex_ref(target, max_len=64)
+
+        index_path: Path | None = None
+        try:
+            if target is None:
+                index_path = self._new_scratch_index()
+                idx_env = {"GIT_INDEX_FILE": str(index_path)}
+                await self._run("read-tree", "--empty", extra_env=idx_env)
+                await self._run("add", "-A", extra_env=idx_env)
+                _, tree_out, _ = await self._run("write-tree", extra_env=idx_env)
+                target_ref = tree_out.strip()
+            else:
+                target_ref = target
+
+            path_args = ["--", path] if path else []
+            rc, numstat_out, err = await self._run(
+                "diff", "--numstat", base, target_ref, *path_args, check=False
+            )
+            if rc != 0:
+                raise GitError("diff_failed", err.strip() or "diff failed")
+            _, namestatus_out, _ = await self._run(
+                "diff", "--name-status", base, target_ref, *path_args, check=False
+            )
+            _, patch_out, _ = await self._run("diff", base, target_ref, *path_args, check=False)
+        finally:
+            if index_path is not None:
+                index_path.unlink(missing_ok=True)
+
+        name_status = []
+        for line in namestatus_out.splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                name_status.append({"status": parts[0], "path": parts[-1]})
+
+        files_changed = additions = deletions = 0
+        for line in numstat_out.splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\t", 2)
+            if len(parts) < 3:
+                continue
+            files_changed += 1
+            if parts[0].isdigit():
+                additions += int(parts[0])
+            if parts[1].isdigit():
+                deletions += int(parts[1])
+
+        patch_bytes = patch_out.encode("utf-8")
+        truncated = len(patch_bytes) > max_bytes
+        patch_text = patch_bytes[:max_bytes].decode("utf-8", "ignore") if truncated else patch_out
+
+        return {
+            "nameStatus": name_status,
+            "patch": patch_text,
+            "truncated": truncated,
+            "filesChanged": files_changed,
+            "additions": additions,
+            "deletions": deletions,
+        }
+
+    async def restore_to(self, tree_ish: str) -> None:
+        """Restore the WORKTREE to `tree_ish` — via a throwaway index, never
+        the real one or HEAD. Two phases: (1) checkout every file `tree_ish`
+        contains (overwrites modified files, recreates deleted ones); (2)
+        delete every file present in the worktree now but absent from
+        `tree_ish` (a file a later turn added). The caller (P5 Task 3) holds
+        the workspace lock and has already taken a safety checkpoint."""
+        _validate_hex_ref(tree_ish, max_len=64)
+
+        checkout_index = self._new_scratch_index()
+        scan_index = self._new_scratch_index()
+        try:
+            checkout_env = {"GIT_INDEX_FILE": str(checkout_index)}
+            await self._run("read-tree", tree_ish, extra_env=checkout_env)
+            await self._run("checkout-index", "-a", "-f", extra_env=checkout_env)
+
+            # A SECOND throwaway index — a fresh `add -A` snapshot of the
+            # worktree AFTER the checkout above — captures every path
+            # present now, including anything a later turn added that
+            # `checkout-index` (which only writes what's IN the tree) would
+            # otherwise leave behind.
+            scan_env = {"GIT_INDEX_FILE": str(scan_index)}
+            await self._run("read-tree", "--empty", extra_env=scan_env)
+            await self._run("add", "-A", extra_env=scan_env)
+            # -z (NUL-separated, unquoted paths): this feeds a destructive
+            # os.remove below, so a filename with a space/unicode/special
+            # char must round-trip exactly, not come back core.quotePath-
+            # escaped (`status()` uses -z for the same reason).
+            _, now_out, _ = await self._run("ls-files", "-z", extra_env=scan_env)
+            now_paths = {p for p in now_out.split("\0") if p}
+
+            _, target_out, _ = await self._run("ls-tree", "-r", "-z", "--name-only", tree_ish)
+            target_paths = {p for p in target_out.split("\0") if p}
+
+            for rel in now_paths - target_paths:
+                self._remove_worktree_relpath(rel)
+        finally:
+            checkout_index.unlink(missing_ok=True)
+            scan_index.unlink(missing_ok=True)
+
+    async def prune_checkpoints(self, cid: str, keep_turn_ids: list[str]) -> None:
+        """Delete refs/sanad/checkpoints/<cid>/* refs whose turnId is not in
+        `keep_turn_ids` (aligned with journal retention). Never touches
+        refs outside that one conversation's checkpoint namespace."""
+        if not _CID_RE.fullmatch(cid):
+            raise GitError("invalid_ref", "invalid conversation id")
+        keep = set(keep_turn_ids)
+        prefix = f"{_CHECKPOINTS_NS}{cid}/"
+        rc, out, _ = await self._run("for-each-ref", "--format=%(refname)", prefix, check=False)
+        if rc != 0:
+            return
+        for line in out.splitlines():
+            name = line.strip()
+            if not name.startswith(prefix):
+                continue
+            suffix = name[len(prefix) :]
+            m = _CHECKPOINT_SUFFIX_PART_RE.match(suffix)
+            if m is None or m.group("turn_id") in keep:
+                continue
+            await self._run("update-ref", "-d", name, check=False)
+
+
+def _validate_hex_ref(value: str, *, max_len: int = 40) -> None:
+    """A ref must be a bare hex commit/tree hash — never an arbitrary
+    revision expression (`main`, `HEAD~1`, ...), which could otherwise be
+    used to smuggle in git command options or walk outside the intended ref."""
+    if not all(c in "0123456789abcdef" for c in value.lower()) or not (4 <= len(value) <= max_len):
+        raise GitError("invalid_ref", "not a commit hash")
+
+
+def _checkpoint_ref(cid: str, turn_id: str, kind: str) -> str:
+    """`<cid>/<turnId>-<kind>` — the ref suffix passed to
+    `GitRepo.create_checkpoint`'s `ref` argument (which prepends
+    `refs/sanad/checkpoints/`). Validates each component so a ref path can
+    never be injected. `kind` is `pre`, `post`, or `safety-N`."""
+    if not _CID_RE.fullmatch(cid):
+        raise GitError("invalid_ref", "invalid conversation id")
+    if not _TURN_ID_RE.fullmatch(turn_id):
+        raise GitError("invalid_ref", "invalid turn id")
+    if not _CHECKPOINT_KIND_RE.fullmatch(kind):
+        raise GitError("invalid_ref", "invalid checkpoint kind")
+    return f"{cid}/{turn_id}-{kind}"
 
 
 def _validate_branch(name: str) -> None:
