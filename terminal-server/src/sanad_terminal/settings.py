@@ -62,6 +62,10 @@ class TerminalSettings:
     # appending that turn and journals one `journal_overflow` error item).
     coder_journal_turns_keep: int = 20
     coder_journal_max_bytes: int = 20 * 1024 * 1024
+    # Per-conversation server-side follow-up queue (P4b) depth cap — RAM-only
+    # and otherwise unbounded, so an authenticated `POST /send {queue:true}`
+    # spam loop must be capped like every other coder_* resource above.
+    coder_max_queue_depth: int = 50
     # HMAC key for the blueprint trust store — agentd-env only, NEVER in the
     # child env. Empty = legacy unsigned store (local/dev/railway).
     trust_store_key: str = ""
@@ -161,6 +165,7 @@ class TerminalSettings:
             coder_max_conversations=int(e.get("CODER_MAX_CONVERSATIONS", "3")),
             coder_journal_turns_keep=int(e.get("CODER_JOURNAL_TURNS_KEEP", "20")),
             coder_journal_max_bytes=int(e.get("CODER_JOURNAL_MAX_BYTES", str(20 * 1024 * 1024))),
+            coder_max_queue_depth=int(e.get("CODER_MAX_QUEUE_DEPTH", "50")),
             trust_store_key=e.get("TRUST_STORE_KEY", ""),
             architect_max_turn_seconds=float(e.get("ARCHITECT_MAX_TURN_SECONDS", "1800")),
             worker_enabled=e.get("WORKER_ENABLED", "") == "1",

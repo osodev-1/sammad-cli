@@ -403,12 +403,25 @@ class WireRunner:
         await self.cancel()
 
     def _append_sync(self, state: TurnState, item: dict[str, Any]) -> dict[str, Any]:
-        """Synchronous twin of `_append`, for the one context with no
-        running event loop: construction-time journal reconstruction (P3
-        Task 2's `CoderRunner.__init__`). Stamps + appends to memory and
-        writes through the journal sink exactly like `_append`, but skips
-        the `_journal_cond` notify — safe here because nothing can be
-        `follow()`ing a turn that doesn't exist outside of `__init__` yet."""
+        """Synchronous twin of `_append`. Stamps + appends to memory and
+        writes through the journal sink exactly like `_append`, but always
+        skips the `_journal_cond` notify. Two call sites, both safe to skip
+        it, for different reasons:
+
+        - Construction-time journal reconstruction (P3 Task 2's
+          `CoderRunner.__init__`) — the ORIGINAL reason this method exists.
+          There is no running event loop at all here, so `_append`'s `async
+          with self._journal_cond` couldn't be awaited even if it wanted to;
+          safe because nothing can be `follow()`ing a turn that doesn't
+          exist outside of `__init__` yet.
+        - `CoderRunner.enqueue` (P4b), added later — called at RUNTIME,
+          under a live event loop, to journal a `{"kind":"queued", ...}`
+          marker onto the CURRENT turn as followers may already be
+          streaming it. Still safe to skip the notify here: queue depth is
+          read through `/turn` (`queue_summary`), never delivered over
+          `follow()`'s streamed items, so no waiter is blocked on
+          `_journal_cond` for this particular item to wake.
+        """
         stamped = {"seq": len(state.items), **item}
         state.items.append(stamped)
         if self._journal_sink is not None:

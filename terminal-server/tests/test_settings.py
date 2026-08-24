@@ -136,3 +136,9 @@ def test_coder_journal_caps_parse_from_env(base_env):
     )
     assert s.coder_journal_turns_keep == 5
     assert s.coder_journal_max_bytes == 1048576
+
+
+def test_coder_max_queue_depth_default_and_parses(base_env):
+    assert TerminalSettings.load(env=base_env).coder_max_queue_depth == 50
+    s = TerminalSettings.load(env={**base_env, "CODER_MAX_QUEUE_DEPTH": "5"})
+    assert s.coder_max_queue_depth == 5

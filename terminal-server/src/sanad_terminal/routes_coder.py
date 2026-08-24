@@ -145,6 +145,7 @@ async def _spawn(
         journal_dir=root.parent / "agentd" / "coder" / cid,
         journal_turns_keep=settings.coder_journal_turns_keep,
         journal_max_bytes=settings.coder_journal_max_bytes,
+        max_queue_depth=settings.coder_max_queue_depth,
     )
     try:
         await runner.start()
@@ -266,7 +267,14 @@ async def send(_: Gated, root: Root, cid: str, body: SendBody) -> StreamingRespo
         # queue's own idempotency key; synthesize one when the caller
         # didn't send one (mirrors `new_conversation_id`'s minting style).
         send_id = body.sendId or f"q_{uuid.uuid4().hex[:12]}"
-        position = runner.enqueue(send_id, body.input)
+        try:
+            position = runner.enqueue(send_id, body.input)
+        except WireRunnerError as exc:
+            # queue_full (P4 final-review, Important C) is the only error
+            # `enqueue` raises today — 409, mirroring `conversation_limit`'s
+            # sibling "at capacity" envelope (this codebase has no
+            # established 429 usage to match instead).
+            return _err(409, exc.code, exc.message)
         if not runner.busy:
             # Queued onto an idle runner: nothing will ever end a turn to
             # trigger the drain hook, so kick it off directly here — the
