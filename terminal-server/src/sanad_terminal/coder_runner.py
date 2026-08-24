@@ -221,36 +221,60 @@ class CoderRunner(WireRunner):
         check-then-start here can therefore never let two concurrent drains
         double-pop the same queue entry.
 
-        `start_turn` CAN still raise after the `popleft()` below — most
-        plausibly `_send`'s pipe write failing while `self.alive` was still
-        True (the subprocess died in the narrow gap between this method's
-        alive-check and the write). Left unguarded, that would both strand
-        the popped item (gone from `self._queue`, never actually started)
-        and propagate a raw `WireRunnerError` out of this method — which
-        matters because this is called from TWO places: `_consume`'s
-        `finally` (fire-and-forget; an unhandled exception there just leaks
-        as an unretrieved task exception) and `/send`'s idle-drain path in
-        routes_coder.py (a live request context, where an unhandled
-        exception becomes an opaque 500 instead of the sibling
-        `{"error":{"code","message"}}` envelope every other failure here
-        uses). Guarding HERE, once, fixes both call sites identically: put
-        the item back at the head of the queue (so it retries on the next
-        drain — turn-end, or a later idle `/send` — instead of vanishing)
-        and swallow the error after logging, so neither caller ever sees an
-        exception propagate out of this method.
+        `start_turn` CAN still raise after the `popleft()` below. NOT via
+        its own `WireRunnerError("not_started"/"busy", ...)` checks — those
+        are actually UNREACHABLE from here: no `await` sits between this
+        method's own alive/busy gate just above and `start_turn`'s
+        identical checks, so nothing can flip `alive`/`busy` in the gap
+        (same single-threaded argument as the concurrency note above). The
+        REALISTIC failure is a raw `OSError` (`BrokenPipeError` /
+        `ConnectionResetError`) out of `_send`'s `proc.stdin.drain()`: the
+        subprocess can die in the gap between this method's alive-check and
+        `start_turn`'s actual pipe write, and `start_turn`'s own `except
+        Exception: state.status = "failed"; ...; raise` (wire_runner.py)
+        re-raises whatever it caught UNCHANGED — never wrapped into a
+        `WireRunnerError`. `except WireRunnerError` alone does NOT catch an
+        `OSError`, so it would leave both hazards live in exactly the
+        realistic case. Left unguarded, that would both strand the popped
+        item (gone from `self._queue`, never actually started) and
+        propagate the raw exception out of this method — which matters
+        because this is called from TWO places: `_consume`'s `finally`
+        (fire-and-forget; an unhandled exception there just leaks as an
+        unretrieved task exception) and `/send`'s idle-drain path in
+        routes_coder.py (a live request context with no surrounding
+        try/except and no generic exception handler registered — an
+        unhandled exception there becomes an opaque 500 instead of the
+        sibling `{"error":{"code","message"}}` envelope every other failure
+        here uses). Guarding HERE, once, fixes both call sites identically:
+        put the item back at the head of the queue (so it retries on the
+        next drain — turn-end, or a later idle `/send` — instead of
+        vanishing) and swallow the error after logging, so neither caller
+        ever sees an exception propagate out of this method. Never retries
+        inline (no loop) — the next natural drain (turn-end, or a later
+        idle `/send`) picks it up.
+
+        Catches `Exception` broadly rather than enumerating
+        `WireRunnerError`/`OSError`/etc. individually: this hook's contract
+        is "never crash the turn-end / idle-drain path", and a best-effort
+        fire-and-forget drain that only guards against today's known
+        failure modes would silently regress the instant `start_turn`
+        grows a new one. `Exception` still excludes `asyncio.CancelledError`
+        (a `BaseException` subclass, not `Exception`, since Python 3.8), so
+        genuine task cancellation is unaffected.
         """
         if not self._queue or not self.alive or self.busy:
             return
         item = self._queue.popleft()
         try:
             await self.start_turn(item["input"], send_id=item["sendId"])
-        except WireRunnerError as exc:
+        except Exception as exc:
             self._queue.appendleft(item)
             logger.warning(
-                "coder queue drain failed for conversation {} (sendId={}): {}",
+                "coder queue drain failed for conversation {} (sendId={}): {}: {}",
                 self.conversation_id,
                 item["sendId"],
-                exc.message,
+                type(exc).__name__,
+                exc,
             )
 
     # -- request bridge (P1) --------------------------------------------------
