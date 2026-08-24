@@ -217,11 +217,17 @@ export default function CoderPanel({
   /* Open (or create) the conversation, then catch the panel up on whatever
      the server already knows: a turn still running (resume it live) or
      requests still awaiting an answer (fold them in as an answerable
-     message) — so a reload never shows a stale, silent chat. Returns
-     whether the conversation is now open (`cidRef` valid) — runTurn's
-     turn_failed/not_started self-heal (P4 Task 4) uses this to decide
-     whether it's safe to resend, instead of the retired client outbox. */
-  const begin = useCallback(async (): Promise<boolean> => {
+     message) — so a reload never shows a stale, silent chat. Returns which
+     of the three outcomes happened — runTurn's turn_failed/not_started
+     self-heal (P4 Task 4) uses this to decide whether it's safe to resend
+     the ORIGINAL failed text, instead of the retired client outbox:
+     "failed" (never opened — cidRef still invalid) or "resumed" (opened,
+     AND already resumed some running turn found on it — resending on top
+     would risk asking the same thing twice, since that running turn may
+     well BE the original send landing server-side despite our client
+     seeing turn_failed/not_started) both skip the resend; only "ready"
+     (opened, genuinely idle) resends. */
+  const begin = useCallback(async (): Promise<"failed" | "resumed" | "ready"> => {
     setPhase("starting");
     setStartError(null);
     setStartErrorCode(null);
@@ -231,7 +237,7 @@ export default function CoderPanel({
       setStartError(res.error ?? "Could not start the coding agent.");
       setStartErrorCode(res.errorCode ?? null);
       startedRef.current = false; // allow retry
-      return false;
+      return "failed";
     }
     const newCid = res.conversationId;
     cidRef.current = newCid;
@@ -260,7 +266,7 @@ export default function CoderPanel({
           at: state.turn.startedAt ? state.turn.startedAt * 1000 : Date.now(),
         },
       );
-      return true;
+      return "resumed";
     }
     if (state?.turn?.status === "interrupted") {
       // Restart-recovery (P3 Task 2/3): the server reconciled a crash-mid-turn
@@ -283,7 +289,7 @@ export default function CoderPanel({
         // `initial` transcript already carries it; replaying again would
         // append a DUPLICATE turn. Stand pat.
         setPhase("ready");
-        return true;
+        return "ready";
       }
       const at = turnMeta.startedAt ? turnMeta.startedAt * 1000 : Date.now();
       let blocks: CoderBlock[] = [];
@@ -298,7 +304,7 @@ export default function CoderPanel({
       lastInterruptedTurnIdRef.current = turnMeta.turnId;
       onLastInterruptedTurnIdRef.current?.(turnMeta.turnId);
       setPhase("ready");
-      return true;
+      return "ready";
     }
     if (state?.pendingRequests && state.pendingRequests.length > 0) {
       const blocks = state.pendingRequests.reduce<CoderBlock[]>(
@@ -315,7 +321,7 @@ export default function CoderPanel({
       setMessages((m) => [...m, { role: "assistant", blocks, at: Date.now() }]);
     }
     setPhase("ready");
-    return true;
+    return "ready";
   }, [sessionId]);
 
   /* Start on first reveal — opening the tab is intent to use it (like a
@@ -585,8 +591,14 @@ export default function CoderPanel({
         await settleAfterTurn();
       } else if (flags.failed && !isRetry) {
         setMessages((prev) => prev.slice(0, -2));
-        const reopened = await begin(); // re-mints a ticket, re-opens (or re-creates) the conversation
-        if (reopened) {
+        const outcome = await begin(); // re-mints a ticket, re-opens (or re-creates) the conversation
+        // Only resend when begin() opened a genuinely IDLE conversation.
+        // "resumed" means begin() itself already found and fully replayed a
+        // running turn on the reopened conversation — that may well be this
+        // exact send having landed server-side despite our client seeing
+        // turn_failed/not_started; resending on top would risk asking the
+        // same thing twice. "failed" means it never opened at all.
+        if (outcome === "ready") {
           await runTurnRef.current?.(text, true, sendId);
         }
       } else {
@@ -731,10 +743,23 @@ export default function CoderPanel({
     );
     void (async () => {
       const removed = await dequeueCoder(cid, old.sendId, sessionId);
-      const added = removed.ok ? await queueCoder(cid, text, newSendId, sessionId) : null;
-      if (removed.ok && added?.ok) return;
-      // Either half of the re-enqueue didn't land — reconcile against the
-      // server rather than trust our optimistic edit.
+      // Gate on `removed.removed`, NOT `removed.ok`: an HTTP success with
+      // `removed:false` means the old item already drained into a running
+      // turn between render and commit — it's no longer "not yet started"
+      // and dequeue is a deliberate no-op for it. Queuing the edited text
+      // on top would run BOTH the original and the edit (the original is
+      // already executing server-side; the edit would then also queue) —
+      // instead, drop the edit and reconcile against the server, same as
+      // any other failed half of this two-step.
+      if (!removed.removed) {
+        const state = await fetchCoderTurn(cid, sessionId);
+        setQueue(state?.queue ?? []);
+        return;
+      }
+      const added = await queueCoder(cid, text, newSendId, sessionId);
+      if (added.ok) return;
+      // The re-enqueue itself didn't land — reconcile against the server
+      // rather than trust our optimistic edit.
       const state = await fetchCoderTurn(cid, sessionId);
       setQueue(state?.queue ?? []);
     })();
@@ -1130,7 +1155,14 @@ export default function CoderPanel({
             {reconnecting
               ? "Connection lost — the coding agent keeps working; reconnecting…"
               : phase === "busy"
-                ? "The coding agent is finishing an earlier turn — your message is queued."
+                ? // The only path that still reaches "busy" (P4 Task 4 review,
+                  // Minor #5) is settleAfterTurn()'s fetchCoderTurn call
+                  // coming back null — a transient unreachable workspace
+                  // while reconciling, not "finishing an earlier turn" (that
+                  // case now self-heals immediately via settleAfterTurn's
+                  // attach-if-running instead of parking here). The 4s
+                  // busy-retry timer below is what actually retries.
+                  "Couldn't reach the workspace — retrying shortly…"
                 : phase === "starting"
                   ? "Starting the coding agent…"
                   : hasPendingRequest
