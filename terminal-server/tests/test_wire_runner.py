@@ -237,6 +237,57 @@ async def test_coder_bridges_question_requests(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_coder_journals_plan_display_before_the_exit_plan_mode_question(tmp_path):
+    """P4 Task 3: `PlanDisplay` is an ordinary event — no special-casing
+    needed server-side — so it must land in the journal ahead of the
+    ExitPlanMode `QuestionRequest` it precedes on the wire, and answering
+    that question still finishes the turn normally."""
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        state = await runner.start_turn("PLAN")
+        for _ in range(100):
+            if runner.pending_summaries():
+                break
+            await asyncio.sleep(0.02)
+        pending = runner.pending_summaries()
+        assert len(pending) == 1
+        assert pending[0]["requestType"] == "question"
+        assert pending[0]["requestId"] == "plan_1"
+
+        # The PlanDisplay event is already journaled, ahead of the request.
+        plan_events = [
+            i["event"]["payload"]
+            for i in state.items
+            if i.get("kind") == "event" and i["event"].get("type") == "PlanDisplay"
+        ]
+        assert len(plan_events) == 1
+        assert plan_events[0]["content"].startswith("# The Plan")
+        assert plan_events[0]["file_path"] == "/tmp/plan.md"
+        kinds = [i.get("kind") for i in state.items]
+        plan_idx = next(
+            i
+            for i, item in enumerate(state.items)
+            if item.get("kind") == "event" and item["event"].get("type") == "PlanDisplay"
+        )
+        request_idx = kinds.index("request")
+        assert plan_idx < request_idx
+
+        await runner.respond("plan_1", {"answers": {"Approve this plan?": "Approve"}})
+        items = await asyncio.wait_for(_drain(runner, state.turn_id), timeout=5.0)
+        outcomes = [
+            i["event"]["payload"]["response"]
+            for i in items
+            if i.get("kind") == "event" and i["event"].get("type") == "RequestOutcome"
+        ]
+        assert outcomes[0]["result"]["answers"] == {"Approve this plan?": "Approve"}
+        assert state.status == "finished"
+        assert runner.pending_summaries() == []
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
 async def test_coder_rejects_unknown_request_types(tmp_path):
     """ToolCallRequest (wire-executed tools) is not bridged — reject."""
     runner = _coder(tmp_path)

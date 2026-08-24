@@ -16,6 +16,15 @@ Modes are keyed on the prompt text:
                   for the client's response line, echoes it back as a
                   RequestOutcome event, then finishes — the question bridge
                   round-trip proof.
+- "PLAN":         emits a `PlanDisplay` event (plan markdown + file_path),
+                  then a JSON-RPC `request` (QuestionRequest shaped like the
+                  real CLI's ExitPlanMode ask: header "Plan", options
+                  Approve/Reject, other_label "Revise"), waits for the
+                  client's response line, echoes it back as a RequestOutcome
+                  event, then finishes — proves the plan-card flow (P4 Task
+                  3): the client should fold the PlanDisplay into a `plan`
+                  block immediately followed by the question's `request`
+                  block, both in the journal before the answer arrives.
 - "STEERABLE":    TurnBegin, then the turn stays open (like HANG) until a
                   `steer` arrives, at which point it replies, emits a
                   `SteerInput` event, and finishes — the steer round-trip
@@ -24,10 +33,11 @@ Modes are keyed on the prompt text:
 
 Outside the prompt loop, `set_permission_mode` and `steer` are handled
 directly (mirrors the real CLI: `set_permission_mode` emits a StatusUpdate
-event first, `steer` emits a SteerInput event first, then each replies) —
-`WireRunner.call()` is a standalone request/response, not tied to a turn.
-Any other unknown top-level method is silently ignored (no response), which
-is what proves `call()`'s timeout path.
+event first, then replies; `steer` replies first, then emits a `SteerInput`
+event — the opposite order) — `WireRunner.call()` is a standalone
+request/response, not tied to a turn. Any other unknown top-level method is
+silently ignored (no response), which is what proves `call()`'s timeout
+path.
 """
 
 import json
@@ -180,6 +190,41 @@ def main() -> None:
                                             {"label": "B", "description": "second"},
                                         ],
                                         "multi_select": False,
+                                    }
+                                ],
+                            },
+                        },
+                    }
+                )
+                response = _read()
+                _event("RequestOutcome", {"response": response})
+                _write({"jsonrpc": "2.0", "id": mid, "result": {"status": "finished"}})
+            elif "PLAN" in user_input:
+                _event(
+                    "PlanDisplay",
+                    {
+                        "content": "# The Plan\n\n1. Do the thing.\n2. Ship it.\n",
+                        "file_path": "/tmp/plan.md",
+                    },
+                )
+                _write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "plan_1",
+                        "method": "request",
+                        "params": {
+                            "type": "QuestionRequest",
+                            "payload": {
+                                "id": "plan_1",
+                                "questions": [
+                                    {
+                                        "question": "Approve this plan?",
+                                        "header": "Plan",
+                                        "options": [
+                                            {"label": "Approve"},
+                                            {"label": "Reject"},
+                                        ],
+                                        "other_label": "Revise",
                                     }
                                 ],
                             },

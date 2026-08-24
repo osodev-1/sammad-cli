@@ -320,6 +320,51 @@ describe("coder transcript fold (reduce)", () => {
     const existing: CoderBlock[] = [{ kind: "text", text: "hi" }];
     expect(reduce(existing, outcomeItem)).toEqual(existing);
   });
+
+  const planDisplayEvent = (content: string, filePath: string): CoderItem => ({
+    kind: "event",
+    event: { type: "PlanDisplay", payload: { content, file_path: filePath } },
+  });
+
+  it("a PlanDisplay event folds into a `plan` block with content + filePath", () => {
+    const blocks = reduce([], planDisplayEvent("# The Plan\n\n1. Do it.", "/tmp/plan.md"));
+    expect(blocks).toEqual([
+      { kind: "plan", content: "# The Plan\n\n1. Do it.", filePath: "/tmp/plan.md" },
+    ]);
+  });
+
+  it("PlanDisplay -> QuestionRequest (ExitPlanMode) folds to a plan block followed by a request block", () => {
+    let blocks: CoderBlock[] = reduce([], planDisplayEvent("# Plan", "/tmp/plan.md"));
+    blocks = reduce(blocks, {
+      kind: "request",
+      requestId: "plan_1",
+      requestType: "question",
+      turnId: "t1",
+      request: {
+        id: "plan_1",
+        questions: [
+          {
+            question: "Approve this plan?",
+            header: "Plan",
+            options: [{ label: "Approve" }, { label: "Reject" }],
+            other_label: "Revise",
+          },
+        ],
+      },
+    });
+    expect(blocks.map((b) => b.kind)).toEqual(["plan", "request"]);
+    expect(blocks[0]).toEqual({ kind: "plan", content: "# Plan", filePath: "/tmp/plan.md" });
+    expect(blocks[1].kind === "request" && blocks[1].requestType).toBe("question");
+  });
+
+  it("two PlanDisplay events (a revised plan) each append their own block — no dedupe/merge", () => {
+    let blocks: CoderBlock[] = reduce([], planDisplayEvent("# Plan v1", "/tmp/plan.md"));
+    blocks = reduce(blocks, planDisplayEvent("# Plan v2", "/tmp/plan.md"));
+    expect(blocks).toEqual([
+      { kind: "plan", content: "# Plan v1", filePath: "/tmp/plan.md" },
+      { kind: "plan", content: "# Plan v2", filePath: "/tmp/plan.md" },
+    ]);
+  });
 });
 
 describe("coder transcript persistence (toStored / fromStored)", () => {
@@ -556,6 +601,38 @@ describe("coder transcript persistence (toStored / fromStored)", () => {
     // PATCH route) silently take down persistence for the whole session.
     const parsed = coderBlockState.safeParse(block);
     expect(parsed.success).toBe(true);
+  });
+
+  it("toStored drops `plan` blocks entirely — rebuilt from the journal on reload, like tool detail; surviving blocks still validate", () => {
+    const live: CoderMessage[] = [
+      {
+        role: "assistant",
+        blocks: [
+          { kind: "plan", content: "# The Plan\n\n1. Do it.", filePath: "/tmp/plan.md" },
+          { kind: "text", text: "Here's the plan above." },
+        ],
+      },
+    ];
+    const stored = toStored(live);
+    const blocks = stored[0].role === "assistant" ? stored[0].blocks : [];
+    // The plan block leaves no trace — not even a lean stub — mirroring how
+    // `think` blocks are dropped outright rather than downgraded. (Statically
+    // true too: `StoredCoderBlock` has no "plan" variant — see types below.)
+    expect(blocks.map((b) => b.kind)).toEqual(["text"]);
+    for (const b of blocks) {
+      expect(coderBlockState.safeParse(b).success).toBe(true);
+    }
+  });
+
+  it("a message consisting ONLY of a plan block stores as an assistant message with zero blocks (not dropped/crashed)", () => {
+    const live: CoderMessage[] = [
+      {
+        role: "assistant",
+        blocks: [{ kind: "plan", content: "# Plan", filePath: "/tmp/plan.md" }],
+      },
+    ];
+    const stored = toStored(live);
+    expect(stored[0]).toEqual({ role: "assistant", blocks: [] });
   });
 
   it("toStored of a rich tool block keeps only the label — args/result/toolCallId dropped — and still validates under coderBlockState", () => {

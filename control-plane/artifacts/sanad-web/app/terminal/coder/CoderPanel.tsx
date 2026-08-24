@@ -28,6 +28,7 @@ import type { StoredCoderMessage } from "@/lib/sessions/state";
 import { button, disabled, size } from "../../ui/theme";
 import { ApprovalCard, QuestionCard } from "./RequestCards";
 import { ToolCard } from "./ToolCard";
+import { PlanCard } from "./PlanCard";
 
 type RequestBlock = Extract<CoderBlock, { kind: "request" }>;
 
@@ -862,6 +863,8 @@ export default function CoderPanel({
                       );
                     if (b.kind === "tool")
                       return <ToolCard key={bi} block={b} />;
+                    if (b.kind === "plan")
+                      return <PlanCard key={bi} block={b} />;
                     return b.requestType === "approval" ? (
                       <ApprovalCard
                         key={bi}

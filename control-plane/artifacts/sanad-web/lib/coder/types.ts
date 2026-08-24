@@ -93,6 +93,15 @@ export interface StatusUpdatePayload {
   [k: string]: unknown;
 }
 
+/** `PlanDisplay` event payload (wire) — emitted once, right before the
+ * ExitPlanMode `QuestionRequest` that asks the user to approve/refine it.
+ * `content` is the plan markdown; `file_path` is where the CLI wrote it
+ * (informational — the panel never fetches it, only shows it as a caption). */
+export interface PlanDisplayPayload {
+  content: string;
+  file_path: string;
+}
+
 /** A shell command the tool ran (or is about to run). */
 export interface ShellDisplayBlock {
   type: "shell";
