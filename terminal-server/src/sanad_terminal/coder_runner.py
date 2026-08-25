@@ -27,10 +27,19 @@ from typing import Any
 from loguru import logger
 
 from sanad_terminal.coder_journal import CoderJournal
+from sanad_terminal.git_ops import GitRepo, _checkpoint_ref
 from sanad_terminal.wire_runner import TurnState, WireRunner, WireRunnerError, register_registry
 
 # Server-minted only (P0); the shape keeps ids path- and shell-safe.
 CONVERSATION_ID_RE = re.compile(r"^c_[a-f0-9]{12}$")
+
+# The diff summary (P5) only needs numstat-derived COUNTS (filesChanged/
+# additions/deletions), never the patch text itself — those counts are
+# computed from the un-truncated numstat output regardless of `max_bytes`
+# (see `GitRepo.checkpoint_diff`), so any value here is correct; this just
+# mirrors `TerminalSettings.coder_diff_max_bytes`'s default so the discarded
+# patch text this call still builds stays reasonably bounded.
+_CHECKPOINT_SUMMARY_MAX_BYTES = 200_000
 
 
 def new_conversation_id() -> str:
@@ -110,6 +119,22 @@ class CoderRunner(WireRunner):
         # the durable-retention view (bounded by `journal_turns_keep`, default
         # 20) that becomes turns.json.
         self._journal_index: list[dict[str, Any]] = []
+        # Shadow-checkpoint plumbing (P5 Task 2) — bound to the SAME
+        # workspace root + agent uid/gid/home the wire subprocess itself
+        # runs as (mirrors the `_repo()`/`app.py` boot-time GitRepo wiring:
+        # `home` sits beside `workspace/`, so `cwd.parent / "home"`), so
+        # checkpoint commits land with the same ownership the agent writes
+        # under uid-split. `_checkpoints` is a CoderRunner-only side-map
+        # (turn_id -> {"pre": sha|None, "post": sha|None, "summary": {...}|None})
+        # — deliberately NOT a TurnState field (TurnState is shared with
+        # ArchitectRunner). `_last_checkpoint_sha` is the most recent
+        # checkpoint commit (any turn's pre or post) so the NEXT turn's pre
+        # checkpoint chains onto it (`parent=`) instead of starting a fresh
+        # parentless history each turn.
+        home = cwd.parent / "home"
+        self._git = GitRepo(cwd, uid=uid, gid=gid, home=home if home.is_dir() else None)
+        self._checkpoints: dict[str, dict[str, Any]] = {}
+        self._last_checkpoint_sha: str | None = None
         # Restart recovery (P3 Task 2): rebuild TurnStates from whatever is
         # already on disk for this conversation, and reconcile any turn that
         # was left "running" when the process died. A freshly minted
@@ -374,9 +399,14 @@ class CoderRunner(WireRunner):
 
     # -- durable journal boundaries (P3 Task 1 — write side only) -------------
 
-    @staticmethod
-    def _journal_entry(state: TurnState) -> dict[str, Any]:
-        return {
+    def _journal_entry(self, state: TurnState) -> dict[str, Any]:
+        """Instance method (P5 Task 2 — was a `@staticmethod`): merges this
+        turn's checkpoint SHAs/summary from the `_checkpoints` side-map, when
+        present. `_checkpoints` is populated only by `_checkpoint_pre`
+        (called from `start_turn`) — an ArchitectRunner (or a bare WireRunner)
+        never touches it, so its journal entries (if it ever grew a durable
+        journal) would never carry these keys at all."""
+        entry: dict[str, Any] = {
             "turnId": state.turn_id,
             "status": state.status,
             "sendId": state.send_id,
@@ -388,6 +418,12 @@ class CoderRunner(WireRunner):
             # `TurnState.summary()` already applies for display.
             "userInput": state.user_input[:200],
         }
+        checkpoints = self._checkpoints.get(state.turn_id)
+        if checkpoints is not None:
+            entry["checkpointPre"] = checkpoints.get("pre")
+            entry["checkpointPost"] = checkpoints.get("post")
+            entry["checkpointSummary"] = checkpoints.get("summary")
+        return entry
 
     def _journal_note_turn(self, state: TurnState) -> None:
         """Insert/update this turn's entry in the durable index and persist
@@ -455,6 +491,24 @@ class CoderRunner(WireRunner):
             if state.status == "running":
                 self._reconcile_interrupted_turn(state)
                 dirty = True
+            # Checkpoint continuity across a restart (P5 Task 2): only a
+            # turn journaled with checkpoint code already ran carries these
+            # keys at all — an entry from before this feature shipped (or
+            # an ArchitectRunner-shaped entry, hypothetically) simply lacks
+            # them, and `_checkpoints` stays untouched for it, matching
+            # `_journal_entry`'s own "absent unless populated" contract.
+            if "checkpointPre" in entry or "checkpointPost" in entry:
+                pre = entry.get("checkpointPre")
+                post = entry.get("checkpointPost")
+                summary = entry.get("checkpointSummary")
+                self._checkpoints[turn_id] = {
+                    "pre": pre if isinstance(pre, str) else None,
+                    "post": post if isinstance(post, str) else None,
+                    "summary": summary if isinstance(summary, dict) else None,
+                }
+                chained = self._checkpoints[turn_id]["post"] or self._checkpoints[turn_id]["pre"]
+                if chained is not None:
+                    self._last_checkpoint_sha = chained
             self._turns[turn_id] = state
             self._turn_order.append(turn_id)
             self._journal_index.append(self._journal_entry(state))
@@ -524,15 +578,136 @@ class CoderRunner(WireRunner):
             self._journal.prune([e["turnId"] for e in self._journal_index])
         return state
 
+    async def _before_prompt_sent(self, state: TurnState) -> None:
+        """`WireRunner.start_turn`'s hook — fired once the turn exists but
+        before its prompt is sent and before it's registered/discoverable
+        anywhere (see the call site's comment there). The ONE race-free
+        moment for a PRE checkpoint: nothing has told the agent to do
+        anything yet, so nothing could possibly have mutated the workspace,
+        and no client could possibly be interacting with a turn it can't
+        see yet."""
+        await self._checkpoint_pre(state)
+
+    async def _checkpoint_pre(self, state: TurnState) -> None:
+        """Snapshot the workspace tree as it stands the instant this turn's
+        prompt was accepted, chained onto `_last_checkpoint_sha` (the
+        previous turn's post-or-pre) so the checkpoint history reads as one
+        continuous line per conversation. Best-effort by design (P5 brief):
+        checkpoints are a safety net, never a gate — a missing repo, a git
+        failure, anything at all, is caught, logged, and leaves
+        `checkpointPre` null; the turn itself is entirely unaffected. A no-op
+        if this state already has a `_checkpoints` entry (defense in depth —
+        `_before_prompt_sent` only ever runs once per turn in practice, since
+        `start_turn`'s idempotent-resend path returns before ever reaching
+        it, but re-checkpointing here would both misrepresent the tree at
+        THIS instant as "pre-turn" and double-chain `_last_checkpoint_sha`)."""
+        if state.turn_id in self._checkpoints:
+            return
+        entry: dict[str, Any] = {"pre": None, "post": None, "summary": None}
+        self._checkpoints[state.turn_id] = entry
+        try:
+            ref = _checkpoint_ref(self.conversation_id, state.turn_id, "pre")
+            sha = await self._git.create_checkpoint(
+                ref, f"pre-turn snapshot ({state.turn_id})", parent=self._last_checkpoint_sha
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort: must never fail the turn
+            logger.warning(
+                "coder checkpoint (pre) failed for conversation {} turn {}: {}: {}",
+                self.conversation_id,
+                state.turn_id,
+                type(exc).__name__,
+                exc,
+            )
+            return
+        entry["pre"] = sha
+        if sha is not None:
+            self._last_checkpoint_sha = sha
+        await self._append(state, {"kind": "checkpoint", "when": "pre", "sha": sha})
+
+    async def _checkpoint_post(self, state: TurnState) -> None:
+        """Snapshot the workspace tree once the turn has finished, chained
+        onto this SAME turn's pre checkpoint (so a turn's own diff is always
+        `pre..post`, regardless of what any other turn did). `None` when the
+        tree is unchanged since `pre` (skip-when-clean — a genuine no-op
+        turn, not a failure) or when checkpointing hard-failed (same
+        best-effort contract as `_checkpoint_pre`). The diff summary
+        (files/additions/deletions) is computed only when both ends exist;
+        its patch text is discarded — only the counts are kept."""
+        entry = self._checkpoints.setdefault(
+            state.turn_id, {"pre": None, "post": None, "summary": None}
+        )
+        pre = entry.get("pre")
+        try:
+            ref = _checkpoint_ref(self.conversation_id, state.turn_id, "post")
+            sha = await self._git.create_checkpoint(
+                ref, f"post-turn snapshot ({state.turn_id})", parent=pre
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort: must never fail the turn
+            logger.warning(
+                "coder checkpoint (post) failed for conversation {} turn {}: {}: {}",
+                self.conversation_id,
+                state.turn_id,
+                type(exc).__name__,
+                exc,
+            )
+            return
+        entry["post"] = sha
+        if sha is not None:
+            self._last_checkpoint_sha = sha
+        summary: dict[str, Any] | None = None
+        if sha is not None and pre is not None:
+            try:
+                diff = await self._git.checkpoint_diff(
+                    pre, sha, max_bytes=_CHECKPOINT_SUMMARY_MAX_BYTES
+                )
+                summary = {
+                    "filesChanged": diff["filesChanged"],
+                    "additions": diff["additions"],
+                    "deletions": diff["deletions"],
+                }
+            except Exception as exc:  # noqa: BLE001 - summary is a bonus, never load-bearing
+                logger.warning(
+                    "coder checkpoint diff summary failed for conversation {} turn {}: {}: {}",
+                    self.conversation_id,
+                    state.turn_id,
+                    type(exc).__name__,
+                    exc,
+                )
+        entry["summary"] = summary
+        item: dict[str, Any] = {"kind": "checkpoint", "when": "post", "sha": sha}
+        if summary is not None:
+            item["summary"] = summary
+        await self._append(state, item)
+
     async def _consume(self, state, queue) -> None:  # noqa: ANN001
         try:
             await super()._consume(state, queue)
         finally:
             await self._cancel_pending("turn_ended", state)
+            # Post-turn checkpoint (P5 Task 2) BEFORE the journal is noted
+            # so `checkpointPost`/`checkpointSummary` land in the SAME
+            # `turns.json` write as everything else this turn's end updates.
+            await self._checkpoint_post(state)
             if self._journal is not None:
                 self._journal_note_turn(state)
                 # Not per-item (EFS latency) — one fsync when the turn closes.
                 self._journal.fsync_turn(state.turn_id)
+                # Retention (P5 Task 2): checkpoint refs are pruned in
+                # lockstep with the durable journal's own kept-turns set —
+                # `_journal_index` already reflects this turn's own entry
+                # (noted just above), so it's never pruned out from under
+                # itself.
+                try:
+                    await self._git.prune_checkpoints(
+                        self.conversation_id, [e["turnId"] for e in self._journal_index]
+                    )
+                except Exception as exc:  # noqa: BLE001 - best-effort: pruning must never fail the turn
+                    logger.warning(
+                        "coder checkpoint prune failed for conversation {}: {}: {}",
+                        self.conversation_id,
+                        type(exc).__name__,
+                        exc,
+                    )
             # Turn-end boundary (P4b): drain the next queued follow-up, if
             # any — AFTER the bookkeeping above so a queued turn's own
             # journal/fsync never races the one just closing out.

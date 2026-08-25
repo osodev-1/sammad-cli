@@ -78,6 +78,21 @@ class TurnState:
     items: list[dict[str, Any]] = field(default_factory=list)
     steps: int = 0
     budget_tripped: bool = False
+    # True once nothing will ever be appended to `items` again — distinct
+    # from `status`, which `_consume` flips to a terminal value the MOMENT
+    # the wire's `end`/`error` arrives, before a subclass's own `_consume`
+    # override finishes ITS post-turn-end work (P5: CoderRunner's
+    # checkpoint/journal/queue-drain bookkeeping runs in a finally AFTER
+    # `super()._consume()` returns). `follow()` waits on `closed`, not
+    # `status`, so a live follower can never race past items a subclass
+    # appends after the base class's own bookkeeping. Defaults True: a
+    # `TurnState` rebuilt by restart reconstruction (P3 Task 2) represents
+    # an already-settled turn with no live consumer task, so a follower
+    # must never block on it. `start_turn` explicitly passes `closed=False`
+    # for a freshly-started live turn; `_run_turn` flips it back to True
+    # exactly once, after the full (possibly overridden) `_consume` chain
+    # returns.
+    closed: bool = True
 
     @property
     def last_seq(self) -> int:
@@ -269,18 +284,47 @@ class WireRunner:
             turn_id=f"t_{uuid.uuid4().hex[:12]}",
             user_input=user_input,
             send_id=send_id,
+            closed=False,
         )
-        self._turns[state.turn_id] = state
-        self._turn_order.append(state.turn_id)
-        self._evict_old_turns()
+        # `self._current` is the ONLY thing set here, synchronously, before
+        # any `await` — it's what the busy-check above reads, so setting it
+        # here (and ONLY here, before this coroutine can ever yield) is what
+        # makes that check atomic against a second concurrent `start_turn`
+        # call: whichever caller's synchronous prefix reaches this line
+        # first wins, and the other's own busy-check (which can only run
+        # later, since asyncio never preempts mid-coroutine) then sees it.
+        #
+        # Deliberately NOT registered into `_turns`/`_turn_order` yet (see
+        # below) — this turn is not externally discoverable (`/turn`,
+        # `get_turn`, `follow`, `busy`-driven `steer`/`cancel`) until its
+        # prompt has actually been transmitted.
         self._current = state
 
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._turn_queue = queue
-        pid = self._next_id()
-        self._prompt_id = pid
         self._touch()
         await self._append(state, {"kind": "turn", "turnId": state.turn_id})
+        # Fired once the turn exists (and `self._append` above has given it
+        # its first item) but BEFORE the prompt is sent AND before the turn
+        # is registered anywhere a client can observe or interact with it.
+        # Base: no-op. CoderRunner (P5) hooks this for its PRE-turn
+        # checkpoint snapshot, which must represent the workspace tree
+        # exactly as it stood before the agent could possibly act on it — a
+        # snapshot taken any LATER (once the prompt is in flight, or once
+        # this runner's own consumer task exists) can lose that race to a
+        # fast-answering agent that doesn't need OUR side's involvement to
+        # mutate the workspace (e.g. a non-gated tool call in an
+        # accept-edits-like posture).
+        #
+        # Registering the turn (below) only AFTER the prompt is sent is the
+        # other half of that same race: without it, a client that manages
+        # to call `/steer` or `/cancel` in the gap between "turn looks
+        # busy" and "prompt actually transmitted" would have ITS message
+        # win the race over the wire's own single, ordered stdin pipe,
+        # confusing an agent that (reasonably) expects to see its prompt
+        # before anything else.
+        await self._before_prompt_sent(state)
+        pid = self._next_id()
         try:
             await self._send(
                 {
@@ -293,11 +337,12 @@ class WireRunner:
         except Exception:
             state.status = "failed"
             self._turn_queue = None
-            self._prompt_id = None
-            async with self._journal_cond:
-                self._journal_cond.notify_all()
             raise
-        self._consumer = asyncio.create_task(self._consume(state, queue))
+        self._prompt_id = pid
+        self._turns[state.turn_id] = state
+        self._turn_order.append(state.turn_id)
+        self._evict_old_turns()
+        self._consumer = asyncio.create_task(self._run_turn(state, queue))
         if self._max_turn_seconds is not None:
             self._budget_task = asyncio.create_task(
                 self._budget_watch(state, self._max_turn_seconds)
@@ -367,6 +412,25 @@ class WireRunner:
             if on_finished is not None and not getattr(self, "_finished_fired", False):
                 self._finished_fired = True
                 self._finish_task = asyncio.create_task(on_finished(self))
+            async with self._journal_cond:
+                self._journal_cond.notify_all()
+
+    async def _run_turn(
+        self, state: TurnState, queue: asyncio.Queue[dict[str, Any]]
+    ) -> None:
+        """Wraps `self._consume` (a polymorphic call — runs whatever override
+        chain a subclass installs) so `state.closed` flips True only once
+        EVERYTHING tied to this turn has actually finished, including a
+        subclass's own post-turn-end work in ITS `_consume` finally (P5:
+        CoderRunner's checkpoint/journal/queue-drain bookkeeping). `_consume`
+        itself flips `status` to a terminal value the moment the wire's
+        `end`/`error` arrives — well before that subclass work runs — so
+        `follow()` must not treat that early status flip as "nothing more is
+        coming." See `TurnState.closed` for the full rationale."""
+        try:
+            await self._consume(state, queue)
+        finally:
+            state.closed = True
             async with self._journal_cond:
                 self._journal_cond.notify_all()
 
@@ -470,10 +534,10 @@ class WireRunner:
             while i < len(state.items):
                 yield state.items[i]
                 i += 1
-            if state.status != "running":
+            if state.closed:
                 return
             async with self._journal_cond:
-                if i >= len(state.items) and state.status == "running":
+                if i >= len(state.items) and not state.closed:
                     await self._journal_cond.wait()
 
     async def ask(
@@ -611,6 +675,16 @@ class WireRunner:
         fut = self._pending.pop(mid, None)
         if fut is not None and not fut.done():
             fut.set_result(msg)
+
+    async def _before_prompt_sent(self, state: TurnState) -> None:
+        """Hook fired from `start_turn`, once the turn exists but before its
+        prompt is sent and before it's registered/discoverable anywhere.
+        Base: no-op. See the call site's comment for why this exact moment
+        matters and what CoderRunner (P5) uses it for. A subclass hook MUST
+        NOT raise for a recoverable failure — CoderRunner's own use catches
+        everything internally, since a checkpoint is a safety net, never a
+        gate; an exception escaping this hook here would fail the turn
+        before its prompt was ever sent."""
 
     def observe_event(self, envelope: dict[str, Any]) -> None:
         """Hook fired for every wire event, after it's journaled. Base: no-op.

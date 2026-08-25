@@ -142,3 +142,9 @@ def test_coder_max_queue_depth_default_and_parses(base_env):
     assert TerminalSettings.load(env=base_env).coder_max_queue_depth == 50
     s = TerminalSettings.load(env={**base_env, "CODER_MAX_QUEUE_DEPTH": "5"})
     assert s.coder_max_queue_depth == 5
+
+
+def test_coder_diff_max_bytes_default_and_parses(base_env):
+    assert TerminalSettings.load(env=base_env).coder_diff_max_bytes == 200_000
+    s = TerminalSettings.load(env={**base_env, "CODER_DIFF_MAX_BYTES": "1000"})
+    assert s.coder_diff_max_bytes == 1000

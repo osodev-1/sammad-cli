@@ -30,6 +30,12 @@ Modes are keyed on the prompt text:
                   `SteerInput` event, and finishes — the steer round-trip
                   proof (mirrors the real soul: the follow-up lands as an
                   event on the same turn instead of starting a new one).
+- "WRITEFILE:<relpath>:<content>": writes `content` to `relpath` (relative
+                  to the subprocess's own cwd, which is always the coder
+                  workspace root — see `WireRunner.start()`), then finishes.
+                  The one mode that actually mutates the workspace tree, so
+                  a test can exercise a real (non-skip-when-clean) git
+                  checkpoint (P5 Task 2) without needing the real CLI.
 
 Outside the prompt loop, `set_permission_mode` and `steer` are handled
 directly (mirrors the real CLI: `set_permission_mode` emits a StatusUpdate
@@ -42,6 +48,7 @@ path.
 
 import json
 import sys
+from pathlib import Path
 
 
 def _write(obj: dict) -> None:
@@ -131,6 +138,11 @@ def main() -> None:
                 _hang_until_cancel(mid)
             elif "STEERABLE" in user_input:
                 _hang_until_steer(mid)
+            elif user_input.startswith("WRITEFILE:"):
+                _, relpath, content = user_input.split(":", 2)
+                Path(relpath).write_text(content)
+                _event("TextPart", {"type": "text", "text": f"wrote {relpath}"})
+                _write({"jsonrpc": "2.0", "id": mid, "result": {"status": "finished"}})
             elif "HANG" in user_input:
                 _hang_until_cancel(mid)
             elif "ASK_TOOLCALL" in user_input:
