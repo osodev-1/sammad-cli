@@ -529,12 +529,21 @@ async def test_steer_before_prompt_sent_is_rejected_not_silently_dropped(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_cancel_before_prompt_sent_is_a_no_op_not_a_bogus_wire_message(tmp_path):
-    """`WireRunner.cancel()` already gates on `self._prompt_id is None` — so
-    a `/cancel` landing in the same pre-prompt window as the test above must
-    never reach `_send` at all (proven here by making `_send` raise if it's
-    ever called during the window) rather than sending a stray `cancel` for
-    a prompt that was never transmitted."""
+async def test_cancel_before_prompt_sent_waits_then_genuinely_cancels(tmp_path):
+    """P6a review Important 7: `WireRunner.cancel()`'s own
+    `self._prompt_id is None` guard already keeps a `/cancel` landing in
+    this window from reaching the wire as a bogus message (it never sends
+    anything for a prompt that hasn't gone out) — but base `cancel()` then
+    just no-ops, and the turn runs to completion as if the cancel never
+    happened. Under the write-lease that's worse than it used to be: the
+    un-cancelled turn goes on to hold the workspace lease for its entire
+    duration, blocking every other conversation, not just its own.
+
+    `CoderRunner.cancel()` now WAITS (bounded) for the prompt to actually be
+    sent, then genuinely cancels — proven here with a HANG turn so a real
+    cancellation is observable (final status "cancelled", not "finished"),
+    and by asserting the `cancel()` call is still in flight (not a fast
+    no-op) while the gate is held closed."""
     runner = _coder(tmp_path)
     await runner.start()
     try:
@@ -547,24 +556,22 @@ async def test_cancel_before_prompt_sent_is_a_no_op_not_a_bogus_wire_message(tmp
 
         runner._before_prompt_sent = _slow_before_prompt_sent
 
-        turn_task = asyncio.create_task(runner.start_turn("hello"))
+        turn_task = asyncio.create_task(runner.start_turn("HANG"))
         await asyncio.wait_for(entered.wait(), timeout=5.0)
+        assert runner.busy is True
+        assert runner._prompt_id is None
 
-        real_send = runner._send
-
-        async def _guarded_send(msg):
-            if msg.get("method") == "cancel":
-                raise AssertionError("cancel must not reach the wire before the prompt does")
-            await real_send(msg)
-
-        runner._send = _guarded_send
-
-        await runner.cancel()  # must be a no-op here, not raise, not send anything
+        cancel_task = asyncio.create_task(runner.cancel())
+        await asyncio.sleep(0.05)  # let cancel() enter its wait loop
+        assert not cancel_task.done(), "cancel() must wait, not silently no-op, in this window"
 
         release.set()
         state = await asyncio.wait_for(turn_task, timeout=5.0)
-        await asyncio.wait_for(_drain(runner, state.turn_id), timeout=5.0)
-        assert state.status == "finished"
+        await asyncio.wait_for(cancel_task, timeout=5.0)
+
+        items = await asyncio.wait_for(_drain(runner, state.turn_id), timeout=5.0)
+        assert items[-1]["kind"] == "end" and items[-1]["status"] == "cancelled"
+        assert state.status == "cancelled"
     finally:
         await runner.stop()
 
