@@ -485,6 +485,91 @@ async def test_steer_after_turn_finished_raises_no_turn(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_steer_before_prompt_sent_is_rejected_not_silently_dropped(tmp_path):
+    """P6a: the window between `self._current` being set (turn looks
+    `busy`) and the prompt actually reaching the CLI (P5's pre-turn
+    checkpoint `await` widened it) must not let a `/steer` reach the wire
+    ahead of the prompt it's supposed to follow up on — it must fail closed
+    with `no_turn`, the SAME signal as "no turn at all", rather than being
+    silently swallowed by the CLI on the other end.
+
+    `_before_prompt_sent` is monkeypatched with a controllable gate so the
+    test can land deterministically inside that exact window — no reliance
+    on real git checkpoint timing."""
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow_before_prompt_sent(state):
+            entered.set()
+            await release.wait()
+
+        runner._before_prompt_sent = _slow_before_prompt_sent
+
+        turn_task = asyncio.create_task(runner.start_turn("hello"))
+        await asyncio.wait_for(entered.wait(), timeout=5.0)
+
+        # Inside the window: the turn already looks busy, but no prompt has
+        # been sent yet.
+        assert runner.busy is True
+        assert runner._prompt_id is None
+
+        with pytest.raises(WireRunnerError) as exc:
+            await runner.steer("go left")
+        assert exc.value.code == "no_turn"
+
+        release.set()
+        state = await asyncio.wait_for(turn_task, timeout=5.0)
+        await asyncio.wait_for(_drain(runner, state.turn_id), timeout=5.0)
+        assert state.status == "finished"
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_prompt_sent_is_a_no_op_not_a_bogus_wire_message(tmp_path):
+    """`WireRunner.cancel()` already gates on `self._prompt_id is None` — so
+    a `/cancel` landing in the same pre-prompt window as the test above must
+    never reach `_send` at all (proven here by making `_send` raise if it's
+    ever called during the window) rather than sending a stray `cancel` for
+    a prompt that was never transmitted."""
+    runner = _coder(tmp_path)
+    await runner.start()
+    try:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow_before_prompt_sent(state):
+            entered.set()
+            await release.wait()
+
+        runner._before_prompt_sent = _slow_before_prompt_sent
+
+        turn_task = asyncio.create_task(runner.start_turn("hello"))
+        await asyncio.wait_for(entered.wait(), timeout=5.0)
+
+        real_send = runner._send
+
+        async def _guarded_send(msg):
+            if msg.get("method") == "cancel":
+                raise AssertionError("cancel must not reach the wire before the prompt does")
+            await real_send(msg)
+
+        runner._send = _guarded_send
+
+        await runner.cancel()  # must be a no-op here, not raise, not send anything
+
+        release.set()
+        state = await asyncio.wait_for(turn_task, timeout=5.0)
+        await asyncio.wait_for(_drain(runner, state.turn_id), timeout=5.0)
+        assert state.status == "finished"
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
 async def test_request_with_no_running_turn_is_rejected(tmp_path):
     """Bridged types still reject when no turn is running (background lane = P3/P4)."""
     runner = CoderRunner(
