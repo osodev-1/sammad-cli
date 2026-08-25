@@ -16,6 +16,7 @@ bounded.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 import uuid
@@ -57,6 +58,15 @@ class PendingRequest:
 
 
 _PERMISSION_MODES = {"default", "accept-edits", "plan"}
+
+# `cancel()`'s bounded wait for a prompt that hasn't been sent yet (P6a
+# review Important 7) — see `CoderRunner.cancel`. Generous relative to the
+# window it covers (P5's pre-turn git checkpoint, real seconds against a
+# real repo at worst) without risking a genuinely stuck caller: if the
+# bound elapses, `cancel()` still falls through to the base's own
+# already-safe no-op rather than hanging forever.
+_CANCEL_PENDING_PROMPT_TIMEOUT_SECONDS = 5.0
+_CANCEL_PENDING_PROMPT_POLL_INTERVAL_SECONDS = 0.02
 
 
 class CoderRunner(WireRunner):
@@ -172,11 +182,43 @@ class CoderRunner(WireRunner):
         `_before_prompt_sent` call site). Without this, a steer landing in
         that window would reach the wire ahead of its own prompt and get
         silently dropped by the CLI, which has no turn yet to steer.
-        `cancel()` doesn't need the equivalent check added here: it already
-        gates on the same `self._prompt_id is None` condition itself."""
+        `cancel()` is overridden below with a DIFFERENT fix for the same
+        window — it waits rather than rejects, since a cancel that's simply
+        dropped there is worse than a steer that's simply dropped there
+        (see `cancel`'s own docstring)."""
         if not self.alive or not self.busy or self._prompt_id is None:
             raise WireRunnerError("no_turn", "no turn is in progress")
         await self.call("steer", {"user_input": text})
+
+    async def cancel(self) -> None:
+        """Interrupt the active turn. Overrides `WireRunner.cancel` to close
+        the SAME pre-prompt-sent window `steer()` closes above, but with a
+        different fix (P6a review Important 7): base `cancel()` already
+        guards on `self._prompt_id is None` and safely no-ops there — it
+        never sends a stray wire message for a prompt that hasn't gone out
+        — but a genuine `/cancel` landing in that window is then simply
+        FORGOTTEN, and the turn runs to completion as if nothing happened.
+        That was already not great; under the write-lease it's worse: the
+        un-cancelled turn goes on to hold the workspace write-lease for its
+        ENTIRE duration, blocking every OTHER conversation in the
+        workspace, not just its own follow-ups — so a cancel silently
+        eaten here can wedge the whole workspace for up to the turn's full
+        budget.
+
+        Fix: if the turn looks busy but the prompt hasn't been sent yet,
+        wait (bounded — `_CANCEL_PENDING_PROMPT_TIMEOUT_SECONDS`) for
+        `self._prompt_id` to appear, polling `self.busy` too so a turn that
+        ends on its own (finishes, fails, or this runner is stopped) during
+        the wait doesn't spin uselessly. Once the prompt is sent (or the
+        bound elapses, or the turn stopped looking busy), fall through to
+        the base implementation — its existing checks remain the real
+        gate, this only widens the window in which they get a fair chance
+        to see a sent prompt instead of a stale `None`."""
+        if self.busy and self._prompt_id is None:
+            deadline = time.monotonic() + _CANCEL_PENDING_PROMPT_TIMEOUT_SECONDS
+            while self.busy and self._prompt_id is None and time.monotonic() < deadline:
+                await asyncio.sleep(_CANCEL_PENDING_PROMPT_POLL_INTERVAL_SECONDS)
+        await super().cancel()
 
     # -- server-side queue (P4b) -----------------------------------------------
 
@@ -283,10 +325,31 @@ class CoderRunner(WireRunner):
         acquire fresh" bookkeeping and `start_turn`'s (separate) bookkeeping
         would disagree about who needs to release on a subsequent failure,
         which is exactly the leak shape `start_turn` guards against for
-        itself. If someone else holds it, leave the item queued and return
-        — no spin, no busy-wait; we'll be tried again either by our own
-        next natural drain point or by THAT holder's eventual release
-        calling directly into us via `_wake_next_waiter`.
+        itself. A holder past the lease's own TTL is treated as absent here
+        too (review Important 5) — otherwise the ONE population this
+        feature creates (conversations parked in the queue specifically
+        because the lease was busy) would be exactly the population that
+        can never reach `try_acquire`'s real staleness reclaim, since a
+        pure drain-only conversation has no other path back into
+        `start_turn`. Still read-only: the actual reclaim (and the
+        `WriteLease` warning log it emits) only ever happens inside
+        `start_turn`'s real `try_acquire` call below, never here.
+
+        If someone else holds it (and isn't stale), `add_waiter` (review
+        Critical 4) THEN leave the item queued and return — no spin, no
+        busy-wait. Registering the waiter here, not only from `start_turn`'s
+        own failure path, matters because this method is also reached
+        WITHOUT ever calling `start_turn`: `/send`'s route enqueues directly
+        (`body.queue`, or an already-busy runner) and calls this method to
+        idle-drain, with no `start_turn` attempt — and therefore no
+        `add_waiter` — in between. Without registering here too, that
+        queued item would have no FIFO entry at all and `_wake_next_waiter`
+        could never find it. `add_waiter` is idempotent, so this and a
+        prior/later `start_turn`-driven registration for the same
+        conversation never produce two FIFO slots. We'll be tried again
+        either by our own next natural drain point or by the current
+        holder's eventual release calling directly into us via
+        `_wake_next_waiter`.
 
         Concurrency: the not-busy check, the lease peek, and the
         `start_turn` call below have NO `await` between them. `start_turn`
@@ -338,20 +401,32 @@ class CoderRunner(WireRunner):
         fire-and-forget drain that only guards against today's known
         failure modes would silently regress the instant `start_turn`
         grows a new one. `Exception` still excludes `asyncio.CancelledError`
-        (a `BaseException` subclass, not `Exception`, since Python 3.8), so
-        genuine task cancellation is unaffected.
+        (a `BaseException` subclass, not `Exception`, since Python 3.8) —
+        deliberately: genuine task cancellation must propagate, not be
+        swallowed. But the popped item must not be LOST to a cancellation
+        either (review Critical 2's second half) — re-queuing is therefore
+        ownership-based (`finally`, mirroring `start_turn`'s own fix)
+        rather than gated on catching `Exception`: whether `start_turn`
+        raises an `Exception`, is cancelled, or anything else, the item
+        goes back on the queue unless it actually started.
         """
         if not self._queue or not self.alive or self.busy:
             return
         lease = lease_for(self._cwd)
         holder = lease.holder_of()
-        if holder is not None and holder != self.conversation_id:
+        if (
+            holder is not None
+            and holder != self.conversation_id
+            and lease.held_seconds() <= lease.stale_after_seconds
+        ):
+            lease.add_waiter(self.conversation_id)
             return
         item = self._queue.popleft()
+        started = False
         try:
             await self.start_turn(item["input"], send_id=item["sendId"])
+            started = True
         except Exception as exc:
-            self._queue.appendleft(item)
             logger.warning(
                 "coder queue drain failed for conversation {} (sendId={}): {}: {}",
                 self.conversation_id,
@@ -359,6 +434,9 @@ class CoderRunner(WireRunner):
                 type(exc).__name__,
                 exc,
             )
+        finally:
+            if not started:
+                self._queue.appendleft(item)
 
     # -- request bridge (P1) --------------------------------------------------
 
@@ -645,7 +723,18 @@ class CoderRunner(WireRunner):
           now — the resend's contract is to return the old turn regardless
           of current lease ownership, since nothing new is being started.
         """
-        if send_id is None:
+        # Truthiness, not `is None` (P6a review Critical 1): the base
+        # guards both its own checks on `if send_id and ...` — `""` is
+        # falsy there, so an empty-string send_id NEVER matches an
+        # idempotent resend in the base's eyes, it's always a genuinely new
+        # turn attempt. A `send_id is None` check here disagreed for
+        # `send_id == ""`: `SendBody.sendId` has no `min_length`, so `""`
+        # arrives straight from HTTP, and a caller resending with `""` (or
+        # simply never setting sendId) could hit an old `last.send_id ==
+        # ""` and have THIS method wrongly call it "idempotent", skipping
+        # the acquire entirely while the base went on to start a genuinely
+        # new turn — a real second writer with the lease never touched.
+        if not send_id:
             return False
         cur = self._current
         if cur is not None and cur.status == "running":
@@ -676,15 +765,28 @@ class CoderRunner(WireRunner):
         directly to us (see `_wake_next_waiter`) even though our own
         turn-end will never fire to trigger a self-drain.
 
-        If we DID acquire fresh here and `super().start_turn(...)` then
-        either raises or returns WITHOUT actually starting a new turn (only
-        possible via the SAME idempotent-passthrough logic reached from
-        inside the base class, or a hard failure such as a broken pipe on
-        the prompt send — see test_coder_queue_runtime.py's sibling
-        coverage for `_maybe_drain_queue`), nothing will ever call
-        `_consume`'s `finally` to release what we just grabbed — so we
-        release it ourselves right here rather than risk exactly the
-        leaked-lease-wedges-the-workspace failure this task is about.
+        If we DID acquire fresh here, release ownership is decided in the
+        `finally` below by OWNERSHIP, not by exception class (P6a review
+        Critical 2): a plain `except Exception: release(); raise` misses
+        `asyncio.CancelledError` (a `BaseException`, not an `Exception`,
+        since Python 3.8) — and cancellation lands here for real: the
+        cross-runner handoff (`_wake_next_waiter`) runs a WOKEN
+        conversation's `start_turn` from inside the RELEASING conversation's
+        own consumer task (shielded — see `_wake_next_waiter` — but that's
+        belt, this is suspenders), and a client disconnect can cancel a
+        plain `/send` request's task mid-`await` too (a well-known
+        ASGI/Starlette gotcha). Either can deliver `CancelledError` at
+        ANY await point up to and including mid-`_before_prompt_sent` —
+        BEFORE `self._consumer` is ever created for this attempt — which is
+        exactly the case a bare `except Exception` can't see: nothing would
+        ever call `_consume`'s `finally` to release what we just grabbed,
+        AND the turn would look permanently `busy` with no consumer to end
+        it. `finally` runs regardless of exception type (or none at all),
+        so checking OWNERSHIP there — "did a live consumer task actually
+        get created for THIS attempt, backing a still-open state" — instead
+        of "did something raise" closes that gap without needing to
+        enumerate every exception type that can land here (today's or a
+        future one).
         """
         lease = lease_for(self._cwd)
         already_held = lease.is_held_by(self.conversation_id)
@@ -699,18 +801,33 @@ class CoderRunner(WireRunner):
                     holder=holder,
                 )
             acquired_fresh = True
+        # Captured BEFORE delegating so the `finally` below can tell whether
+        # THIS call is the one that actually created a live consumer task —
+        # `self._consumer` is only reassigned once `super().start_turn()`
+        # gets past `_before_prompt_sent` AND the prompt send succeeds, so a
+        # failure/cancellation any earlier than that leaves it unchanged.
+        prior_consumer = self._consumer
+        state: TurnState | None = None
         try:
             state = await super().start_turn(user_input, send_id)
-        except Exception:
+        finally:
             if acquired_fresh:
-                lease.release(self.conversation_id)
-            raise
-        if acquired_fresh and state.closed:
-            # Defensive: covers any base-class path we didn't anticipate
-            # that returns an already-terminal state without raising —
-            # exactly the same "nothing will ever release this" risk as the
-            # exception branch above.
-            lease.release(self.conversation_id)
+                consumer_created_for_this_attempt = self._consumer is not prior_consumer
+                live_turn_now_owns_release = (
+                    consumer_created_for_this_attempt and state is not None and not state.closed
+                )
+                if not live_turn_now_owns_release:
+                    # Nothing will ever call `_consume`'s `finally` on our
+                    # behalf — whether because `super().start_turn()`
+                    # raised/was cancelled before creating a consumer, or
+                    # (defensive) returned an already-closed state without
+                    # raising at all.
+                    lease.release(self.conversation_id)
+        # Reachable only when `super().start_turn()` returned normally (any
+        # exception/cancellation propagates past the `finally` above instead
+        # of falling through here) — `state` is therefore always set; the
+        # assert just narrows the type for the checker.
+        assert state is not None
         if self._journal is not None:
             self._journal_note_turn(state)
             # Retention: beyond `turns_keep`, drop the oldest turn files —
@@ -824,44 +941,56 @@ class CoderRunner(WireRunner):
         try:
             await super()._consume(state, queue)
         finally:
-            await self._cancel_pending("turn_ended", state)
-            # Post-turn checkpoint (P5 Task 2) BEFORE the journal is noted
-            # so `checkpointPost`/`checkpointSummary` land in the SAME
-            # `turns.json` write as everything else this turn's end updates.
-            await self._checkpoint_post(state)
-            if self._journal is not None:
-                self._journal_note_turn(state)
-                # Not per-item (EFS latency) — one fsync when the turn closes.
-                self._journal.fsync_turn(state.turn_id)
-                # Retention (P5 Task 2): checkpoint refs are pruned in
-                # lockstep with the durable journal's own kept-turns set —
-                # `_journal_index` already reflects this turn's own entry
-                # (noted just above), so it's never pruned out from under
-                # itself.
-                try:
-                    await self._git.prune_checkpoints(
-                        self.conversation_id, [e["turnId"] for e in self._journal_index]
-                    )
-                except Exception as exc:  # noqa: BLE001 - best-effort: pruning must never fail the turn
-                    logger.warning(
-                        "coder checkpoint prune failed for conversation {}: {}: {}",
-                        self.conversation_id,
-                        type(exc).__name__,
-                        exc,
-                    )
-            # Write-lease (P6a): release AFTER all the turn-end bookkeeping
-            # above — checkpoint_post, journal note, fsync, prune — so those
-            # can never race a newly-started turn that grabs the lease the
-            # instant it frees. This `finally` runs on EVERY terminal path
-            # (finished/failed/cancelled — `_consume`'s own status handling
-            # above covers those — and interrupted-by-cancellation too: a
-            # `CancelledError` from `stop()`'s `self._consumer.cancel()`
-            # still unwinds through this `finally`, Python guarantees that),
-            # so this is the one release call nearly every turn-end reaches.
-            # `release` is idempotent (only actually releases for the
-            # CURRENT holder), so it's harmless if `start_turn` itself
-            # already released on a failure that never got this far.
-            lease_for(self._cwd).release(self.conversation_id)
+            # Write-lease (P6a review Important 6): the release below is
+            # structurally guaranteed by this INNER `try/finally`, not
+            # merely by "the bookkeeping never raises" contracts documented
+            # in three other files (`_cancel_pending`/`_checkpoint_post`
+            # /journal/`prune_checkpoints`) — any of those is one future
+            # edit away from breaking that assumption silently. Whatever
+            # happens above, the release always runs.
+            try:
+                await self._cancel_pending("turn_ended", state)
+                # Post-turn checkpoint (P5 Task 2) BEFORE the journal is
+                # noted so `checkpointPost`/`checkpointSummary` land in the
+                # SAME `turns.json` write as everything else this turn's
+                # end updates.
+                await self._checkpoint_post(state)
+                if self._journal is not None:
+                    self._journal_note_turn(state)
+                    # Not per-item (EFS latency) — one fsync when the turn closes.
+                    self._journal.fsync_turn(state.turn_id)
+                    # Retention (P5 Task 2): checkpoint refs are pruned in
+                    # lockstep with the durable journal's own kept-turns set —
+                    # `_journal_index` already reflects this turn's own entry
+                    # (noted just above), so it's never pruned out from under
+                    # itself.
+                    try:
+                        await self._git.prune_checkpoints(
+                            self.conversation_id, [e["turnId"] for e in self._journal_index]
+                        )
+                    except Exception as exc:  # noqa: BLE001 - best-effort: pruning must never fail the turn
+                        logger.warning(
+                            "coder checkpoint prune failed for conversation {}: {}: {}",
+                            self.conversation_id,
+                            type(exc).__name__,
+                            exc,
+                        )
+            finally:
+                # Release AFTER all the turn-end bookkeeping above —
+                # checkpoint_post, journal note, fsync, prune — so those can
+                # never race a newly-started turn that grabs the lease the
+                # instant it frees. This inner `finally` runs on EVERY
+                # terminal path (finished/failed/cancelled — `_consume`'s
+                # own status handling above covers those — and
+                # interrupted-by-cancellation too: a `CancelledError` from
+                # `stop()`'s `self._consumer.cancel()` still unwinds through
+                # this `finally`, Python guarantees that) AND even if the
+                # bookkeeping above somehow raised despite its own
+                # "never fails the turn" contracts. `release` is idempotent
+                # (only actually releases for the CURRENT holder), so it's
+                # harmless if `start_turn` itself already released on a
+                # failure that never got this far.
+                lease_for(self._cwd).release(self.conversation_id)
             # Turn-end boundary (P4b): drain the next queued follow-up, if
             # any — AFTER the bookkeeping above so a queued turn's own
             # journal/fsync never races the one just closing out. This may
@@ -889,51 +1018,89 @@ class CoderRunner(WireRunner):
         that gap, by reaching into the OTHER runner via the `_conversations`
         registry and calling its drain hook directly.
 
+        Loops rather than popping once (P6a review Critical 3): a popped
+        waiter can DECLINE without ever holding the lease — a ghost
+        (dropped/stopped since it queued: `get_conversation` returns `None`)
+        or one whose own `_maybe_drain_queue` finds an empty queue right
+        now. Stopping after one pop in either case would strand every
+        waiter BEHIND the declining one forever, since nothing else will
+        ever call `_wake_next_waiter` again once the lease is free and
+        nobody is separately releasing it. So: keep popping and trying
+        until either the lease is actually taken (`holder_of()` becomes
+        non-`None` — including by ourselves, transitively, if a woken
+        runner's drain starts a turn) or the FIFO is empty. Bounded by the
+        FIFO's length at any instant — each iteration permanently removes
+        one entry via `pop_waiter()`, and a declining waiter can never be
+        re-queued into the SAME lease-freeing pass. `stop()` additionally
+        `remove_waiter`s a conversation from the FIFO the moment it's
+        dropped, so a ghost is at worst a rare, already-shrinking
+        population, never a growing one.
+
         No lost wake-up / no double-pop: called right after this
         conversation's OWN release + self-drain attempt, with no `await` in
         between `lease.release()` (in `_consume`'s `finally`, just above)
         and here other than `_maybe_drain_queue`'s own synchronous-until-a-
         real-await prefix — so nothing else can have grabbed the lease
-        in between. `pop_waiter()` removes AT MOST one conversation from the
-        FIFO per call, so this cannot double-pop; the woken runner's
-        `_maybe_drain_queue` re-checks the lease itself (the same read-only
-        peek every caller uses) before touching anything, so even a
-        hypothetical race resolves safely — it just leaves the item queued
-        for the next opportunity instead of starting incorrectly.
+        in between. Each loop iteration's `pop_waiter()` removes AT MOST one
+        conversation from the FIFO, so this cannot double-pop; the woken
+        runner's `_maybe_drain_queue` re-checks the lease itself (the same
+        read-only peek every caller uses) before touching anything, so even
+        a hypothetical race resolves safely — it just leaves the item
+        queued for the next opportunity instead of starting incorrectly.
+
+        Shielded (P6a review Critical 2b): `asyncio.shield` decouples the
+        WOKEN runner's `start_turn` from OUR OWN task's cancellation scope.
+        Without it, this call runs the woken runner's turn start as a
+        literal continuation of OUR coroutine's call stack — so if this
+        conversation is `stop()`-ped WHILE that woken turn is still deep in
+        `_before_prompt_sent` (P5's git checkpoint — real seconds against a
+        real repo), the `CancelledError` delivered to OUR task lands INSIDE
+        the woken runner's code before its own consumer task even exists to
+        one day release the lease on its behalf. `shield` lets our own
+        `await` be cancelled (propagating normally, as `stop()` intends)
+        while the woken runner's work keeps running independently to
+        completion in the background — its own eventual `_consume`
+        `finally` (or `start_turn`'s ownership-based release, if it fails)
+        still runs, on its own schedule, unaffected by what happens to us.
 
         No unbounded recursion/ping-pong: this method does not call itself.
-        It calls `_maybe_drain_queue()` on ONE other runner, which — being
-        `_maybe_drain_queue`, not `_wake_next_waiter` — never chains into a
-        FURTHER handoff itself. The NEXT hop in a FIFO chain of several
-        waiters only happens later, from THAT runner's own eventual
-        turn-end (its own `_consume` finally, calling ITS `_wake_next_waiter`
-        once ITS turn is actually done) — so several queued conversations
-        still drain in full, one real turn at a time, never all at once
-        from a single release.
+        Each loop iteration calls `_maybe_drain_queue()` on ONE other
+        runner, which — being `_maybe_drain_queue`, not `_wake_next_waiter`
+        — never chains into a FURTHER handoff itself. The NEXT hop in a
+        FIFO chain of several waiters only happens later, from THAT
+        runner's own eventual turn-end (its own `_consume` finally, calling
+        ITS `_wake_next_waiter` once ITS turn is actually done) — so
+        several queued conversations still drain in full, one real turn at
+        a time, never all at once from a single release.
 
         Best-effort and exception-swallowing on purpose: a bug in some
         OTHER conversation's drain must never break OUR OWN turn-end
         teardown (this runs from `_consume`'s `finally` and from `stop()`).
+        `Exception` only, same as `_maybe_drain_queue` — a `CancelledError`
+        delivered to OUR OWN task (e.g. at the `shield`ed await, per
+        `stop()`'s own cancellation) must still propagate, not be
+        swallowed.
         """
         lease = lease_for(self._cwd)
-        if lease.holder_of() is not None:
-            return
-        next_holder = lease.pop_waiter()
-        if next_holder is None:
-            return
-        waiter = get_conversation(self._cwd, next_holder)
-        if waiter is None:
-            return
-        try:
-            await waiter._maybe_drain_queue()  # noqa: SLF001 - same-module sibling runner
-        except Exception as exc:  # noqa: BLE001 - best-effort: must never break OUR teardown
-            logger.warning(
-                "coder write-lease handoff from {} to {} failed: {}: {}",
-                self.conversation_id,
-                next_holder,
-                type(exc).__name__,
-                exc,
-            )
+        while True:
+            if lease.holder_of() is not None:
+                return
+            next_holder = lease.pop_waiter()
+            if next_holder is None:
+                return
+            waiter = get_conversation(self._cwd, next_holder)
+            if waiter is None:
+                continue  # ghost waiter — dropped/stopped since it queued
+            try:
+                await asyncio.shield(waiter._maybe_drain_queue())  # noqa: SLF001
+            except Exception as exc:  # noqa: BLE001 - best-effort: must never break OUR teardown
+                logger.warning(
+                    "coder write-lease handoff from {} to {} failed: {}: {}",
+                    self.conversation_id,
+                    next_holder,
+                    type(exc).__name__,
+                    exc,
+                )
 
     async def stop(self) -> None:
         await super().stop()
@@ -942,9 +1109,18 @@ class CoderRunner(WireRunner):
             await self._cancel_pending("runner_stopped", state)
         else:
             self._pending_requests.clear()
-        # Write-lease (P6a): defensive, belt-and-suspenders release for a
-        # dropped/stopped runner. In the common case this is a no-op —
-        # `stop()`'s `super().stop()` cancels an active `_consumer`, whose
+        lease = lease_for(self._cwd)
+        # Write-lease (P6a review Critical 3): a stopped/dropped conversation
+        # must leave the FIFO too, not just release the lease if it happened
+        # to hold it — `drop_conversation` (and `routes_coder.py`'s
+        # `_recycling_stream`, which calls it on a failed/dead stream) both
+        # route through here, and a waiter left registered after its runner
+        # is gone is a ghost `_wake_next_waiter` can only skip over, never
+        # actually wake. `remove_waiter` is a no-op if we were never queued.
+        lease.remove_waiter(self.conversation_id)
+        # Defensive, belt-and-suspenders release for a dropped/stopped
+        # runner. In the common case this is a no-op — `stop()`'s
+        # `super().stop()` cancels an active `_consumer`, whose
         # `CancelledError` unwinds through `_consume`'s `finally` (above)
         # and already released it — `release()` returning False here proves
         # that. This exists for the cases that path doesn't cover: no
@@ -953,7 +1129,7 @@ class CoderRunner(WireRunner):
         # A runner that's stopped can never release its own lease any other
         # way, so skipping this would let a dropped runner strand the
         # workspace — the single biggest risk this task calls out.
-        if lease_for(self._cwd).release(self.conversation_id):
+        if lease.release(self.conversation_id):
             await self._wake_next_waiter()
 
     async def _cancel_pending(self, reason: str, state) -> None:  # noqa: ANN001
