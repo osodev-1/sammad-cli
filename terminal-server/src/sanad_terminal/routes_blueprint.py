@@ -48,20 +48,11 @@ from sanad_terminal.blueprint_trust import (
     trust_statuses,
 )
 from sanad_terminal.routes_workspace import _settings, workspace_root
+from sanad_terminal.workspace_locks import lock_for
 
 router = APIRouter(prefix="/internal/blueprint")
 
 Root = Annotated[Path, Depends(workspace_root)]
-
-# One lock per workspace root — writes serialize; reads are lock-free.
-_locks: dict[str, asyncio.Lock] = {}
-
-
-def _lock_for(root: Path) -> asyncio.Lock:
-    key = str(root)
-    if key not in _locks:
-        _locks[key] = asyncio.Lock()
-    return _locks[key]
 
 
 def _sanad_dir(root: Path) -> Path:
@@ -318,7 +309,7 @@ async def apply(request: Request, root: Root, body: ApplyBody) -> JSONResponse:
 
     trust_key = _settings(request).trust_store_key
 
-    async with _lock_for(root):
+    async with lock_for(root):
         try:
             result = await asyncio.to_thread(apply_plan, root, parsed)
         except PlanError as exc:
@@ -398,7 +389,7 @@ async def rollback_tx(request: Request, root: Root, body: RollbackBody) -> JSONR
         )
     trust_key = _settings(request).trust_store_key
 
-    async with _lock_for(root):
+    async with lock_for(root):
         record = json.loads(record_path.read_text(encoding="utf-8"))
         after = record.get("after")
         if isinstance(after, dict):
@@ -478,7 +469,7 @@ async def trust_review(request: Request, root: Root, body: TrustBody) -> JSONRes
             content={"error": {"code": "not_executable", "message": "not a gated definition path"}},
         )
     key = _settings(request).trust_store_key
-    async with _lock_for(root):
+    async with lock_for(root):
         target = root / rel
         if not target.is_file():
             return JSONResponse(

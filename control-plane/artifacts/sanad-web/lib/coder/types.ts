@@ -44,6 +44,18 @@ export interface CoderTurnState {
   queue?: { sendId: string; input: string }[];
 }
 
+/** One turn's checkpoint diff (P5 Task 3) — name-status + unified patch,
+ * `pre..post` once the turn has finished or `pre..worktree` while it's
+ * still running (server-decided; the client just renders what it gets). */
+export interface CoderDiff {
+  nameStatus: { status: string; path: string }[];
+  patch: string;
+  truncated: boolean;
+  filesChanged: number;
+  additions: number;
+  deletions: number;
+}
+
 /** Approval payload fields the card renders (wire snake_case). */
 export interface ApprovalPayload {
   id: string; tool_call_id?: string; sender?: string; action?: string;

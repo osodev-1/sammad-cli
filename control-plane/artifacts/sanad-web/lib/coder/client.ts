@@ -1,7 +1,7 @@
 import { parseSessionGrant } from "@/lib/terminal/protocol";
 import { withSession } from "@/lib/terminal/workspace-model";
 import { streamNdjson } from "@/lib/ndjson";
-import type { CoderItem, CoderTurnState, RespondPayload } from "./types";
+import type { CoderDiff, CoderItem, CoderTurnState, RespondPayload } from "./types";
 
 /** CoderPanel's phase machine (P1b + P4). Exported so pure routing helpers
  * below (and their tests) share the exact same type the component uses —
@@ -349,6 +349,88 @@ export async function fetchCoderTurn(
     };
   } catch {
     return null;
+  }
+}
+
+/** One turn's checkpoint diff (P5 Task 3) — name-status + unified patch,
+ * `pre..post` once finished or `pre..worktree` while still running
+ * (server-decided). Never throws — a failed fetch surfaces as
+ * `{ok:false, code}` for the caller to show a fallback instead of crashing
+ * the panel. */
+export interface CoderDiffResult extends Partial<CoderDiff> {
+  ok: boolean;
+  code?: string;
+}
+
+export async function fetchCoderDiff(
+  cid: string,
+  turnId: string,
+  path?: string,
+  sessionId?: string,
+): Promise<CoderDiffResult> {
+  try {
+    const qs = `turnId=${encodeURIComponent(turnId)}${path ? `&path=${encodeURIComponent(path)}` : ""}`;
+    const res = await fetch(
+      withSession(
+        `/api/coder/conversations/${encodeURIComponent(cid)}/diff?${qs}`,
+        sessionId,
+      ),
+    );
+    const b = await res.json().catch(() => null);
+    if (res.ok) {
+      const data = b?.data ?? b;
+      return {
+        ok: true,
+        nameStatus: data?.nameStatus,
+        patch: data?.patch,
+        truncated: data?.truncated,
+        filesChanged: data?.filesChanged,
+        additions: data?.additions,
+        deletions: data?.deletions,
+      };
+    }
+    return { ok: false, code: b?.error?.code };
+  } catch {
+    return { ok: false, code: "network" };
+  }
+}
+
+/** Restore the worktree to one turn's pre-checkpoint state — human-only, no
+ * agent-facing equivalent. Never throws — a failed revert surfaces as
+ * `{ok:false, code, message}` so the caller can show an error and let the
+ * user retry. */
+export async function revertCoder(
+  cid: string,
+  turnId: string,
+  sessionId?: string,
+): Promise<{
+  ok: boolean;
+  safetyCheckpoint?: string;
+  reverted?: { turnId: string };
+  code?: string;
+  message?: string;
+}> {
+  try {
+    const res = await fetch(
+      withSession(`/api/coder/conversations/${encodeURIComponent(cid)}/revert`, sessionId),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ turnId }),
+      },
+    );
+    const b = await res.json().catch(() => null);
+    if (res.ok) {
+      const data = b?.data ?? b;
+      return { ok: true, safetyCheckpoint: data?.safetyCheckpoint, reverted: data?.reverted };
+    }
+    return { ok: false, code: b?.error?.code, message: b?.error?.message };
+  } catch {
+    return {
+      ok: false,
+      code: "network",
+      message: "Network error — check your connection.",
+    };
   }
 }
 

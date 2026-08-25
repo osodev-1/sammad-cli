@@ -15,6 +15,7 @@ credential (`workspace_root`).
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -35,9 +36,11 @@ from sanad_terminal.coder_runner import (
     put_conversation,
 )
 from sanad_terminal.control_plane import ControlPlaneError
+from sanad_terminal.git_ops import GitError, _checkpoint_ref
 from sanad_terminal.routes_workspace import _settings, workspace_root
 from sanad_terminal.wire_runner import WireRunnerError
 from sanad_terminal.workspace import build_child_env, verified_trust_hashes
+from sanad_terminal.workspace_locks import lock_for
 
 router = APIRouter(prefix="/internal/coder")
 
@@ -84,6 +87,10 @@ class SteerBody(BaseModel):
     input: str = Field(min_length=1, max_length=32_000)
 
 
+class RevertBody(BaseModel):
+    turnId: str = Field(min_length=1, max_length=64)
+
+
 def _err(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": {"code": code, "message": message}})
 
@@ -92,6 +99,54 @@ def _bad_cid(cid: str) -> JSONResponse | None:
     if not CONVERSATION_ID_RE.fullmatch(cid):
         return _err(400, "invalid_conversation", "malformed conversation id")
     return None
+
+
+# -- checkpoints (P5 Task 3) — human-only diff/revert over the durable
+# per-turn checkpoint SHAs Task 2 wrote into the journal (`checkpointPre`/
+# `checkpointPost`). No agent-facing path exists for either.
+
+
+def _journal_dir(root: Path, cid: str) -> Path:
+    # Mirrors `_spawn`'s own `journal_dir=root.parent / "agentd" / "coder" / cid`.
+    return root.parent / "agentd" / "coder" / cid
+
+
+def _read_checkpoint_entry(root: Path, cid: str, turn_id: str) -> dict[str, Any] | None:
+    """`turnId`'s durable journal index entry (`turns.json`), read straight
+    off disk. A live runner's own in-memory index writes through to this
+    same file synchronously — at turn start (`CoderRunner.start_turn` calls
+    `_journal_note_turn` right after `super().start_turn()`, which itself
+    awaits the pre-checkpoint before returning) and again at turn end
+    (`_consume`'s finally) — so there is no live/durable divergence to
+    reconcile: reading disk unconditionally is correct whether the turn is
+    still running, has finished, or its runner has since been dropped
+    entirely (`/stop`, or `_recycling_stream` dropping a failed turn)."""
+    index_path = _journal_dir(root, cid) / "turns.json"
+    try:
+        raw = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, list):
+        return None
+    for entry in raw:
+        if isinstance(entry, dict) and entry.get("turnId") == turn_id:
+            return entry
+    return None
+
+
+def _record_revert(root: Path, cid: str, marker: dict[str, Any]) -> None:
+    """Append one `{"kind":"revert",...}` marker as a durable JSON line
+    beside `turns.json` — enough for the UI/dock to later show "reverted to
+    turn N, safety <sha>". Best-effort: a write failure here must never
+    undo an already-completed revert (the git-level restore is what
+    matters; this is bookkeeping)."""
+    path = _journal_dir(root, cid) / "reverts.ndjson"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(marker) + "\n")
+    except OSError as exc:
+        logger.warning("coder revert: could not record marker for {}: {}", cid, exc)
 
 
 async def _spawn(
@@ -418,3 +473,82 @@ async def stop(_: Gated, root: Root, cid: str) -> JSONResponse:
         return bad
     await drop_conversation(root, cid)
     return JSONResponse({"ok": True})
+
+
+@router.get("/conversations/{cid}/diff")
+async def diff(
+    _: Gated, root: Root, request: Request, cid: str, turnId: str, path: str | None = None
+) -> JSONResponse:
+    """Name-status + unified patch for one turn: `pre..post` once the turn
+    has finished, `pre..worktree` while it's still running (or when the
+    post checkpoint was skipped as clean — same "diff against whatever the
+    tree looks like now" fallback either way)."""
+    if bad := _bad_cid(cid):
+        return bad
+    entry = _read_checkpoint_entry(root, cid, turnId)
+    pre = entry.get("checkpointPre") if entry else None
+    if not isinstance(pre, str) or not pre:
+        return _err(404, "no_checkpoint", "no checkpoint for this turn")
+    post = entry.get("checkpointPost") if entry else None
+    target = post if isinstance(post, str) and post else None
+
+    from sanad_terminal.routes_git import _repo
+
+    settings = _settings(request)
+    try:
+        result = await _repo(request, root).checkpoint_diff(
+            pre, target, path=path, max_bytes=settings.coder_diff_max_bytes
+        )
+    except GitError as exc:
+        return _err(500, exc.code, exc.message)
+    return JSONResponse(result)
+
+
+@router.post("/conversations/{cid}/revert")
+async def revert(
+    _: Gated, root: Root, request: Request, cid: str, body: RevertBody
+) -> JSONResponse:
+    """Restore the worktree to one turn's PRE-checkpoint state — human-only,
+    no agent-facing equivalent. Refuses while ANY conversation in this
+    workspace is busy (whole-workspace, cross-conversation: there is no
+    write-lease until P6), takes a safety checkpoint of whatever the tree
+    looked like right before restoring (so the revert itself is undoable),
+    and shares `lock_for(root)` with the blueprint apply/rollback/trust
+    routes so the two families of workspace-tree writers can never
+    interleave."""
+    if bad := _bad_cid(cid):
+        return bad
+    if any(r.busy for r in list_conversations(root)):
+        return _err(409, "workspace_busy", "a turn is running in this workspace")
+    entry = _read_checkpoint_entry(root, cid, body.turnId)
+    pre = entry.get("checkpointPre") if entry else None
+    if not isinstance(pre, str) or not pre:
+        return _err(404, "no_checkpoint", "no checkpoint for this turn")
+
+    from sanad_terminal.routes_git import _repo
+
+    repo = _repo(request, root)
+    async with lock_for(root):
+        try:
+            # A fresh, monotonically increasing suffix per revert (never
+            # reused) — two reverts of the SAME turnId must not clobber
+            # each other's safety ref, or the first revert's "undo the
+            # undo" net would be silently lost.
+            safety_ref = _checkpoint_ref(cid, body.turnId, f"safety-{time.time_ns() // 1000}")
+            # `parent=None`: a safety checkpoint is a standalone snapshot of
+            # right-now, not chained onto the runner's own checkpoint
+            # history — it must never skip-when-clean (create_checkpoint's
+            # skip only applies when a `parent` is given).
+            safety_sha = await repo.create_checkpoint(
+                safety_ref, f"safety before revert to turn {body.turnId}", parent=None
+            )
+            await repo.restore_to(pre)
+        except GitError as exc:
+            return _err(500, exc.code, exc.message)
+        _record_revert(
+            root, cid, {"kind": "revert", "turnId": body.turnId, "toPre": pre, "safety": safety_sha}
+        )
+
+    return JSONResponse(
+        {"ok": True, "safetyCheckpoint": safety_sha, "reverted": {"turnId": body.turnId}}
+    )
