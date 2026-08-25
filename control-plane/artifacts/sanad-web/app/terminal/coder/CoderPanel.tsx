@@ -1113,17 +1113,19 @@ export default function CoderPanel({
 
   // 1-based ordinal among this conversation's checkpointed turns, keyed by
   // message index — the footer/RevertConfirm's human-readable "turn N" (P5
-  // Task 4); turnId itself (opaque) drives every actual call.
+  // Task 4); turnId itself (opaque) drives every actual call. The final `n`
+  // is also this conversation's TOTAL checkpoint count — RevertConfirm
+  // needs it (via CheckpointFooter's `totalCheckpoints`) to tell whether
+  // the turn being reverted is the latest one (P5 Task 4 review, Important:
+  // only the latest turn's own pre..post diff is the FULL revert impact).
   const checkpointOrdinal = new Map<number, number>();
-  {
-    let n = 0;
-    messages.forEach((m, i) => {
-      if (m.role === "assistant" && m.turnId && m.checkpoint) {
-        n += 1;
-        checkpointOrdinal.set(i, n);
-      }
-    });
-  }
+  let totalCheckpoints = 0;
+  messages.forEach((m, i) => {
+    if (m.role === "assistant" && m.turnId && m.checkpoint) {
+      totalCheckpoints += 1;
+      checkpointOrdinal.set(i, totalCheckpoints);
+    }
+  });
   const composerDisabled = phase === "error";
   const modeDisabled = !cid || phase === "error" || phase === "starting";
 
@@ -1274,6 +1276,7 @@ export default function CoderPanel({
                       sessionId={sessionId}
                       turnId={m.turnId}
                       turnNumber={checkpointOrdinal.get(mi) ?? 1}
+                      totalCheckpoints={totalCheckpoints}
                       checkpoint={m.checkpoint}
                       onReverted={() => onReverted?.()}
                     />

@@ -30,3 +30,28 @@ export function buildRevertWarning(turnNumber: number): string {
     `pending blueprint rollback.`
   );
 }
+
+/** Whether RevertConfirm's per-turn file list (from `fetchCoderDiff`,
+ * that turn's OWN `pre..post`) understates what a revert actually discards
+ * (P5 Task 4 review, Important). `fetchCoderDiff` only ever diffs the ONE
+ * turn being reverted — that equals the full disk delta to the current
+ * worktree ONLY when it's the LATEST checkpointed turn (nothing came after
+ * it to also get discarded). For any earlier turn, later turns' changes are
+ * discarded by the revert too but never appear in that turn's own diff, so
+ * the list alone would be misleading about a destructive action. Frontend-
+ * only signal — both `turnNumber` and `totalCheckpoints` are already
+ * computed client-side (the footer's ordinal / `coderCheckpoints.length`);
+ * no backend change (a true cumulative `pre..worktree` diff for an
+ * arbitrary historical turn is a separate, logged follow-up). */
+export function revertDiscardsUnlistedChanges(
+  turnNumber: number,
+  totalCheckpoints: number,
+): boolean {
+  return turnNumber < totalCheckpoints;
+}
+
+/** The caveat line RevertConfirm shows alongside the file list whenever
+ * `revertDiscardsUnlistedChanges` is true — kept as a named constant so the
+ * component and its test read the same string. */
+export const LATER_TURNS_CAVEAT =
+  "Later turns' changes will also be discarded but aren't listed below.";
