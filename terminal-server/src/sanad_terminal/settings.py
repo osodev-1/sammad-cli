@@ -69,6 +69,12 @@ class TerminalSettings:
     # and otherwise unbounded, so an authenticated `POST /send {queue:true}`
     # spam loop must be capped like every other coder_* resource above.
     coder_max_queue_depth: int = 50
+    # Write-lease staleness backstop (P6a). A lease is held for a whole
+    # turn, so this MUST sit above coder_max_turn_seconds (3600) — it may
+    # only ever reclaim from a runner that died holding it, never from a
+    # long-but-legitimate turn. A reclaim logs a warning; it means a
+    # release leaked.
+    coder_write_lease_ttl_seconds: int = 3900
     # HMAC key for the blueprint trust store — agentd-env only, NEVER in the
     # child env. Empty = legacy unsigned store (local/dev/railway).
     trust_store_key: str = ""
@@ -170,6 +176,9 @@ class TerminalSettings:
             coder_journal_max_bytes=int(e.get("CODER_JOURNAL_MAX_BYTES", str(20 * 1024 * 1024))),
             coder_diff_max_bytes=int(e.get("CODER_DIFF_MAX_BYTES", str(200_000))),
             coder_max_queue_depth=int(e.get("CODER_MAX_QUEUE_DEPTH", "50")),
+            coder_write_lease_ttl_seconds=int(
+                e.get("CODER_WRITE_LEASE_TTL_SECONDS", "3900")
+            ),
             trust_store_key=e.get("TRUST_STORE_KEY", ""),
             architect_max_turn_seconds=float(e.get("ARCHITECT_MAX_TURN_SECONDS", "1800")),
             worker_enabled=e.get("WORKER_ENABLED", "") == "1",
