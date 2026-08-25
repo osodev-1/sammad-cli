@@ -29,10 +29,16 @@ _TURN_KEEP = 5
 
 
 class WireRunnerError(Exception):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, holder: str | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        # Optional structured payload for `code == "lease_unavailable"`
+        # (P6a): the conversation id currently holding the workspace
+        # write-lease, so a route can surface "waiting for conversation X"
+        # without parsing `message`. `None` for every other error code —
+        # every existing raise site omits it, so this is purely additive.
+        self.holder = holder
 
 
 def _preexec(
@@ -318,20 +324,24 @@ class WireRunner:
         #
         # Registering the turn (below) only AFTER the prompt is sent does
         # NOT gate `/steer` or `/cancel` (an earlier version of this comment
-        # claimed it did — inaccurate, corrected in final review). `steer()`
-        # checks `self.busy`, which reads `self._current` — already set
-        # above, before this await — and `cancel()` only checks
-        # `self._prompt_id is None`, which still holds whatever the
-        # PREVIOUS turn left it as until `self._prompt_id = pid` a few
-        # lines down. Neither reads `_turns`/`_turn_order` at all, so a
-        # client's `/steer` or `/cancel` can already reach the wire in the
-        # gap between "turn looks busy" (`self._current` set) and "prompt
-        # actually transmitted" (`_send` below) — a race that predates this
-        # hook. `_before_prompt_sent` (P5's checkpoint snapshot) doesn't
-        # create that gap, it WIDENS it, since the prompt now waits on this
-        # await too. Gating steer/cancel on "prompt actually sent" is real,
-        # separately-tracked write-lease hardening (P6) — deliberately not
-        # done here.
+        # claimed it did — inaccurate, corrected in final review). Neither
+        # reads `_turns`/`_turn_order` at all, so a client's `/steer` or
+        # `/cancel` can already reach here in the gap between "turn looks
+        # busy" (`self._current` set, above) and "prompt actually
+        # transmitted" (`_send` below) — a race that predates this hook.
+        # `_before_prompt_sent` (P5's checkpoint snapshot) doesn't create
+        # that gap, it WIDENS it, since the prompt now waits on this await
+        # too.
+        #
+        # P6a closes this for real: `cancel()` already gated on
+        # `self._prompt_id is None` (still true here — it only holds
+        # whatever the PREVIOUS turn left it as until `self._prompt_id =
+        # pid` a few lines down), so it was already a safe no-op in this
+        # window rather than sending a stray `cancel` for a prompt that was
+        # never transmitted; that's unchanged. `CoderRunner.steer()` (the
+        # one caller with no equivalent check) now gates on that SAME
+        # `self._prompt_id is None` condition too, so a control message can
+        # no longer precede the prompt it's meant to steer.
         await self._before_prompt_sent(state)
         pid = self._next_id()
         try:
