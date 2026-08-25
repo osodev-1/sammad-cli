@@ -35,6 +35,7 @@ import {
   type StoredArchitectMessage,
   type StoredCoderMessage,
 } from "@/lib/sessions/state";
+import type { CheckpointSummary } from "@/lib/coder/transcript";
 
 const POLL_MS = 4000;
 const MAX_TERMINALS = 3;
@@ -110,6 +111,13 @@ export default function SessionWorkspace({
      turn — see CoderPanel's `needsInterruptedReplay` guard. */
   const [coderLastInterruptedTurnId, setCoderLastInterruptedTurnId] =
     useState<string | undefined>(undefined);
+  /* Checkpoint-bearing turns (P5 Task 4), threaded live from CoderPanel so
+     the dock's Checkpoints section can list/Review/Revert them without a
+     second fetch of its own — never persisted (rebuilt from CoderPanel's
+     own live transcript on every mount). */
+  const [coderCheckpoints, setCoderCheckpoints] = useState<
+    { turnId: string; checkpoint: CheckpointSummary }[]
+  >([]);
   /* Context dock (R4): open state persists; reviews + activity feed it. */
   const [dockOpen, setDockOpen] = useState(true);
   const [pendingReviews, setPendingReviews] = useState<string[]>([]);
@@ -375,6 +383,17 @@ export default function SessionWorkspace({
     },
     [refresh],
   );
+
+  /* A coder revert (P5 Task 4) just restored the workspace tree to an
+     earlier turn's pre-checkpoint — same "the machine is definitely up,
+     files just changed under everything that reads them" situation as a
+     blueprint apply, minus the reveal (a revert removes/restores files
+     already in the tree; there's nothing new to surface). Revert never
+     touches the coder turn machine, so nothing else here needs to react. */
+  const onCoderReverted = useCallback(() => {
+    void refresh(true);
+    setActivityEpoch((e) => e + 1); // dock refetches trust + history
+  }, [refresh]);
 
   /* "In addition to the main context": a draft landing while the dock is
      hidden (or the user is off the Blueprint tab) gets a toast so it is
@@ -643,6 +662,8 @@ export default function SessionWorkspace({
                 onPersist={setCoderTranscript}
                 lastInterruptedTurnId={coderLastInterruptedTurnId}
                 onLastInterruptedTurnId={setCoderLastInterruptedTurnId}
+                onCheckpoints={setCoderCheckpoints}
+                onReverted={onCoderReverted}
               />
             </div>
           )}
@@ -686,12 +707,15 @@ export default function SessionWorkspace({
       <div className="nav-hide-sm" style={s.dockCol}>
         <ContextDock
           sessionId={sessionId}
-          context={graphActive ? "graph" : "other"}
+          context={graphActive ? "graph" : coderActive ? "coder" : "other"}
           open={dockOpen}
           onToggle={() => setDockOpen((v) => !v)}
           pendingReviews={pendingReviews}
           activityEpoch={activityEpoch}
           onOpenGraph={openGraph}
+          coderConversationId={coderConvId}
+          coderCheckpoints={coderCheckpoints}
+          onCoderReverted={onCoderReverted}
         />
       </div>
       {notice && <div style={s.notice}>{notice}</div>}
