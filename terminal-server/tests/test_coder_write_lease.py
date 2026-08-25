@@ -418,3 +418,234 @@ async def test_architect_runner_never_touches_the_write_lease(tmp_path):
         assert lease_for(tmp_path).holder_of() is None
     finally:
         await runner.stop()
+
+
+# -- P6a review regressions -------------------------------------------------
+# One test per Critical the Task 2 review proved with a probe. Each drives the
+# real failure sequence, so a regression reproduces the original defect rather
+# than merely failing an assertion about internals.
+
+
+@pytest.mark.asyncio
+async def test_empty_send_id_cannot_bypass_the_lease(tmp_path):
+    """Review Critical 1. `_is_idempotent_start_turn_passthrough` guarded on
+    `send_id is None` while the base guards on TRUTHINESS. So once a
+    conversation had ANY prior turn carrying `send_id=""`, a later `""` send
+    looked like an "idempotent resend" and SKIPPED the acquire — while the
+    base, seeing `""` as falsy, went on to start a genuinely new turn. Net
+    effect: a full turn running with no lease alongside a real holder.
+
+    `SendBody.sendId` is `str | None` with no `min_length`, so `""` reaches
+    `start_turn` straight from HTTP. The prior turn is what arms the bug, so
+    the test has to establish one first.
+    """
+    a = _coder(tmp_path)
+    b = _coder(tmp_path)
+    put_conversation(tmp_path, a)
+    put_conversation(tmp_path, b)
+    await a.start()
+    await b.start()
+    try:
+        # Arm it: B completes a turn carrying an empty send_id, while the
+        # lease is free and uncontended.
+        await b.start_turn("first", send_id="")
+        await _await_consumer(b)
+        assert lease_for(tmp_path).holder_of() is None
+        assert len(b._turn_order) == 1
+
+        # A now holds the lease.
+        await a.start_turn("HANG")
+        assert lease_for(tmp_path).holder_of() == a.conversation_id
+
+        # The same empty send_id again. This is the send that used to slip
+        # past the acquire and start a second concurrent writer.
+        with pytest.raises(WireRunnerError) as exc_info:
+            await b.start_turn("second", send_id="")
+        assert exc_info.value.code == "lease_unavailable"
+        assert exc_info.value.holder == a.conversation_id
+
+        assert len(b._turn_order) == 1, "B started a second turn with no lease"
+        assert b.busy is False
+        assert lease_for(tmp_path).holder_of() == a.conversation_id
+    finally:
+        await a.stop()
+        await b.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_handoff_does_not_leave_the_woken_runner_holding_the_lease(
+    tmp_path, monkeypatch
+):
+    """Review Critical 2. The handoff runs the WOKEN runner's `start_turn`
+    inside the RELEASING runner's task, so it used to inherit that task's
+    cancellation scope; `except Exception` misses `CancelledError`, so a
+    cancel delivered mid-handoff left B holding the lease with no consumer
+    to release it — and `_current` stuck `running`, so `b.busy` stayed True
+    forever and even fresh input (which a busy runner routes to
+    enqueue-without-drain) could not recover it. `asyncio.shield` decouples
+    the woken runner's work from our cancellation.
+
+    Cancelling `_wake_next_waiter`'s task directly is what makes this
+    deterministic: reproducing it via `stop()` depends on exactly when the
+    loop redelivers cancellation into a `finally`, which is far too delicate
+    to pin a regression on.
+    """
+    a = _coder(tmp_path)
+    b = _coder(tmp_path)
+    put_conversation(tmp_path, a)
+    put_conversation(tmp_path, b)
+    await a.start()
+    await b.start()
+    try:
+        await a.start_turn("HANG")
+        with pytest.raises(WireRunnerError) as exc_info:
+            await b.start_turn("b work", send_id="b1")
+        b.enqueue("b1", "b work", reason="waiting_for_lease", blocked_by=exc_info.value.holder)
+
+        # Hold B inside its pre-prompt work so the handoff is genuinely
+        # in flight when the cancellation lands.
+        in_flight = asyncio.Event()
+        original = CoderRunner._before_prompt_sent
+
+        async def slow_pre_prompt(self, state):
+            if self is b:
+                in_flight.set()
+                await asyncio.sleep(0.3)
+            return await original(self, state)
+
+        monkeypatch.setattr(CoderRunner, "_before_prompt_sent", slow_pre_prompt)
+
+        # End A's turn WITHOUT awaiting its consumer: the automatic handoff
+        # runs inside A's own `_consume` finally, so A's consumer task is
+        # sitting in the handoff await while B does its slow pre-prompt work.
+        await a.cancel()
+        await asyncio.wait_for(in_flight.wait(), timeout=5.0)
+
+        # Cancel A's consumer *there* — the exact delivery the old code
+        # swallowed into B's half-finished start_turn.
+        consumer = a._consumer
+        assert consumer is not None
+        consumer.cancel()
+
+        # The forbidden outcome: B holds the lease with no turn to release
+        # it. Shielded, B's start_turn completes on its own schedule.
+        await _wait_for(
+            lambda: lease_for(tmp_path).holder_of() != b.conversation_id or b._turn_order != []
+        )
+        if lease_for(tmp_path).holder_of() == b.conversation_id:
+            assert b._turn_order != [], "B holds the lease with no turn — leaked"
+    finally:
+        await a.stop()
+        await b.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_ghost_waiter_does_not_strand_the_next_waiter(tmp_path):
+    """Review Critical 3. `_wake_next_waiter` popped exactly one waiter and
+    returned, so a waiter that had since been dropped/stopped consumed the
+    wake-up and every conversation behind it waited forever with the lease
+    sitting free."""
+    a = _coder(tmp_path)
+    ghost = _coder(tmp_path)
+    c = _coder(tmp_path)
+    put_conversation(tmp_path, a)
+    put_conversation(tmp_path, ghost)
+    put_conversation(tmp_path, c)
+    await a.start()
+    await ghost.start()
+    await c.start()
+    try:
+        await a.start_turn("HANG")
+        lease = lease_for(tmp_path)
+
+        # The ghost queues at the lease first...
+        with pytest.raises(WireRunnerError):
+            await ghost.start_turn("ghost work", send_id="g1")
+        # ...then goes away without ever running (stream failure / stop).
+        await ghost.stop()
+
+        # C queues behind it with a real queued item.
+        with pytest.raises(WireRunnerError) as exc_c:
+            await c.start_turn("c work", send_id="c1")
+        c.enqueue("c1", "c work", reason="waiting_for_lease", blocked_by=exc_c.value.holder)
+
+        await a.cancel()
+        await _await_consumer(a)
+
+        # C must actually run despite the ghost being ahead of it.
+        await _wait_for(lambda: c._turn_order != [])
+        assert c.queue_summary() == []
+        assert c._turns[c._turn_order[0]].send_id == "c1"
+        await _await_consumer(c)
+        assert lease.holder_of() is None
+    finally:
+        await a.stop()
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_queue_path_without_start_turn_still_gets_woken(tmp_path):
+    """Review Critical 4. `/send` reaches the queue WITHOUT calling
+    `start_turn` whenever the item is explicitly queued or the runner is
+    busy, so nothing registered a waiter and the handoff could never find
+    the item. `_maybe_drain_queue`'s declining branch now registers it —
+    the same component that owns the queue item owns the FIFO entry."""
+    a = _coder(tmp_path)
+    b = _coder(tmp_path)
+    put_conversation(tmp_path, a)
+    put_conversation(tmp_path, b)
+    await a.start()
+    await b.start()
+    try:
+        await a.start_turn("HANG")
+        lease = lease_for(tmp_path)
+
+        # B never calls start_turn — this is the explicit-queue path.
+        b.enqueue("b1", "b work")
+        await b._maybe_drain_queue()
+
+        assert b._turn_order == [], "B must not start while A holds the lease"
+        assert b.conversation_id in lease.waiters_snapshot(), (
+            "the drain's declining branch must register the waiter, or the "
+            "handoff can never reach this item"
+        )
+
+        await a.cancel()
+        await _await_consumer(a)
+
+        await _wait_for(lambda: b._turn_order != [])
+        assert b._turns[b._turn_order[0]].send_id == "b1"
+        await _await_consumer(b)
+        assert lease.holder_of() is None
+    finally:
+        await a.stop()
+        await b.stop()
+
+
+@pytest.mark.asyncio
+async def test_lease_is_still_held_while_post_turn_bookkeeping_runs(tmp_path, monkeypatch):
+    """Review Minor 12. The spec requires the release to land AFTER the
+    post-turn bookkeeping (checkpoint_post → journal → fsync), so a
+    checkpoint still sees the workspace exclusively its own. That ordering
+    was previously asserted only by a comment."""
+    a = _coder(tmp_path)
+    put_conversation(tmp_path, a)
+    await a.start()
+    seen: list[str | None] = []
+
+    original = CoderRunner._checkpoint_post
+
+    async def spy(self, state):
+        seen.append(lease_for(tmp_path).holder_of())
+        return await original(self, state)
+
+    monkeypatch.setattr(CoderRunner, "_checkpoint_post", spy)
+    try:
+        await a.start_turn("hello")
+        await _await_consumer(a)
+        assert seen == [a.conversation_id], (
+            "the lease must still be held while post-turn bookkeeping runs"
+        )
+        assert lease_for(tmp_path).holder_of() is None
+    finally:
+        await a.stop()
