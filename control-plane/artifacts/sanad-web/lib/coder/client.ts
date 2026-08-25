@@ -362,6 +362,21 @@ export interface CoderDiffResult extends Partial<CoderDiff> {
   code?: string;
 }
 
+/** Whether a cached `CoderDiffResult` is fresh enough that a caller (the
+ * CheckpointFooter's `ensureDiff` guard) should skip re-fetching (P5
+ * final-review fix). `fetchCoderDiff` never throws, so a transient failure
+ * still resolves to a non-null `{ok:false,code}` — treating "non-null" alone
+ * as "already fetched" (the original bug) sticks the footer on its failure
+ * state forever, since neither `diff` becomes null again nor does anything
+ * else re-trigger the fetch. Only an `ok:true` result counts as fresh; a
+ * failed fetch must look re-fetchable to the next Review/Revert click. Pure
+ * so the guard is testable without mounting the component. */
+export function hasFreshDiff(
+  diff: CoderDiffResult | null,
+): diff is CoderDiffResult & { ok: true } {
+  return diff !== null && diff.ok;
+}
+
 export async function fetchCoderDiff(
   cid: string,
   turnId: string,

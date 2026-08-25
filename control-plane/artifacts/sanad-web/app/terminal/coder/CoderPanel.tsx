@@ -25,6 +25,7 @@ import {
   fromStored,
   reduce,
   reduceMessage,
+  sameCheckpointItems,
   toStored,
   type CheckpointSummary,
   type CoderBlock,
@@ -230,6 +231,13 @@ export default function CoderPanel({
    * effect to re-fire on every parent render. */
   const onCheckpointsRef = useRef(onCheckpoints);
   onCheckpointsRef.current = onCheckpoints;
+  /* Last list actually EMITTED to `onCheckpoints` (P5 final-review fix,
+   * paired with the `sameCheckpointItems` guard below) — not the same thing
+   * as `messages`: this is what lets the effect tell "a checkpoint really
+   * changed" apart from "some unrelated field on `messages` changed",
+   * without which every streamed token would re-emit a freshly-built array
+   * and defeat the parent's `useState` bail-out (see the effect's comment). */
+  const lastCheckpointsRef = useRef<{ turnId: string; checkpoint: CheckpointSummary }[]>([]);
 
   /* If the persisted transcript arrives after mount (hydration race), adopt
      it — but never over a conversation that already started. */
@@ -401,7 +409,18 @@ export default function CoderPanel({
    * dock's Checkpoints section should reflect a just-landed post-checkpoint
    * as promptly as the footer does. `checkpoint` only exists once a turn's
    * `{kind:"checkpoint",when:"post"}` item has folded in (reduceMessage), so
-   * a still-running turn is naturally excluded. */
+   * a still-running turn is naturally excluded.
+   *
+   * Guarded (final-review fix) against firing on every unrelated `messages`
+   * mutation: the parent wires `onCheckpoints={setCoderCheckpoints}`, a raw
+   * `useState` setter, and this effect used to build a brand-new array on
+   * EVERY call regardless of whether any checkpoint actually changed — a new
+   * array reference never bails out of React's `Object.is` check, so every
+   * streamed token during a turn (many `setMessages` calls per second) was
+   * cascading a full `SessionWorkspace` re-render (file browser, terminals,
+   * ContextDock included). `sameCheckpointItems` compares the list by value
+   * against the last list we actually emitted; only a real change (a new
+   * checkpoint-bearing turn, or a summary's counts changing) calls upward. */
   useEffect(() => {
     if (!onCheckpointsRef.current) return;
     const items = messages
@@ -410,6 +429,8 @@ export default function CoderPanel({
         Boolean(m.turnId && m.checkpoint),
       )
       .map((m) => ({ turnId: m.turnId, checkpoint: m.checkpoint }));
+    if (sameCheckpointItems(lastCheckpointsRef.current, items)) return;
+    lastCheckpointsRef.current = items;
     onCheckpointsRef.current(items);
   }, [messages]);
 

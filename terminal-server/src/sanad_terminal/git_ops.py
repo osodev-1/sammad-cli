@@ -368,15 +368,31 @@ class GitRepo:
         real `.git/index`. Created via mkstemp (atomic, race-free) under the
         CURRENT (unprivileged-split-agentd, i.e. root in task mode) process
         identity, then chowned to the agent uid/gid so the setuid'd git
-        subprocess can still read/write it. Callers MUST unlink it in a
-        `finally` — cleanup always succeeds: with uid split, agentd runs as
-        root (bypasses ownership/sticky-bit checks); without uid split, the
-        file is never chowned away from the caller's own uid."""
+        subprocess can still read/write it. Callers MUST clean it up (via
+        `_unlink_scratch_index`, which also takes the `.lock` sibling git's
+        write-then-rename can leave behind) in a `finally` — cleanup always
+        succeeds: with uid split, agentd runs as root (bypasses ownership/
+        sticky-bit checks); without uid split, the file is never chowned
+        away from the caller's own uid."""
         fd, raw = tempfile.mkstemp(prefix="sanad-checkpoint-idx-")
         os.close(fd)
         if self._uid is not None:
             os.chown(raw, self._uid, self._gid if self._gid is not None else -1)
         return Path(raw)
+
+    @staticmethod
+    def _unlink_scratch_index(index_path: Path) -> None:
+        """Remove a throwaway `GIT_INDEX_FILE` and its `.lock` sibling
+        (final-review fix). Git writes an index via `<path>.lock` then
+        renames it into place; a process kill mid-write (OOM, SIGKILL, host
+        restart — the uid-split supervisor can kill this process at any
+        point) can leave the `.lock` file behind even though the index path
+        itself is cleaned up here. Both live in the same disposable
+        `mkstemp` temp dir `_new_scratch_index` allocates, never `.git/`, so
+        an orphaned `.lock` is a temp-dir leak, not a safety issue — but
+        every scratch-index cleanup `finally` should still take it out."""
+        index_path.unlink(missing_ok=True)
+        Path(f"{index_path}.lock").unlink(missing_ok=True)
 
     def _remove_worktree_relpath(self, rel: str) -> None:
         """Delete one path relative to `root` — used only for paths `git`
@@ -430,7 +446,7 @@ class GitRepo:
             await self._run("update-ref", _CHECKPOINTS_NS + ref, sha)
             return sha
         finally:
-            index_path.unlink(missing_ok=True)
+            self._unlink_scratch_index(index_path)
 
     async def checkpoint_diff(
         self, base: str, target: str | None, *, path: str | None = None, max_bytes: int
@@ -471,7 +487,7 @@ class GitRepo:
             _, patch_out, _ = await self._run("diff", base, target_ref, *path_args, check=False)
         finally:
             if index_path is not None:
-                index_path.unlink(missing_ok=True)
+                self._unlink_scratch_index(index_path)
 
         # -z name-status is a flat NUL-separated token stream: `<status>\0
         # <path>\0` normally, but `<status>\0<oldpath>\0<newpath>\0` for a
@@ -557,8 +573,8 @@ class GitRepo:
             for rel in now_paths - target_paths:
                 self._remove_worktree_relpath(rel)
         finally:
-            checkout_index.unlink(missing_ok=True)
-            scan_index.unlink(missing_ok=True)
+            self._unlink_scratch_index(checkout_index)
+            self._unlink_scratch_index(scan_index)
 
     async def prune_checkpoints(self, cid: str, keep_turn_ids: list[str]) -> None:
         """Delete refs/sanad/checkpoints/<cid>/* refs whose turnId is not in

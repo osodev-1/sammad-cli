@@ -4,6 +4,7 @@ import {
   sendCoder,
   fetchCoderTurn,
   fetchCoderDiff,
+  hasFreshDiff,
   revertCoder,
   respondCoder,
   setCoderMode,
@@ -720,6 +721,35 @@ describe("fetchCoderDiff", () => {
     const result = await fetchCoderDiff("c_1", "t_1", undefined, "sess1");
     expect(result).toEqual({ ok: false, code: "network" });
   });
+
+  it("unwraps the WRAPPED {data,meta} envelope the /diff proxy route actually produces — not just the raw shape the other cases here use (final-review fix: this boundary was previously only tested against the raw body)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          data: {
+            nameStatus: [{ status: "M", path: "src/a.ts" }],
+            patch: "diff --git a/src/a.ts b/src/a.ts\n...",
+            truncated: false,
+            filesChanged: 1,
+            additions: 2,
+            deletions: 1,
+          },
+          meta: { requestId: "req_123" },
+        }),
+      ),
+    );
+    const result = await fetchCoderDiff("c_1", "t_1", undefined, "sess1");
+    expect(result).toEqual({
+      ok: true,
+      nameStatus: [{ status: "M", path: "src/a.ts" }],
+      patch: "diff --git a/src/a.ts b/src/a.ts\n...",
+      truncated: false,
+      filesChanged: 1,
+      additions: 2,
+      deletions: 1,
+    });
+  });
 });
 
 describe("revertCoder", () => {
@@ -771,5 +801,37 @@ describe("revertCoder", () => {
       code: "network",
       message: "Network error — check your connection.",
     });
+  });
+
+  it("unwraps the WRAPPED {data,meta} envelope the /revert proxy route actually produces — not just the raw shape the other cases here use (final-review fix: this boundary was previously only tested against the raw body)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          data: { safetyCheckpoint: "def789", reverted: { turnId: "t_1" } },
+          meta: { requestId: "req_456" },
+        }),
+      ),
+    );
+    const result = await revertCoder("c_1", "t_1", "sess1");
+    expect(result).toEqual({
+      ok: true,
+      safetyCheckpoint: "def789",
+      reverted: { turnId: "t_1" },
+    });
+  });
+});
+
+describe("hasFreshDiff (CheckpointFooter's ensureDiff re-fetch guard, final-review fix)", () => {
+  it("null (never fetched) is not fresh", () => {
+    expect(hasFreshDiff(null)).toBe(false);
+  });
+
+  it("a successful {ok:true} result is fresh", () => {
+    expect(hasFreshDiff({ ok: true, patch: "" })).toBe(true);
+  });
+
+  it("a failed {ok:false} result is NOT fresh — this is the bug: fetchCoderDiff never throws, so a transient failure must still look re-fetchable to the next Review/Revert click", () => {
+    expect(hasFreshDiff({ ok: false, code: "network" })).toBe(false);
   });
 });

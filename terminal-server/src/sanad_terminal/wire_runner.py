@@ -316,13 +316,22 @@ class WireRunner:
         # mutate the workspace (e.g. a non-gated tool call in an
         # accept-edits-like posture).
         #
-        # Registering the turn (below) only AFTER the prompt is sent is the
-        # other half of that same race: without it, a client that manages
-        # to call `/steer` or `/cancel` in the gap between "turn looks
-        # busy" and "prompt actually transmitted" would have ITS message
-        # win the race over the wire's own single, ordered stdin pipe,
-        # confusing an agent that (reasonably) expects to see its prompt
-        # before anything else.
+        # Registering the turn (below) only AFTER the prompt is sent does
+        # NOT gate `/steer` or `/cancel` (an earlier version of this comment
+        # claimed it did — inaccurate, corrected in final review). `steer()`
+        # checks `self.busy`, which reads `self._current` — already set
+        # above, before this await — and `cancel()` only checks
+        # `self._prompt_id is None`, which still holds whatever the
+        # PREVIOUS turn left it as until `self._prompt_id = pid` a few
+        # lines down. Neither reads `_turns`/`_turn_order` at all, so a
+        # client's `/steer` or `/cancel` can already reach the wire in the
+        # gap between "turn looks busy" (`self._current` set) and "prompt
+        # actually transmitted" (`_send` below) — a race that predates this
+        # hook. `_before_prompt_sent` (P5's checkpoint snapshot) doesn't
+        # create that gap, it WIDENS it, since the prompt now waits on this
+        # await too. Gating steer/cancel on "prompt actually sent" is real,
+        # separately-tracked write-lease hardening (P6) — deliberately not
+        # done here.
         await self._before_prompt_sent(state)
         pid = self._next_id()
         try:

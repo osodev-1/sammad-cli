@@ -3,8 +3,10 @@ import {
   reduce,
   reduceCheckpoint,
   reduceMessage,
+  sameCheckpointItems,
   toStored,
   fromStored,
+  type CheckpointSummary,
   type CoderBlock,
   type CoderMessage,
 } from "@/lib/coder/transcript";
@@ -824,5 +826,63 @@ describe("coder transcript checkpoint fold (reduceCheckpoint / reduceMessage, P5
       deletions: 1,
       hasPost: true,
     });
+  });
+});
+
+describe("sameCheckpointItems (P5 final-review fix — onCheckpoints re-render guard)", () => {
+  const cp = (overrides: Partial<CheckpointSummary> = {}): CheckpointSummary => ({
+    filesChanged: 2,
+    additions: 5,
+    deletions: 1,
+    hasPost: true,
+    ...overrides,
+  });
+
+  it("two empty lists are equal", () => {
+    expect(sameCheckpointItems([], [])).toBe(true);
+  });
+
+  it("lists of different length are never equal", () => {
+    expect(sameCheckpointItems([], [{ turnId: "t1", checkpoint: cp() }])).toBe(false);
+  });
+
+  it("same turnId and identical checkpoint VALUES (fresh object references) are equal — this is the streamed-token case, a brand-new array built from `messages` on every render", () => {
+    const a = [{ turnId: "t1", checkpoint: cp() }];
+    const b = [{ turnId: "t1", checkpoint: { ...cp() } }];
+    expect(a[0]?.checkpoint).not.toBe(b[0]?.checkpoint); // distinct references
+    expect(sameCheckpointItems(a, b)).toBe(true);
+  });
+
+  it("a different turnId at the same position is not equal", () => {
+    const a = [{ turnId: "t1", checkpoint: cp() }];
+    const b = [{ turnId: "t2", checkpoint: cp() }];
+    expect(sameCheckpointItems(a, b)).toBe(false);
+  });
+
+  it("a changed count (e.g. filesChanged) is not equal — a real checkpoint update must still get through", () => {
+    const a = [{ turnId: "t1", checkpoint: cp({ filesChanged: 2 }) }];
+    const b = [{ turnId: "t1", checkpoint: cp({ filesChanged: 3 }) }];
+    expect(sameCheckpointItems(a, b)).toBe(false);
+  });
+
+  it("a new checkpoint-bearing turn appended to the list is not equal", () => {
+    const a = [{ turnId: "t1", checkpoint: cp() }];
+    const b = [
+      { turnId: "t1", checkpoint: cp() },
+      { turnId: "t2", checkpoint: cp({ filesChanged: 1 }) },
+    ];
+    expect(sameCheckpointItems(a, b)).toBe(false);
+  });
+
+  it("multi-item lists compare position-by-position", () => {
+    const a = [
+      { turnId: "t1", checkpoint: cp({ filesChanged: 1 }) },
+      { turnId: "t2", checkpoint: cp({ filesChanged: 2 }) },
+    ];
+    const b = [
+      { turnId: "t1", checkpoint: cp({ filesChanged: 1 }) },
+      { turnId: "t2", checkpoint: cp({ filesChanged: 2 }) },
+    ];
+    expect(sameCheckpointItems(a, b)).toBe(true);
   });
 });

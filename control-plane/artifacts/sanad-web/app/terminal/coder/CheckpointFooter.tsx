@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { CSSProperties } from "react";
-import { fetchCoderDiff, revertCoder, type CoderDiffResult } from "@/lib/coder/client";
+import { fetchCoderDiff, hasFreshDiff, revertCoder, type CoderDiffResult } from "@/lib/coder/client";
 import { formatCheckpointSummary } from "@/lib/coder/checkpointDisplay";
 import type { CheckpointSummary } from "@/lib/coder/transcript";
 import { button, size } from "../../ui/theme";
@@ -64,7 +64,12 @@ export function CheckpointFooter({
   const [revertedSha, setRevertedSha] = useState<string | null>(null);
 
   const ensureDiff = () => {
-    if (diff !== null || diffLoading) return;
+    // Gate on `hasFreshDiff(diff)`, not just `diff !== null` (final-review
+    // fix): `fetchCoderDiff` never throws — a transient failure resolves to
+    // a non-null `{ok:false,code}`, which used to satisfy this guard just
+    // as well as a real success and permanently stick the footer on
+    // "(could not load the diff)" with no way to retry.
+    if (hasFreshDiff(diff) || diffLoading) return;
     setDiffLoading(true);
     void fetchCoderDiff(cid, turnId, undefined, sessionId).then((res) => {
       setDiffLoading(false);
