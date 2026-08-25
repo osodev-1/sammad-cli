@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   reduce,
+  reduceCheckpoint,
+  reduceMessage,
   toStored,
   fromStored,
   type CoderBlock,
@@ -723,5 +725,104 @@ describe("coder transcript persistence (toStored / fromStored)", () => {
 
     const parsed = coderBlockState.safeParse(block);
     expect(parsed.success).toBe(true);
+  });
+
+  it("toStored drops `turnId`/`checkpoint` — live-only, rebuilt from the journal on reload", () => {
+    const live: CoderMessage[] = [
+      {
+        role: "assistant",
+        turnId: "t1",
+        checkpoint: { filesChanged: 3, additions: 12, deletions: 4, hasPost: true },
+        blocks: [{ kind: "text", text: "done" }],
+      },
+    ];
+    const stored = toStored(live);
+    expect(stored[0]).toEqual({ role: "assistant", blocks: [{ kind: "text", text: "done" }] });
+    expect(stored[0]).not.toHaveProperty("turnId");
+    expect(stored[0]).not.toHaveProperty("checkpoint");
+  });
+});
+
+describe("coder transcript checkpoint fold (reduceCheckpoint / reduceMessage, P5 Task 4)", () => {
+  const checkpointPre = (sha: string | null = "abc123"): CoderItem => ({
+    kind: "checkpoint",
+    when: "pre",
+    sha,
+  });
+
+  const checkpointPost = (
+    summary?: { filesChanged: number; additions: number; deletions: number },
+    sha: string | null = "def456",
+  ): CoderItem => ({
+    kind: "checkpoint",
+    when: "post",
+    sha,
+    ...(summary ? { summary } : {}),
+  });
+
+  it("a {kind:checkpoint,when:post,summary} item sets filesChanged/additions/deletions and hasPost:true", () => {
+    const checkpoint = reduceCheckpoint(
+      undefined,
+      checkpointPost({ filesChanged: 3, additions: 12, deletions: 4 }),
+    );
+    expect(checkpoint).toEqual({
+      filesChanged: 3,
+      additions: 12,
+      deletions: 4,
+      hasPost: true,
+    });
+  });
+
+  it("a post item with no summary (clean turn) still sets hasPost:true, with zero counts", () => {
+    const checkpoint = reduceCheckpoint(undefined, checkpointPost(undefined, null));
+    expect(checkpoint).toEqual({
+      filesChanged: 0,
+      additions: 0,
+      deletions: 0,
+      hasPost: true,
+    });
+  });
+
+  it("a pre-only item (no post yet) leaves checkpoint absent — the turn isn't finished", () => {
+    const checkpoint = reduceCheckpoint(undefined, checkpointPre());
+    expect(checkpoint).toBeUndefined();
+  });
+
+  it("a pre item never overwrites an existing post summary (would misrepresent a NEW turn's pre as clearing the PRIOR one — not how this is used, but the fold itself must be a true no-op)", () => {
+    const existing = { filesChanged: 1, additions: 1, deletions: 0, hasPost: true };
+    const checkpoint = reduceCheckpoint(existing, checkpointPre());
+    expect(checkpoint).toEqual(existing);
+  });
+
+  it("reduceMessage: turnId is carried from a {kind:turn} item onto the message, and held across later items", () => {
+    let msg: Extract<CoderMessage, { role: "assistant" }> = { role: "assistant", blocks: [] };
+    msg = reduceMessage(msg, { kind: "turn", turnId: "t1" });
+    expect(msg.turnId).toBe("t1");
+    msg = reduceMessage(msg, {
+      kind: "event",
+      event: { type: "TextPart", payload: { text: "hi" } },
+    });
+    expect(msg.turnId).toBe("t1"); // still carried, unrelated item
+  });
+
+  it("reduceMessage: folds blocks (via reduce) and checkpoint together from the same item stream, without losing turnId", () => {
+    let msg: Extract<CoderMessage, { role: "assistant" }> = { role: "assistant", blocks: [] };
+    msg = reduceMessage(msg, { kind: "turn", turnId: "t1" });
+    msg = reduceMessage(msg, {
+      kind: "event",
+      event: { type: "TextPart", payload: { text: "working on it" } },
+    });
+    msg = reduceMessage(
+      msg,
+      checkpointPost({ filesChanged: 2, additions: 5, deletions: 1 }),
+    );
+    expect(msg.turnId).toBe("t1");
+    expect(msg.blocks).toEqual([{ kind: "text", text: "working on it" }]);
+    expect(msg.checkpoint).toEqual({
+      filesChanged: 2,
+      additions: 5,
+      deletions: 1,
+      hasPost: true,
+    });
   });
 });

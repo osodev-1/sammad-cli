@@ -24,7 +24,9 @@ import {
 import {
   fromStored,
   reduce,
+  reduceMessage,
   toStored,
+  type CheckpointSummary,
   type CoderBlock,
   type CoderMessage,
 } from "@/lib/coder/transcript";
@@ -34,8 +36,10 @@ import { button, disabled, size } from "../../ui/theme";
 import { ApprovalCard, QuestionCard } from "./RequestCards";
 import { ToolCard } from "./ToolCard";
 import { PlanCard } from "./PlanCard";
+import { CheckpointFooter } from "./CheckpointFooter";
 
 type RequestBlock = Extract<CoderBlock, { kind: "request" }>;
+type AssistantMessage = Extract<CoderMessage, { role: "assistant" }>;
 
 /** The three P2a-supported permission modes — no yolo here (never surfaced
  * in this panel; see P2a's `apply_permission_mode`). */
@@ -84,6 +88,8 @@ export default function CoderPanel({
   onPersist,
   lastInterruptedTurnId,
   onLastInterruptedTurnId,
+  onCheckpoints,
+  onReverted,
 }: {
   sessionId?: string;
   visible: boolean;
@@ -105,6 +111,17 @@ export default function CoderPanel({
   /** Called once an interrupted turn has been surfaced, to persist its
    * turnId upward (mirrors onConversationId). */
   onLastInterruptedTurnId?: (turnId: string) => void;
+  /** Called (on every messages change) with this conversation's checkpoint-
+   * bearing turns, oldest first — SessionWorkspace threads this into
+   * ContextDock's Checkpoints section (P5 Task 4) so the dock can list/
+   * Review/Revert them without a second fetch of its own. */
+  onCheckpoints?: (items: { turnId: string; checkpoint: CheckpointSummary }[]) => void;
+  /** Called after a successful revert (from THIS panel's own footers, or
+   * from the dock's — either way the workspace tree just changed under
+   * everything else that reads it). Revert never touches this panel's own
+   * turn machine, so nothing here needs to react beyond bubbling the
+   * "go refresh the file tree" signal upward. */
+  onReverted?: () => void;
 }) {
   const [phase, setPhase] = useState<CoderPhase>("idle");
   const [startError, setStartError] = useState<string | null>(null);
@@ -206,6 +223,13 @@ export default function CoderPanel({
   lastInterruptedTurnIdRef.current = lastInterruptedTurnId;
   const onLastInterruptedTurnIdRef = useRef(onLastInterruptedTurnId);
   onLastInterruptedTurnIdRef.current = onLastInterruptedTurnId;
+
+  /* Same latest-value treatment (P5 Task 4) — derived from `messages` below,
+   * not from any begin()/runTurn() control flow, but kept as a ref for the
+   * same reason: an inline arrow from SessionWorkspace must not force this
+   * effect to re-fire on every parent render. */
+  const onCheckpointsRef = useRef(onCheckpoints);
+  onCheckpointsRef.current = onCheckpoints;
 
   /* If the persisted transcript arrives after mount (hydration race), adopt
      it — but never over a conversation that already started. */
@@ -312,14 +336,14 @@ export default function CoderPanel({
         return "ready";
       }
       const at = turnMeta.startedAt ? turnMeta.startedAt * 1000 : Date.now();
-      let blocks: CoderBlock[] = [];
+      let msg: AssistantMessage = { role: "assistant", blocks: [], turnId: turnMeta.turnId };
       await followCoder(newCid, turnMeta.turnId, 0, sessionId, (item) => {
-        blocks = reduce(blocks, item);
+        msg = reduceMessage(msg, item);
       });
       setMessages((m) => [
         ...m,
         { role: "user", text: turnMeta.userInput || "(earlier request)", at },
-        { role: "assistant", blocks, at },
+        { ...msg, at },
       ]);
       lastInterruptedTurnIdRef.current = turnMeta.turnId;
       onLastInterruptedTurnIdRef.current?.(turnMeta.turnId);
@@ -338,7 +362,15 @@ export default function CoderPanel({
           }),
         [],
       );
-      setMessages((m) => [...m, { role: "assistant", blocks, at: Date.now() }]);
+      // Pending requests are, in practice, always the SAME still-running
+      // turn's (this system runs one turn at a time per conversation) — no
+      // `checkpoint` yet either way (the turn hasn't finished), but the
+      // turnId is cheap and already in scope.
+      const turnId = state.pendingRequests[0]?.turnId;
+      setMessages((m) => [
+        ...m,
+        { role: "assistant", blocks, at: Date.now(), ...(turnId ? { turnId } : {}) },
+      ]);
     }
     setPhase("ready");
     return "ready";
@@ -363,6 +395,23 @@ export default function CoderPanel({
     const t = window.setTimeout(() => onPersist(toStored(messages)), 600);
     return () => window.clearTimeout(t);
   }, [messages, phase, onPersist]);
+
+  /* Report this conversation's checkpoint-bearing turns upward, live (P5
+   * Task 4) — every messages change, not debounced like persist above: the
+   * dock's Checkpoints section should reflect a just-landed post-checkpoint
+   * as promptly as the footer does. `checkpoint` only exists once a turn's
+   * `{kind:"checkpoint",when:"post"}` item has folded in (reduceMessage), so
+   * a still-running turn is naturally excluded. */
+  useEffect(() => {
+    if (!onCheckpointsRef.current) return;
+    const items = messages
+      .filter((m): m is AssistantMessage => m.role === "assistant")
+      .filter((m): m is AssistantMessage & { turnId: string; checkpoint: CheckpointSummary } =>
+        Boolean(m.turnId && m.checkpoint),
+      )
+      .map((m) => ({ turnId: m.turnId, checkpoint: m.checkpoint }));
+    onCheckpointsRef.current(items);
+  }, [messages]);
 
   /* One turn — SERVER-AUTHORITATIVE: the machine journals every item, so
      this function is only a follower.
@@ -403,7 +452,10 @@ export default function CoderPanel({
       setMessages((m) => [
         ...m,
         { role: "user", text, at },
-        { role: "assistant", blocks: [], at },
+        // A resumed turn already has its turnId (from /turn); a genuinely
+        // new send doesn't yet — the "turn" journal item below stamps it in
+        // once the server assigns one.
+        { role: "assistant", blocks: [], at, ...(resume?.turnId ? { turnId: resume.turnId } : {}) },
       ]);
       const activeCid = cidRef.current;
       const flags = { busy: false, queued: false, failed: false, ended: false };
@@ -438,6 +490,17 @@ export default function CoderPanel({
         if (item.kind === "turn") {
           turnId = item.turnId;
           saveAnchor();
+          // Stamp turnId onto the live message too (P5 Task 4) — this is
+          // the ONE place a freshly-sent turn's id becomes known; the
+          // checkpoint footer needs it once the turn finishes.
+          setMessages((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (last && last.role === "assistant") {
+              next[next.length - 1] = { ...last, turnId: item.turnId };
+            }
+            return next;
+          });
           return;
         }
         if (item.kind === "end") {
@@ -473,11 +536,14 @@ export default function CoderPanel({
           const next = [...prev];
           const last = next[next.length - 1];
           if (last && last.role === "assistant") {
-            next[next.length - 1] = {
-              role: "assistant",
-              at: last.at,
-              blocks: reduce(last.blocks, item),
-            };
+            // reduceMessage (not a hand-rolled object literal) so this
+            // fold never drops `turnId`/`checkpoint` the way reconstructing
+            // `{role:"assistant", at, blocks}` from scratch would (P5 Task
+            // 4) — "turn" items are handled above and never reach here, so
+            // `turnId` just passes through unchanged; "checkpoint" items
+            // (not otherwise handled) DO reach here, which is exactly what
+            // folds a turn's post-checkpoint summary onto the message.
+            next[next.length - 1] = reduceMessage(last, item);
           }
           return next;
         });
@@ -520,9 +586,11 @@ export default function CoderPanel({
           const next = [...prev];
           const last = next[next.length - 1];
           if (last && last.role === "assistant") {
+            // Spread `last` (P5 Task 4) so `turnId`/`checkpoint` survive
+            // this reconstruction instead of silently resetting to
+            // undefined — same reasoning as reduceMessage's fold above.
             next[next.length - 1] = {
-              role: "assistant",
-              at: last.at,
+              ...last,
               blocks: [
                 ...last.blocks,
                 {
@@ -638,8 +706,10 @@ export default function CoderPanel({
             !last.blocks.some((b) => b.kind !== "think")
           ) {
             const next = [...prev];
+            // Spread `last` (P5 Task 4, also restores the `at` this literal
+            // was previously dropping) so `turnId`/`checkpoint` survive.
             next[next.length - 1] = {
-              role: "assistant",
+              ...last,
               blocks: [
                 ...last.blocks,
                 {
@@ -976,16 +1046,15 @@ export default function CoderPanel({
           const next = [...prev];
           const m = next[mi];
           if (m && m.role === "assistant") {
-            next[mi] = {
-              role: "assistant",
-              at: m.at,
-              blocks: reduce(m.blocks, {
-                kind: "request_resolved",
-                requestId,
-                requestType,
-                resolution: payload as unknown as Record<string, unknown>,
-              }),
-            };
+            // reduceMessage (P5 Task 4) so `turnId`/`checkpoint` survive
+            // this out-of-order fold (mi may be an EARLIER message than the
+            // live tail — same reasoning as consume()'s fold above).
+            next[mi] = reduceMessage(m, {
+              kind: "request_resolved",
+              requestId,
+              requestType,
+              resolution: payload as unknown as Record<string, unknown>,
+            });
           }
           return next;
         });
@@ -994,14 +1063,7 @@ export default function CoderPanel({
           const next = [...prev];
           const m = next[mi];
           if (m && m.role === "assistant") {
-            next[mi] = {
-              role: "assistant",
-              at: m.at,
-              blocks: reduce(m.blocks, {
-                kind: "request_cancelled",
-                requestId,
-              }),
-            };
+            next[mi] = reduceMessage(m, { kind: "request_cancelled", requestId });
           }
           return next;
         });
@@ -1011,8 +1073,7 @@ export default function CoderPanel({
           const m = next[mi];
           if (m && m.role === "assistant") {
             next[mi] = {
-              role: "assistant",
-              at: m.at,
+              ...m,
               blocks: [
                 ...m.blocks,
                 {
@@ -1049,6 +1110,20 @@ export default function CoderPanel({
     !!lastMessage &&
     lastMessage.role === "assistant" &&
     lastMessage.blocks.some((b) => b.kind === "request" && b.state === "pending");
+
+  // 1-based ordinal among this conversation's checkpointed turns, keyed by
+  // message index — the footer/RevertConfirm's human-readable "turn N" (P5
+  // Task 4); turnId itself (opaque) drives every actual call.
+  const checkpointOrdinal = new Map<number, number>();
+  {
+    let n = 0;
+    messages.forEach((m, i) => {
+      if (m.role === "assistant" && m.turnId && m.checkpoint) {
+        n += 1;
+        checkpointOrdinal.set(i, n);
+      }
+    });
+  }
   const composerDisabled = phase === "error";
   const modeDisabled = !cid || phase === "error" || phase === "starting";
 
@@ -1189,6 +1264,19 @@ export default function CoderPanel({
                         {showSteps ? "hide steps" : "show steps"}
                       </span>
                     </button>
+                  )}
+                  {/* Checkpoint footer (P5 Task 4) — only once the turn's
+                      post-checkpoint has landed (m.checkpoint is undefined
+                      for a still-running turn). Human-only Review/Revert. */}
+                  {cid && m.turnId && m.checkpoint && (
+                    <CheckpointFooter
+                      cid={cid}
+                      sessionId={sessionId}
+                      turnId={m.turnId}
+                      turnNumber={checkpointOrdinal.get(mi) ?? 1}
+                      checkpoint={m.checkpoint}
+                      onReverted={() => onReverted?.()}
+                    />
                   )}
                 </div>
               )}

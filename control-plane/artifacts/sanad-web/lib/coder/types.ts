@@ -6,7 +6,19 @@ export type CoderItem =
   | { kind: "error"; seq?: number; code?: string; message?: string; turnId?: string }
   | { kind: "request"; seq?: number; requestType: "approval" | "question"; requestId: string; turnId: string; request: Record<string, unknown> }
   | { kind: "request_resolved"; seq?: number; requestId: string; requestType: "approval" | "question"; resolution: Record<string, unknown> }
-  | { kind: "request_cancelled"; seq?: number; requestId: string; reason?: string };
+  | { kind: "request_cancelled"; seq?: number; requestId: string; reason?: string }
+  /** A pre/post workspace snapshot (P5 Task 2, `coder_runner._checkpoint_pre`
+   * / `_checkpoint_post`). `sha` is `null` when checkpointing itself failed
+   * (best-effort — never blocks the turn) or, for a "post" item, when the
+   * tree was unchanged since "pre" (skip-when-clean). `summary` is present
+   * only on a "post" item that had both a pre and a post sha to diff. */
+  | {
+      kind: "checkpoint";
+      seq?: number;
+      when: "pre" | "post";
+      sha: string | null;
+      summary?: { filesChanged: number; additions: number; deletions: number };
+    };
 
 export interface CoderTurnSummary {
   turnId: string;

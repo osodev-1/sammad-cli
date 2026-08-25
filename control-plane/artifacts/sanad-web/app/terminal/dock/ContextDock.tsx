@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import { reviewTrust } from "@/lib/blueprint/api";
 import { withSession } from "@/lib/terminal/workspace-model";
+import { CheckpointFooter } from "../coder/CheckpointFooter";
+import type { CheckpointSummary } from "@/lib/coder/transcript";
 
 interface TrustItem {
   path: string;
@@ -41,10 +43,14 @@ export default function ContextDock({
   pendingReviews,
   activityEpoch,
   onOpenGraph,
+  coderConversationId,
+  coderCheckpoints,
+  onCoderReverted,
 }: {
   sessionId?: string;
-  /** "graph" when the Blueprint tab is active; anything else is "other". */
-  context: "graph" | "other";
+  /** "graph" when the Blueprint tab is active, "coder" when the Coder tab
+   * is active; anything else is "other". */
+  context: "graph" | "other" | "coder";
   open: boolean;
   onToggle: () => void;
   /** Architect drafts awaiting review (summaries, newest last). */
@@ -52,6 +58,16 @@ export default function ContextDock({
   /** Bumped after applies/reverts — triggers an immediate refetch. */
   activityEpoch: number;
   onOpenGraph: () => void;
+  /** The coder conversation id (P5 Task 4) — Review/Revert calls key off
+   * this; undefined until CoderPanel has opened a conversation. */
+  coderConversationId?: string;
+  /** This conversation's checkpoint-bearing turns, oldest first — threaded
+   * live from CoderPanel via SessionWorkspace (no separate fetch here). */
+  coderCheckpoints?: { turnId: string; checkpoint: CheckpointSummary }[];
+  /** Called after a revert from THIS dock's own Checkpoints section —
+   * mirrors CoderPanel's own onReverted (the file tree/trust+history feed
+   * need refreshing; the revert itself never touches the turn machine). */
+  onCoderReverted?: () => void;
 }) {
   const [trust, setTrust] = useState<TrustItem[]>([]);
   const [commits, setCommits] = useState<Commit[]>([]);
@@ -157,7 +173,7 @@ export default function ContextDock({
     <aside style={s.pane}>
       <div style={s.header}>
         <span style={s.title}>
-          {context === "graph" ? "Blueprint" : "Activity"}
+          {context === "graph" ? "Blueprint" : context === "coder" ? "Coder" : "Activity"}
         </span>
         <button
           type="button"
@@ -246,6 +262,38 @@ export default function ContextDock({
             ))
           )}
         </Section>
+
+        {/* Checkpoints (P5 Task 4) — this conversation's turns, each with
+            its post-checkpoint summary and Review/Revert, mirroring
+            History's list-of-rows grammar above but with actions instead
+            of a read-only expand. Coder-tab-only: unlike Reviews/Trust/
+            History (always shown), a checkpoint list only means something
+            while the Coder tab is the active context. Reuses the SAME
+            CheckpointFooter the per-turn transcript footer uses — Review's
+            diff renders as raw patch TEXT (fetchCoderDiff), same as
+            History's <pre> above, never DiffView (wrong shape for a git
+            patch). */}
+        {context === "coder" && (
+          <Section title="Checkpoints">
+            {!coderConversationId || !coderCheckpoints || coderCheckpoints.length === 0 ? (
+              <span style={s.emptyLine}>No checkpoints yet.</span>
+            ) : (
+              coderCheckpoints.map((c, i) => (
+                <div key={c.turnId} style={s.checkpointRow}>
+                  <span style={s.commitMeta}>Turn {i + 1}</span>
+                  <CheckpointFooter
+                    cid={coderConversationId}
+                    sessionId={sessionId}
+                    turnId={c.turnId}
+                    turnNumber={i + 1}
+                    checkpoint={c.checkpoint}
+                    onReverted={() => onCoderReverted?.()}
+                  />
+                </div>
+              ))
+            )}
+          </Section>
+        )}
       </div>
     </aside>
   );
@@ -409,6 +457,13 @@ const s: Record<string, CSSProperties> = {
     fontFamily: "var(--font-mono)",
     fontSize: "0.62rem",
     color: "var(--ink-muted)",
+  },
+  checkpointRow: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.15rem",
+    padding: "0.25rem 0",
+    borderBottom: "1px solid var(--rule)",
   },
   diff: {
     margin: "0.2rem 0 0.4rem",

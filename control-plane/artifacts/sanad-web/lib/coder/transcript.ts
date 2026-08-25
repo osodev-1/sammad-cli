@@ -62,9 +62,44 @@ export type CoderBlock =
    * `plan`. */
   | { kind: "steer"; text: string };
 
+/** A turn's post-checkpoint diff summary (P5 Task 4) — folded onto the
+ * assistant message by `reduceCheckpoint`/`reduceMessage` once the
+ * `{kind:"checkpoint",when:"post"}` journal item arrives. `hasPost` is the
+ * gate the footer/dock use to decide whether to render at all: a still-
+ * running turn has only emitted its "pre" item, so `checkpoint` stays
+ * `undefined` until "post" lands (even a clean, no-op turn's "post" item
+ * flips `hasPost` true with zero counts — "0 files changed" is an honest
+ * answer, staying silent would look like the turn were still running). */
+export interface CheckpointSummary {
+  filesChanged: number;
+  additions: number;
+  deletions: number;
+  hasPost: boolean;
+}
+
 export type CoderMessage =
   | { role: "user"; text: string; at?: number }
-  | { role: "assistant"; blocks: CoderBlock[]; at?: number };
+  | {
+      role: "assistant";
+      blocks: CoderBlock[];
+      at?: number;
+      /** The turn this message belongs to (P5 Task 4) — set once the
+       * journal's `{kind:"turn"}` item is seen (CoderPanel's append
+       * sites either seed it up front, when already known, or fold it in
+       * via `reduceMessage`). Drives the checkpoint footer's Review/Revert
+       * calls (`fetchCoderDiff`/`revertCoder` both key off `turnId`).
+       * Live-only: dropped from `toStored` (see below) — a restored
+       * message has no `checkpoint` to act on anyway (also dropped), so a
+       * bare turnId with nothing to show for it would be dead weight. */
+      turnId?: string;
+      /** This turn's post-checkpoint summary (P5 Task 4) — see
+       * `CheckpointSummary`. Live-only: dropped from `toStored`, rebuilt
+       * from the journal on reload, same treatment as `plan`/tool detail
+       * (P2b's precedent this mirrors). */
+      checkpoint?: CheckpointSummary;
+    };
+
+type AssistantMessage = Extract<CoderMessage, { role: "assistant" }>;
 
 type RequestBlock = Extract<CoderBlock, { kind: "request" }>;
 
@@ -227,6 +262,47 @@ export function reduce(blocks: CoderBlock[], item: CoderItem): CoderBlock[] {
   return blocks;
 }
 
+/** Fold a checkpoint journal item into a checkpoint summary (P5 Task 4).
+ * Pure, sibling to `reduce()` rather than a branch inside it: `checkpoint`
+ * is message-level metadata, not a rendered block, so it has no place in
+ * the `CoderBlock` union `reduce()` folds into. Only a "post" item
+ * creates/updates the summary — "pre" is a no-op (the turn isn't finished;
+ * nothing to review/revert yet). */
+export function reduceCheckpoint(
+  checkpoint: CheckpointSummary | undefined,
+  item: CoderItem,
+): CheckpointSummary | undefined {
+  if (item.kind !== "checkpoint" || item.when !== "post") return checkpoint;
+  return {
+    filesChanged: item.summary?.filesChanged ?? 0,
+    additions: item.summary?.additions ?? 0,
+    deletions: item.summary?.deletions ?? 0,
+    hasPost: true,
+  };
+}
+
+/** Fold one journal item into an assistant message as a whole (P5 Task 4):
+ * `blocks` via `reduce()` (unchanged), plus `turnId` (set once, from the
+ * journal's `{kind:"turn"}` item, then held) and `checkpoint` (via
+ * `reduceCheckpoint`). A single entry point so every append site in
+ * CoderPanel folds all three consistently — a hand-rolled `{role:
+ * "assistant", ...}` reconstruction at each call site is exactly how a
+ * message's `turnId`/`checkpoint` would silently get dropped the next time
+ * any item folds in (`request_resolved` on an older message, a reconnect's
+ * "lost contact" notice, etc.); routing every fold through here instead of
+ * through ad hoc object literals is what keeps those fields alive. */
+export function reduceMessage(
+  message: AssistantMessage,
+  item: CoderItem,
+): AssistantMessage {
+  return {
+    ...message,
+    blocks: reduce(message.blocks, item),
+    turnId: item.kind === "turn" ? item.turnId : message.turnId,
+    checkpoint: reduceCheckpoint(message.checkpoint, item),
+  };
+}
+
 const MAX_MESSAGES = 60;
 const MAX_BLOCKS = 80;
 const MAX_TEXT = 6000;
@@ -297,7 +373,14 @@ export type StoredCoderMessage =
  * outright drop — a mid-turn redirect is meaningless outside the live turn
  * it steered, and the turn's own resulting content already reflects it.
  * See P2b's tool-detail precedent this mirrors (rich detail is live-only,
- * rebuilt from the journal on reload). */
+ * rebuilt from the journal on reload).
+ *
+ * `turnId`/`checkpoint` (P5 Task 4) get the same outright drop, and for the
+ * same reason: no `coderBlockState`/`coderMessageState` schema change to
+ * carry them, and a restored message — with no `checkpoint` to show — has
+ * no footer to render regardless, so a persisted bare `turnId` would be
+ * dead weight. Both are simply absent from the `StoredCoderMessage` object
+ * literal below (no explicit filtering needed, unlike the blocks array). */
 export function toStored(messages: CoderMessage[]): StoredCoderMessage[] {
   return messages.slice(-MAX_MESSAGES).map((m): StoredCoderMessage => {
     if (m.role === "user") {
