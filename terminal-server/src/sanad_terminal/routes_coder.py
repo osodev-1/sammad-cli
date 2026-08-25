@@ -480,9 +480,18 @@ async def diff(
     _: Gated, root: Root, request: Request, cid: str, turnId: str, path: str | None = None
 ) -> JSONResponse:
     """Name-status + unified patch for one turn: `pre..post` once the turn
-    has finished, `pre..worktree` while it's still running (or when the
-    post checkpoint was skipped as clean — same "diff against whatever the
-    tree looks like now" fallback either way)."""
+    has finished with a real post checkpoint, `pre..worktree` while it's
+    still running. A null `checkpointPost` has two different causes that
+    must NOT be treated alike (final-review fix): the turn may still be
+    running (post simply hasn't landed yet — `pre..worktree` is the right
+    "diff against whatever the tree looks like now" fallback), or the turn
+    may have FINISHED with its post skipped as clean (`create_checkpoint`'s
+    own skip-when-clean — a genuine no-op turn). For the latter, falling
+    back to `pre..worktree` would show every LATER turn's cumulative delta,
+    contradicting this turn's own "0 files changed" footer — so a finished,
+    null-post turn returns a stable zero result instead. (The fully-correct
+    cumulative `pre..worktree` diff for reverting a non-latest turn is a
+    separate, deferred follow-up — not built here.)"""
     if bad := _bad_cid(cid):
         return bad
     entry = _read_checkpoint_entry(root, cid, turnId)
@@ -491,6 +500,23 @@ async def diff(
         return _err(404, "no_checkpoint", "no checkpoint for this turn")
     post = entry.get("checkpointPost") if entry else None
     target = post if isinstance(post, str) and post else None
+    status = entry.get("status") if entry else None
+    still_running = status == "running"
+
+    if target is None and not still_running:
+        # Finished-but-clean: no post checkpoint because there was nothing
+        # to snapshot, not because the turn is still in flight. Zero, not
+        # pre..worktree.
+        return JSONResponse(
+            {
+                "nameStatus": [],
+                "patch": "",
+                "truncated": False,
+                "filesChanged": 0,
+                "additions": 0,
+                "deletions": 0,
+            }
+        )
 
     from sanad_terminal.routes_git import _repo
 

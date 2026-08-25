@@ -281,6 +281,31 @@ export function reduceCheckpoint(
   };
 }
 
+/** Structural equality for the checkpoint-bearing-turns list CoderPanel
+ * reports upward via `onCheckpoints` (P5 final-review fix). The list is
+ * rebuilt fresh from `messages` on every render, so array/object identity
+ * is always different even when nothing meaningful changed — this is what
+ * lets the caller skip a redundant `onCheckpoints` call (and the parent
+ * `useState` re-render it triggers) when a streamed token touched some
+ * OTHER message and left every checkpoint-bearing turn's summary alone. */
+export function sameCheckpointItems(
+  a: { turnId: string; checkpoint: CheckpointSummary }[],
+  b: { turnId: string; checkpoint: CheckpointSummary }[],
+): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((item, i) => {
+    const other = b[i];
+    return (
+      other !== undefined &&
+      item.turnId === other.turnId &&
+      item.checkpoint.filesChanged === other.checkpoint.filesChanged &&
+      item.checkpoint.additions === other.checkpoint.additions &&
+      item.checkpoint.deletions === other.checkpoint.deletions &&
+      item.checkpoint.hasPost === other.checkpoint.hasPost
+    );
+  });
+}
+
 /** Fold one journal item into an assistant message as a whole (P5 Task 4):
  * `blocks` via `reduce()` (unchanged), plus `turnId` (set once, from the
  * journal's `{kind:"turn"}` item, then held) and `checkpoint` (via

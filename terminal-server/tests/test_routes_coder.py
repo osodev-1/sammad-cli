@@ -1088,6 +1088,62 @@ def test_diff_running_turn_returns_pre_to_worktree(client: TestClient, tmp_path:
     assert not send_thread.is_alive()
 
 
+@_needs_git
+def test_diff_finished_clean_turn_returns_zero_not_pre_worktree(client: TestClient, tmp_path: Path):
+    """Final-review fix: a FINISHED turn with a null `checkpointPost` (its
+    own post was skipped as clean — a genuine no-op turn, mirrors
+    test_coder_checkpoints.test_non_mutating_turn_records_pre_but_null_post)
+    must diff as zero, not fall back to `pre..worktree` like a still-running
+    turn does. Proven end to end: turn 1 is clean (finishes with a null
+    post), turn 2 afterwards DOES mutate the tree — without the fix, turn
+    1's `pre..worktree` would pick up turn 2's file too, contradicting turn
+    1's own "0 files changed" footer."""
+    root = _root_for(tmp_path)
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    _seed_repo(root)
+
+    clean_res = client.post(
+        f"/internal/coder/conversations/{cid}/send",
+        headers=HEADERS,
+        json={"input": "hello", "sendId": "m1"},  # default mode: no file writes
+    )
+    assert clean_res.status_code == 200, clean_res.text
+    clean_turn_id = _lines(clean_res.text)[0]["turnId"]
+
+    index = _load_turns_index(root, cid)
+    clean_entry = _entry_for(index, clean_turn_id)
+    assert clean_entry["status"] == "finished"
+    assert clean_entry["checkpointPre"] is not None
+    assert clean_entry["checkpointPost"] is None
+
+    # A LATER turn really does mutate the tree — this is what pre..worktree
+    # would leak into turn 1's diff without the fix.
+    mutate_res = client.post(
+        f"/internal/coder/conversations/{cid}/send",
+        headers=HEADERS,
+        json={"input": "WRITEFILE:later.txt:from turn two\n", "sendId": "m2"},
+    )
+    assert mutate_res.status_code == 200, mutate_res.text
+
+    diff_res = client.get(
+        f"/internal/coder/conversations/{cid}/diff",
+        headers=HEADERS,
+        params={"turnId": clean_turn_id},
+    )
+    assert diff_res.status_code == 200, diff_res.text
+    body = diff_res.json()
+    assert body == {
+        "nameStatus": [],
+        "patch": "",
+        "truncated": False,
+        "filesChanged": 0,
+        "additions": 0,
+        "deletions": 0,
+    }
+
+
 def test_diff_returns_404_when_turn_never_checkpointed(client: TestClient):
     # No _seed_repo: the workspace dir exists but is not a git repo, so the
     # best-effort pre-checkpoint silently stays null (mirrors

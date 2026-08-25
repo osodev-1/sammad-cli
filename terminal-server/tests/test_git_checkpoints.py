@@ -107,6 +107,28 @@ async def test_create_checkpoint_commits_off_head_tree_without_moving_head(repo:
 
 
 @pytest.mark.asyncio
+async def test_create_checkpoint_never_touches_the_real_git_index_bytes(repo: Path):
+    """Byte-level lock on the throwaway-GIT_INDEX_FILE discipline this whole
+    module documents — stronger than the `git status` check the other tests
+    use (which only proves the reported porcelain lines match, not that the
+    index file itself was never written to): snapshot `.git/index`'s raw
+    bytes before/after a representative checkpoint op and assert byte-for-
+    byte equality."""
+    _seed_repo(repo)
+    index_path = repo / ".git" / "index"
+    assert index_path.is_file()
+    index_before = index_path.read_bytes()
+
+    git = GitRepo(repo)
+    (repo / "a.txt").write_text("one\nedited\n")  # uncommitted, real index untouched
+    ref = _checkpoint_ref(CID, TURN_1, "pre")
+    sha = await git.create_checkpoint(ref, "byte-level index check")
+
+    assert sha is not None
+    assert index_path.read_bytes() == index_before
+
+
+@pytest.mark.asyncio
 async def test_second_checkpoint_chains_as_child_of_parent(repo: Path):
     head, branch = _seed_repo(repo)
     git = GitRepo(repo)
@@ -406,6 +428,46 @@ async def test_restore_to_handles_nested_subdirectory_paths(repo: Path):
 
     assert _head(repo) == head
     assert _branch(repo) == branch
+
+
+@pytest.mark.asyncio
+async def test_restore_to_does_not_follow_or_delete_a_symlink_escaping_root(
+    repo: Path, tmp_path: Path
+):
+    """Regression test for the highest-risk destructive branch, previously
+    unexercised: restore_to's removal phase (`_remove_worktree_relpath`)
+    resolves each delete-candidate path and only unlinks it when the
+    RESOLVED path stays under root — this is what stops a symlink sitting
+    in the worktree from making the destructive delete phase follow it out
+    of the repo and remove a file elsewhere on disk. Plants a real symlink
+    pointing at a real file outside root, added AFTER the checkpointed
+    target (so it's exactly the kind of path restore_to's second phase
+    tries to remove), and locks that the outside file survives untouched
+    and `.git/` (HEAD/branch) is undisturbed."""
+    head, branch = _seed_repo(repo)  # a.txt=one, b.txt=two, committed
+    git = GitRepo(repo)
+
+    ref = _checkpoint_ref(CID, TURN_1, "pre")
+    target_sha = await git.create_checkpoint(ref, "target")  # tree == a.txt/b.txt only
+    assert target_sha is not None
+
+    outside = tmp_path / "outside_secret.txt"
+    outside.write_text("do not touch\n")
+    evil = repo / "evil"
+    evil.symlink_to(outside)  # added AFTER the checkpoint -> a delete candidate
+
+    await git.restore_to(target_sha)
+
+    # The REAL file outside root must survive — never followed, never deleted.
+    assert outside.exists()
+    assert outside.read_text() == "do not touch\n"
+    # Target files untouched.
+    assert (repo / "a.txt").read_text() == "one\n"
+    assert (repo / "b.txt").read_text() == "two\n"
+    # .git/ itself: untouched — HEAD/branch never moved.
+    assert _head(repo) == head
+    assert _branch(repo) == branch
+    assert (repo / ".git").is_dir()
 
 
 @pytest.mark.asyncio
