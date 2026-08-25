@@ -158,3 +158,13 @@ def test_coder_write_lease_ttl_default_and_parses(base_env):
     assert s.coder_write_lease_ttl_seconds > s.coder_max_turn_seconds
     s = TerminalSettings.load(env={**base_env, "CODER_WRITE_LEASE_TTL_SECONDS": "60"})
     assert s.coder_write_lease_ttl_seconds == 60
+
+
+def test_write_lease_ttl_default_matches_the_lease_module_fallback(base_env):
+    """The settings default and `workspace_lease`'s fallback constant are two
+    independent literals; if they drift, a lease created before any settings
+    caller reaches it would silently use a different TTL than configured."""
+    from sanad_terminal.workspace_lease import DEFAULT_STALE_AFTER_SECONDS
+
+    s = TerminalSettings.load(env=base_env)
+    assert float(s.coder_write_lease_ttl_seconds) == DEFAULT_STALE_AFTER_SECONDS

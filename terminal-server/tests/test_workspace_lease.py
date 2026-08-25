@@ -16,7 +16,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from loguru import logger
-from sanad_terminal.workspace_lease import REVERT_HOLDER, WriteLease, lease_for
+from sanad_terminal.workspace_lease import (
+    DEFAULT_STALE_AFTER_SECONDS,
+    REVERT_HOLDER,
+    WriteLease,
+    lease_for,
+)
 
 CID_A = "c_aaaaaaaaaaaa"
 CID_B = "c_bbbbbbbbbbbb"
@@ -202,3 +207,32 @@ def test_lease_for_is_distinct_per_root(tmp_path: Path):
     assert a is not b
     a.try_acquire(CID_A, now=100.0)
     assert b.holder_of() is None
+
+
+def test_lease_for_updates_the_ttl_on_an_existing_lease(tmp_path: Path):
+    """`lease_for` is a get-or-create that ALSO accepts an authoritative TTL.
+
+    Settings are request-scoped in this service, so the configured TTL
+    arrives from a caller rather than being read here — which means a later
+    caller must be able to correct a lease created earlier without one.
+    """
+    root = tmp_path / "ws"
+    first = lease_for(root)
+    assert first.stale_after_seconds == DEFAULT_STALE_AFTER_SECONDS
+    same = lease_for(root, stale_after_seconds=60.0)
+    assert same is first
+    assert first.stale_after_seconds == 60.0
+
+
+def test_lease_for_honours_an_explicit_ttl_at_creation(tmp_path: Path):
+    lease = lease_for(tmp_path / "ws-ttl", stale_after_seconds=42.0)
+    assert lease.stale_after_seconds == 42.0
+
+
+def test_ttl_boundary_is_strictly_greater_than(tmp_path: Path):
+    """Exactly AT the TTL is not yet stale — "older than", not "at least"."""
+    lease = _lease(ttl=10.0)
+    lease.try_acquire(CID_A, now=100.0)
+    assert lease.try_acquire(CID_B, now=110.0) is False
+    assert lease.holder_of() == CID_A
+    assert lease.try_acquire(CID_B, now=110.001) is True
