@@ -286,6 +286,7 @@ export default function ContextDock({
                     sessionId={sessionId}
                     turnId={c.turnId}
                     turnNumber={i + 1}
+                    totalCheckpoints={coderCheckpoints.length}
                     checkpoint={c.checkpoint}
                     onReverted={() => onCoderReverted?.()}
                   />

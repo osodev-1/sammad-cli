@@ -33,6 +33,7 @@ export function CheckpointFooter({
   sessionId,
   turnId,
   turnNumber,
+  totalCheckpoints,
   checkpoint,
   onReverted,
 }: {
@@ -42,6 +43,11 @@ export function CheckpointFooter({
   /** 1-based ordinal among this conversation's checkpointed turns — human-
    * readable turn identity for the confirm dialog's warning text. */
   turnNumber: number;
+  /** Total checkpointed turns in this conversation — lets RevertConfirm
+   * tell whether `turnNumber` is the LATEST turn (its own diff is the full
+   * revert impact) or an earlier one (later turns' changes are discarded
+   * too but not reflected in the file list — P5 Task 4 review). */
+  totalCheckpoints: number;
   checkpoint: CheckpointSummary;
   /** Revert only ever touches the workspace tree — never this turn's own
    * machine — so the caller (CoderPanel/SessionWorkspace) is responsible
@@ -133,6 +139,7 @@ export function CheckpointFooter({
       {confirmOpen && (
         <RevertConfirm
           turnNumber={turnNumber}
+          totalCheckpoints={totalCheckpoints}
           files={diff?.ok ? diff.nameStatus : undefined}
           filesLoading={diffLoading}
           busy={revertBusy}

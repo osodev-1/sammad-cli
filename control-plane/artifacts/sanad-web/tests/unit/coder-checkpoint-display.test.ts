@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   formatCheckpointSummary,
   buildRevertWarning,
+  revertDiscardsUnlistedChanges,
+  LATER_TURNS_CAVEAT,
 } from "@/lib/coder/checkpointDisplay";
 
 describe("formatCheckpointSummary (P5 Task 4)", () => {
@@ -65,5 +67,25 @@ describe("buildRevertWarning (P5 Task 4)", () => {
 
   it("uses a different turn number each time it's asked to", () => {
     expect(buildRevertWarning(1)).not.toEqual(buildRevertWarning(2));
+  });
+});
+
+describe("revertDiscardsUnlistedChanges (P5 Task 4 review, Important)", () => {
+  it("is false when reverting the LATEST checkpointed turn — its own diff IS the full impact", () => {
+    expect(revertDiscardsUnlistedChanges(3, 3)).toBe(false);
+  });
+
+  it("is true when reverting an EARLIER turn — later turns' changes are discarded too but not shown", () => {
+    expect(revertDiscardsUnlistedChanges(1, 3)).toBe(true);
+    expect(revertDiscardsUnlistedChanges(2, 3)).toBe(true);
+  });
+
+  it("is false for the only turn in a single-checkpoint conversation", () => {
+    expect(revertDiscardsUnlistedChanges(1, 1)).toBe(false);
+  });
+
+  it("LATER_TURNS_CAVEAT names later turns' changes as discarded-but-unlisted", () => {
+    expect(LATER_TURNS_CAVEAT).toMatch(/later turns/i);
+    expect(LATER_TURNS_CAVEAT).toMatch(/discarded/i);
   });
 });
