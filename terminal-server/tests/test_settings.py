@@ -148,3 +148,13 @@ def test_coder_diff_max_bytes_default_and_parses(base_env):
     assert TerminalSettings.load(env=base_env).coder_diff_max_bytes == 200_000
     s = TerminalSettings.load(env={**base_env, "CODER_DIFF_MAX_BYTES": "1000"})
     assert s.coder_diff_max_bytes == 1000
+
+
+def test_coder_write_lease_ttl_default_and_parses(base_env):
+    s = TerminalSettings.load(env=base_env)
+    assert s.coder_write_lease_ttl_seconds == 3900
+    # The lease is held for a whole turn — the TTL must never be able to
+    # reclaim from a turn that is merely long.
+    assert s.coder_write_lease_ttl_seconds > s.coder_max_turn_seconds
+    s = TerminalSettings.load(env={**base_env, "CODER_WRITE_LEASE_TTL_SECONDS": "60"})
+    assert s.coder_write_lease_ttl_seconds == 60
