@@ -3,6 +3,8 @@ import {
   ensureConversation,
   sendCoder,
   fetchCoderTurn,
+  fetchCoderDiff,
+  revertCoder,
   respondCoder,
   setCoderMode,
   steerCoder,
@@ -653,5 +655,121 @@ describe("coder event extractors", () => {
         event: { type: "StatusUpdate", payload: { permission_mode: null } },
       }),
     ).toBeNull();
+  });
+});
+
+describe("fetchCoderDiff", () => {
+  it("GETs turnId as a query param and maps the diff fields on 200", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        nameStatus: [{ status: "A", path: "new.txt" }],
+        patch: "diff --git a/new.txt b/new.txt\n...",
+        truncated: false,
+        filesChanged: 1,
+        additions: 3,
+        deletions: 0,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchCoderDiff("c_1", "t_1", undefined, "sess1");
+
+    expect(result).toEqual({
+      ok: true,
+      nameStatus: [{ status: "A", path: "new.txt" }],
+      patch: "diff --git a/new.txt b/new.txt\n...",
+      truncated: false,
+      filesChanged: 1,
+      additions: 3,
+      deletions: 0,
+    });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe(
+      "/api/coder/conversations/c_1/diff?turnId=t_1&session=sess1",
+    );
+    expect(init).toBeUndefined();
+  });
+
+  it("includes path as a query param when given", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchCoderDiff("c_1", "t_1", "src/a.ts", "sess1");
+
+    const [url] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe(
+      "/api/coder/conversations/c_1/diff?turnId=t_1&path=src%2Fa.ts&session=sess1",
+    );
+  });
+
+  it("maps a 404 no_checkpoint body to {ok:false, code:'no_checkpoint'}", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(404, {
+          error: { code: "no_checkpoint", message: "no checkpoint for this turn" },
+        }),
+      ),
+    );
+    const result = await fetchCoderDiff("c_1", "t_1", undefined, "sess1");
+    expect(result).toEqual({ ok: false, code: "no_checkpoint" });
+  });
+
+  it("maps a network failure to {ok:false, code:'network'}", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    const result = await fetchCoderDiff("c_1", "t_1", undefined, "sess1");
+    expect(result).toEqual({ ok: false, code: "network" });
+  });
+});
+
+describe("revertCoder", () => {
+  it("POSTs {turnId} to the revert endpoint and maps the success fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        ok: true,
+        safetyCheckpoint: "abc123",
+        reverted: { turnId: "t_1" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await revertCoder("c_1", "t_1", "sess1");
+
+    expect(result).toEqual({
+      ok: true,
+      safetyCheckpoint: "abc123",
+      reverted: { turnId: "t_1" },
+    });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("/api/coder/conversations/c_1/revert?session=sess1");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ turnId: "t_1" });
+  });
+
+  it("maps a 409 workspace_busy body to {ok:false, code:'workspace_busy'}", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(409, {
+          error: { code: "workspace_busy", message: "a turn is running in this workspace" },
+        }),
+      ),
+    );
+    const result = await revertCoder("c_1", "t_1", "sess1");
+    expect(result).toEqual({
+      ok: false,
+      code: "workspace_busy",
+      message: "a turn is running in this workspace",
+    });
+  });
+
+  it("maps a network failure to {ok:false, code:'network'}", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    const result = await revertCoder("c_1", "t_1", "sess1");
+    expect(result).toEqual({
+      ok: false,
+      code: "network",
+      message: "Network error — check your connection.",
+    });
   });
 });

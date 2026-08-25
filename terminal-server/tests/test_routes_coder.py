@@ -3,6 +3,8 @@ and the approval round-trip (request → respond → resolution) through the
 HTTP surface."""
 
 import json
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -10,10 +12,11 @@ from pathlib import Path
 
 import httpx
 import pytest
-from sanad_terminal import coder_runner
+from sanad_terminal import coder_runner, routes_blueprint
 from sanad_terminal.app import create_app
 from sanad_terminal.control_plane import ControlPlaneClient
 from sanad_terminal.settings import TerminalSettings
+from sanad_terminal.workspace_locks import lock_for
 from starlette.testclient import TestClient
 
 SECRET = "s3cret"
@@ -43,7 +46,11 @@ def _control_plane(tickets: dict[str, dict]) -> ControlPlaneClient:
 
 
 def _make_client(
-    tmp_path: Path, *, enabled: bool, coder_max_queue_depth: int = 50
+    tmp_path: Path,
+    *,
+    enabled: bool,
+    coder_max_queue_depth: int = 50,
+    coder_diff_max_bytes: int = 200_000,
 ) -> TestClient:
     settings = TerminalSettings(
         shared_secret=SECRET,
@@ -54,6 +61,7 @@ def _make_client(
         coder_max_steps_per_turn=200,
         coder_max_conversations=2,
         coder_max_queue_depth=coder_max_queue_depth,
+        coder_diff_max_bytes=coder_diff_max_bytes,
     )
     app = create_app(settings, _control_plane({"tt_good": IDENTITY}))
     return TestClient(app)
@@ -956,3 +964,432 @@ def test_interrupted_replay_does_not_drop_the_runner(client: TestClient, tmp_pat
             client.portal.call(crashed.stop)
         send_thread.join(timeout=5)
     assert not send_thread.is_alive()
+
+
+# -- P5 Task 3: /diff + /revert over real git checkpoints --------------------
+#
+# Mirrors test_coder_checkpoints.py's construction style (real git, via
+# subprocess, never mocked) but drives it entirely over HTTP: `/diff` and
+# `/revert` read/act on the durable checkpoint SHAs Task 2 wrote into
+# `turns.json`, so the proof has to be end-to-end through the routes, not
+# just the runner.
+
+_needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+
+
+def _git(root: Path, *args: str) -> str:
+    res = subprocess.run(
+        ["git", "-C", str(root), *args], check=True, capture_output=True, text=True
+    )
+    return res.stdout
+
+
+def _seed_repo(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.name", "Test User")
+    _git(root, "config", "user.email", "test@example.com")
+    (root / "seed.txt").write_text("seed\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "seed")
+
+
+def _checkpoint_refs(root: Path, cid: str) -> set[str]:
+    res = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "for-each-ref",
+            "--format=%(refname)",
+            f"refs/sanad/checkpoints/{cid}/",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return {line.strip() for line in res.stdout.splitlines() if line.strip()}
+
+
+def _load_turns_index(root: Path, cid: str) -> list[dict]:
+    return json.loads((root.parent / "agentd" / "coder" / cid / "turns.json").read_text())
+
+
+def _entry_for(index: list[dict], turn_id: str) -> dict:
+    return next(e for e in index if e["turnId"] == turn_id)
+
+
+@_needs_git
+def test_diff_finished_turn_returns_pre_to_post(client: TestClient, tmp_path: Path):
+    root = _root_for(tmp_path)
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    _seed_repo(root)
+
+    res = client.post(
+        f"/internal/coder/conversations/{cid}/send",
+        headers=HEADERS,
+        json={"input": "WRITEFILE:new.txt:hello\n", "sendId": "m1"},
+    )
+    assert res.status_code == 200, res.text
+    turn_id = _lines(res.text)[0]["turnId"]
+
+    diff_res = client.get(
+        f"/internal/coder/conversations/{cid}/diff",
+        headers=HEADERS,
+        params={"turnId": turn_id},
+    )
+    assert diff_res.status_code == 200, diff_res.text
+    body = diff_res.json()
+    assert body["nameStatus"] == [{"status": "A", "path": "new.txt"}]
+    assert "hello" in body["patch"]
+    assert body["truncated"] is False
+    assert body["filesChanged"] == 1
+    assert body["additions"] == 1
+    assert body["deletions"] == 0
+
+
+@_needs_git
+def test_diff_running_turn_returns_pre_to_worktree(client: TestClient, tmp_path: Path):
+    root = _root_for(tmp_path)
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    _seed_repo(root)
+
+    send_thread = threading.Thread(
+        target=client.post,
+        args=(f"/internal/coder/conversations/{cid}/send",),
+        kwargs={"headers": HEADERS, "json": {"input": "HANG"}},
+        daemon=True,
+    )
+    send_thread.start()
+    try:
+        turn_id = _wait_for_running_turn(client, cid)
+
+        # Simulate mid-turn work: a file appears in the tree while the turn
+        # is still open — checkpointPost stays null until it ends, so /diff
+        # must fall back to pre..worktree, not pre..(nothing).
+        (root / "wip.txt").write_text("work in progress\n")
+
+        diff_res = client.get(
+            f"/internal/coder/conversations/{cid}/diff",
+            headers=HEADERS,
+            params={"turnId": turn_id},
+        )
+        assert diff_res.status_code == 200, diff_res.text
+        body = diff_res.json()
+        assert body["nameStatus"] == [{"status": "A", "path": "wip.txt"}]
+
+        cancel_res = client.post(f"/internal/coder/conversations/{cid}/cancel", headers=HEADERS)
+        assert cancel_res.status_code == 200
+    finally:
+        send_thread.join(timeout=10)
+    assert not send_thread.is_alive()
+
+
+def test_diff_returns_404_when_turn_never_checkpointed(client: TestClient):
+    # No _seed_repo: the workspace dir exists but is not a git repo, so the
+    # best-effort pre-checkpoint silently stays null (mirrors
+    # test_coder_checkpoints.test_checkpoint_creation_failure_does_not_fail_the_turn).
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    res = client.post(
+        f"/internal/coder/conversations/{cid}/send",
+        headers=HEADERS,
+        json={"input": "hello", "sendId": "m1"},
+    )
+    assert res.status_code == 200, res.text
+    turn_id = _lines(res.text)[0]["turnId"]
+
+    diff_res = client.get(
+        f"/internal/coder/conversations/{cid}/diff",
+        headers=HEADERS,
+        params={"turnId": turn_id},
+    )
+    assert diff_res.status_code == 404
+    assert diff_res.json()["error"]["code"] == "no_checkpoint"
+
+
+def test_diff_unknown_turn_is_404(client: TestClient):
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    diff_res = client.get(
+        f"/internal/coder/conversations/{cid}/diff",
+        headers=HEADERS,
+        params={"turnId": "t_000000000000"},
+    )
+    assert diff_res.status_code == 404
+    assert diff_res.json()["error"]["code"] == "no_checkpoint"
+
+
+def test_diff_malformed_cid_is_400(client: TestClient):
+    res = client.get(
+        "/internal/coder/conversations/..%2Fetc/diff",
+        headers=HEADERS,
+        params={"turnId": "t_000000000000"},
+    )
+    assert res.status_code in (400, 404)
+
+
+@_needs_git
+def test_diff_respects_coder_diff_max_bytes(tmp_path: Path):
+    with _make_client(tmp_path, enabled=True, coder_diff_max_bytes=40) as diff_client:
+        root = _root_for(tmp_path)
+        cid = diff_client.post(
+            "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+        ).json()["conversationId"]
+        _seed_repo(root)
+
+        big_content = "x" * 500 + "\n"
+        res = diff_client.post(
+            f"/internal/coder/conversations/{cid}/send",
+            headers=HEADERS,
+            json={"input": f"WRITEFILE:big.txt:{big_content}", "sendId": "m1"},
+        )
+        assert res.status_code == 200, res.text
+        turn_id = _lines(res.text)[0]["turnId"]
+
+        diff_res = diff_client.get(
+            f"/internal/coder/conversations/{cid}/diff",
+            headers=HEADERS,
+            params={"turnId": turn_id},
+        )
+        assert diff_res.status_code == 200, diff_res.text
+        body = diff_res.json()
+        assert body["truncated"] is True
+        assert len(body["patch"].encode("utf-8")) <= 40
+        # Counts come from the UN-truncated numstat — a correct summary even
+        # though the patch text itself is cut (settings.coder_diff_max_bytes
+        # bounds the patch only, never the counts).
+        assert body["filesChanged"] == 1
+        assert body["additions"] == 1
+
+
+@_needs_git
+def test_revert_refuses_409_when_another_conversation_in_the_workspace_is_busy(
+    client: TestClient, tmp_path: Path
+):
+    """Whole-workspace, cross-conversation: there is no write-lease until P6,
+    so a revert on an IDLE conversation must still refuse while a DIFFERENT
+    conversation in the same workspace has a turn running."""
+    root = _root_for(tmp_path)
+    cid1 = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    _seed_repo(root)
+
+    finished = client.post(
+        f"/internal/coder/conversations/{cid1}/send",
+        headers=HEADERS,
+        json={"input": "WRITEFILE:a.txt:one\n", "sendId": "m1"},
+    )
+    assert finished.status_code == 200, finished.text
+    turn1_id = _lines(finished.text)[0]["turnId"]
+
+    cid2 = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+
+    send_thread = threading.Thread(
+        target=client.post,
+        args=(f"/internal/coder/conversations/{cid2}/send",),
+        kwargs={"headers": HEADERS, "json": {"input": "HANG"}},
+        daemon=True,
+    )
+    send_thread.start()
+    try:
+        _wait_for_running_turn(client, cid2)
+
+        revert_res = client.post(
+            f"/internal/coder/conversations/{cid1}/revert",
+            headers=HEADERS,
+            json={"turnId": turn1_id},
+        )
+        assert revert_res.status_code == 409
+        assert revert_res.json()["error"]["code"] == "workspace_busy"
+
+        cancel_res = client.post(f"/internal/coder/conversations/{cid2}/cancel", headers=HEADERS)
+        assert cancel_res.status_code == 200
+    finally:
+        send_thread.join(timeout=10)
+    assert not send_thread.is_alive()
+
+
+@_needs_git
+def test_revert_restores_worktree_and_records_safety_and_marker(
+    client: TestClient, tmp_path: Path
+):
+    root = _root_for(tmp_path)
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    _seed_repo(root)
+
+    turn1 = client.post(
+        f"/internal/coder/conversations/{cid}/send",
+        headers=HEADERS,
+        json={"input": "WRITEFILE:a.txt:one\n", "sendId": "m1"},
+    )
+    assert turn1.status_code == 200, turn1.text
+    turn1_id = _lines(turn1.text)[0]["turnId"]
+
+    turn2 = client.post(
+        f"/internal/coder/conversations/{cid}/send",
+        headers=HEADERS,
+        json={"input": "WRITEFILE:b.txt:two\n", "sendId": "m2"},
+    )
+    assert turn2.status_code == 200, turn2.text
+
+    assert (root / "a.txt").exists()
+    assert (root / "b.txt").exists()
+
+    pre1_sha = _entry_for(_load_turns_index(root, cid), turn1_id)["checkpointPre"]
+    assert isinstance(pre1_sha, str) and pre1_sha
+
+    revert_res = client.post(
+        f"/internal/coder/conversations/{cid}/revert",
+        headers=HEADERS,
+        json={"turnId": turn1_id},
+    )
+    assert revert_res.status_code == 200, revert_res.text
+    body = revert_res.json()
+    assert body["ok"] is True
+    assert isinstance(body["safetyCheckpoint"], str) and body["safetyCheckpoint"]
+    assert body["reverted"] == {"turnId": turn1_id}
+    safety_sha = body["safetyCheckpoint"]
+
+    # The worktree now looks exactly like it did right before turn 1 — both
+    # later files are gone, the seed file remains untouched.
+    assert not (root / "a.txt").exists()
+    assert not (root / "b.txt").exists()
+    assert (root / "seed.txt").exists()
+
+    # The safety checkpoint really captured the PRE-REVERT tree (both files
+    # still present) — an "undo the undo" net, not a no-op.
+    assert _git(root, "show", f"{safety_sha}:a.txt").strip() == "one"
+    assert _git(root, "show", f"{safety_sha}:b.txt").strip() == "two"
+
+    refs = _checkpoint_refs(root, cid)
+    assert any(f"/{turn1_id}-safety-" in r for r in refs)
+
+    markers_path = root.parent / "agentd" / "coder" / cid / "reverts.ndjson"
+    lines = [json.loads(ln) for ln in markers_path.read_text().splitlines() if ln.strip()]
+    assert lines == [
+        {"kind": "revert", "turnId": turn1_id, "toPre": pre1_sha, "safety": safety_sha}
+    ]
+
+
+def test_revert_returns_404_when_turn_never_checkpointed(client: TestClient):
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    res = client.post(
+        f"/internal/coder/conversations/{cid}/revert",
+        headers=HEADERS,
+        json={"turnId": "t_000000000000"},
+    )
+    assert res.status_code == 404
+    assert res.json()["error"]["code"] == "no_checkpoint"
+
+
+def test_revert_malformed_cid_is_400(client: TestClient):
+    res = client.post(
+        "/internal/coder/conversations/..%2Fetc/revert",
+        headers=HEADERS,
+        json={"turnId": "t_000000000000"},
+    )
+    assert res.status_code in (400, 404)
+
+
+def test_revert_and_blueprint_share_the_same_workspace_lock():
+    """Extraction proof (P5 Task 3): both route modules import the exact
+    same `lock_for` — a revert and a blueprint apply/rollback/trust review
+    on the same root now serialize against each other, not just their own
+    kind (see the blocking test below for the behavioral proof)."""
+    from sanad_terminal import routes_coder
+
+    assert routes_blueprint.lock_for is lock_for
+    assert routes_coder.lock_for is lock_for
+
+
+@_needs_git
+def test_revert_blocks_while_a_blueprint_write_holds_the_shared_lock(
+    client: TestClient, tmp_path: Path
+):
+    root = _root_for(tmp_path)
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    _seed_repo(root)
+
+    turn = client.post(
+        f"/internal/coder/conversations/{cid}/send",
+        headers=HEADERS,
+        json={"input": "WRITEFILE:a.txt:one\n", "sendId": "m1"},
+    )
+    assert turn.status_code == 200, turn.text
+    turn_id = _lines(turn.text)[0]["turnId"]
+
+    assert client.portal is not None
+
+    async def _acquire() -> None:
+        await lock_for(root).acquire()
+
+    async def _release() -> None:
+        lock_for(root).release()
+
+    client.portal.call(_acquire)
+    revert_thread = None
+    try:
+        result: dict = {}
+
+        def _do_revert() -> None:
+            result["res"] = client.post(
+                f"/internal/coder/conversations/{cid}/revert",
+                headers=HEADERS,
+                json={"turnId": turn_id},
+            )
+
+        revert_thread = threading.Thread(target=_do_revert, daemon=True)
+        revert_thread.start()
+        revert_thread.join(timeout=1.0)
+        assert revert_thread.is_alive(), "revert did not wait for the shared lock"
+    finally:
+        client.portal.call(_release)
+    revert_thread.join(timeout=10)
+    assert not revert_thread.is_alive()
+    assert result["res"].status_code == 200, result["res"].text
+
+
+@_needs_git
+def test_revert_does_not_touch_the_blueprint_trust_store(client: TestClient, tmp_path: Path):
+    """The trust store lives OUTSIDE the repo root
+    (`<workspace>/../blueprint-trust.json`) — a revert only ever touches the
+    git worktree at `root`, so it must leave this file byte-for-byte alone."""
+    root = _root_for(tmp_path)
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    _seed_repo(root)
+
+    turn = client.post(
+        f"/internal/coder/conversations/{cid}/send",
+        headers=HEADERS,
+        json={"input": "WRITEFILE:a.txt:one\n", "sendId": "m1"},
+    )
+    assert turn.status_code == 200, turn.text
+    turn_id = _lines(turn.text)[0]["turnId"]
+
+    trust_path = root.parent / "blueprint-trust.json"
+    trust_path.write_text('{"sentinel": true}\n', encoding="utf-8")
+
+    revert_res = client.post(
+        f"/internal/coder/conversations/{cid}/revert",
+        headers=HEADERS,
+        json={"turnId": turn_id},
+    )
+    assert revert_res.status_code == 200, revert_res.text
+    assert trust_path.read_text(encoding="utf-8") == '{"sentinel": true}\n'
