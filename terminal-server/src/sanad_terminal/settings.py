@@ -62,6 +62,9 @@ class TerminalSettings:
     # appending that turn and journals one `journal_overflow` error item).
     coder_journal_turns_keep: int = 20
     coder_journal_max_bytes: int = 20 * 1024 * 1024
+    # Checkpoint diff patch-text cap (P5) — mirrors coder_journal_max_bytes.
+    # Rides the existing coder_enabled flag; no separate on/off switch.
+    coder_diff_max_bytes: int = 200_000
     # Per-conversation server-side follow-up queue (P4b) depth cap — RAM-only
     # and otherwise unbounded, so an authenticated `POST /send {queue:true}`
     # spam loop must be capped like every other coder_* resource above.
@@ -165,6 +168,7 @@ class TerminalSettings:
             coder_max_conversations=int(e.get("CODER_MAX_CONVERSATIONS", "3")),
             coder_journal_turns_keep=int(e.get("CODER_JOURNAL_TURNS_KEEP", "20")),
             coder_journal_max_bytes=int(e.get("CODER_JOURNAL_MAX_BYTES", str(20 * 1024 * 1024))),
+            coder_diff_max_bytes=int(e.get("CODER_DIFF_MAX_BYTES", str(200_000))),
             coder_max_queue_depth=int(e.get("CODER_MAX_QUEUE_DEPTH", "50")),
             trust_store_key=e.get("TRUST_STORE_KEY", ""),
             architect_max_turn_seconds=float(e.get("ARCHITECT_MAX_TURN_SECONDS", "1800")),
