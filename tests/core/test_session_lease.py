@@ -83,6 +83,30 @@ def test_steal_requested_while_busy_refuses():
 
 
 # ---------------------------------------------------------------------------
+# should_warn_persist_failure (Important 4, review)
+# ---------------------------------------------------------------------------
+
+
+def test_should_warn_persist_failure_fires_on_the_first_call():
+    # `last_warned_at=None` means "never warned yet" — always fires.
+    assert sla.should_warn_persist_failure(None, now=1_000_000.0) is True
+
+
+def test_should_warn_persist_failure_suppressed_inside_the_cooldown():
+    last_warned_at = 1_000_000.0
+    just_inside = last_warned_at + sla.LEASE_PERSIST_WARN_COOLDOWN_SECONDS - 1
+    assert sla.should_warn_persist_failure(last_warned_at, now=just_inside) is False
+
+
+def test_should_warn_persist_failure_fires_again_once_the_cooldown_elapses():
+    last_warned_at = 1_000_000.0
+    at_boundary = last_warned_at + sla.LEASE_PERSIST_WARN_COOLDOWN_SECONDS
+    past_boundary = at_boundary + 1
+    assert sla.should_warn_persist_failure(last_warned_at, now=at_boundary) is True
+    assert sla.should_warn_persist_failure(last_warned_at, now=past_boundary) is True
+
+
+# ---------------------------------------------------------------------------
 # build_takeover_notification
 # ---------------------------------------------------------------------------
 

@@ -630,6 +630,7 @@ def kimi(
             # refusal is passed straight through the `return` below
             # instead — `_post_run` already knows to leave a
             # `SESSION_OWNED` exit code alone.
+            nonlocal _latest_created_session
             if ui in ("wire", "shell"):
                 from kimi_cli.sanad.session_lock import locks_enabled
 
@@ -652,6 +653,21 @@ def kimi(
                             await refuse_wire_initialize(acquire.owner)
                         else:
                             _emit_fatal_error(build_shell_refusal_message(acquire.owner))
+                        # Minor (review): also clear `_latest_created_session`
+                        # here, not just skip assigning it. Without this, a
+                        # LATER `_run` iteration (a Reload from a session
+                        # this SAME process legitimately acquired earlier)
+                        # that then gets refused leaves the PRIOR iteration's
+                        # session as the stale value `_reload_loop`'s crash-
+                        # cleanup handler would act on if something raises
+                        # afterward — a latent third door on the exact route
+                        # that already produced two session-destroying bugs
+                        # (see the comment above). `None` here is always
+                        # safe: `_post_run` already knows to leave a
+                        # `SESSION_OWNED` exit code alone, so nothing relies
+                        # on `_latest_created_session` still pointing at
+                        # anything on this path.
+                        _latest_created_session = None
                         return session, ExitCode.SESSION_OWNED
                     if not acquire.persisted:
                         logger.warning(
@@ -659,7 +675,6 @@ def kimi(
                             "without a verified owner"
                         )
 
-            nonlocal _latest_created_session
             _latest_created_session = session
 
             # Add CLI-provided additional directories to session state

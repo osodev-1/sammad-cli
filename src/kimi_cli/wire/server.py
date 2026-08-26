@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -17,11 +18,11 @@ from kimi_cli.constant import USER_AGENT
 from kimi_cli.sanad.session_lease import HeartbeatAction, build_takeover_notification
 from kimi_cli.sanad.session_lease import decide_heartbeat_action as _decide_lease_action
 from kimi_cli.sanad.session_lease import holder_id as _lease_holder_id
+from kimi_cli.sanad.session_lease import should_warn_persist_failure as _should_warn_persist_failure
 from kimi_cli.sanad.session_lock import (
     HEARTBEAT_SECONDS,
     heartbeat,
     locks_enabled,
-    read_owner,
     release,
     try_acquire,
 )
@@ -125,6 +126,12 @@ class WireServer:
         self._lease_holder: str | None = None
         self._lease_generation: int | None = None
         self._lease_task: asyncio.Task[None] | None = None
+        self._lease_persist_warned_at: float | None = None
+        """Review fix (Important 4): last time `_lease_heartbeat_tick`
+        warned about `HeartbeatResult.persisted is False` — rate-limits
+        that warning via `should_warn_persist_failure` instead of either
+        never warning (fail-SILENT, forbidden by P6B-DECISIONS.md) or
+        warning on every single `HEARTBEAT_SECONDS` tick."""
 
     @property
     def _approval_runtime(self) -> ApprovalRuntime | None:
@@ -321,18 +328,21 @@ class WireServer:
     async def _shutdown(self) -> None:
         # Review fix (Important 3): the lease cancel+release now lives in
         # this `finally`, so it ALWAYS runs — even if something above it
-        # raises (e.g. `_write_task`; see the broadened suppress below,
-        # which already prevents the most likely case, but the `finally`
-        # is the actual guarantee, not that suppress). Without this, an
-        # abruptly-disconnected client could leak `owner.json` for up to
-        # `STALE_AFTER_SECONDS`, with the user told "already open in the
-        # browser" the whole time. Placing the lease code in `finally`
-        # ALSO means that on the normal (non-exceptional) path it runs
-        # right after `asyncio.gather(*self._dispatch_tasks, ...)` below —
-        # i.e. after a cancelled in-flight turn has actually finished
-        # unwinding/flushing, not while it's still in progress, so a
-        # successor can't acquire and start writing into the same
-        # `context.jsonl`/`state.json` this process hasn't finished with.
+        # raises (e.g. `_write_task`; see the capture-and-re-raise below,
+        # which used to broadly suppress `Exception` here — no longer
+        # needed for the guarantee once the lease code moved into
+        # `finally`, and it had its own bug; see Important 1 just below).
+        # Without the `finally` placement, an abruptly-disconnected client
+        # could leak `owner.json` for up to `STALE_AFTER_SECONDS`, with the
+        # user told "already open in the browser" the whole time. Placing
+        # the lease code in `finally` ALSO means that on the normal
+        # (non-exceptional) path it runs right after
+        # `asyncio.gather(*self._dispatch_tasks, ...)` below — i.e. after a
+        # cancelled in-flight turn has actually finished unwinding/
+        # flushing, not while it's still in progress, so a successor can't
+        # acquire and start writing into the same `context.jsonl`/
+        # `state.json` this process hasn't finished with.
+        write_task_exc: BaseException | None = None
         try:
             for request in self._pending_requests.values():
                 if request.resolved:
@@ -362,16 +372,28 @@ class WireServer:
 
             self._write_queue.shutdown()
             if self._write_task is not None:
-                # Review fix (Important 3): `_write_loop` re-raises real
-                # exceptions after logging them (e.g. a broken pipe on
-                # `drain()`) — suppressing only `CancelledError` here let
-                # that exception propagate out of `_shutdown()` and skip
-                # everything below (root hub cleanup, the dispatch gather,
-                # and — before this fix — the lease release). Already
-                # logged inside `_write_loop`; nothing is lost by not
-                # re-raising it a second time here.
-                with contextlib.suppress(asyncio.CancelledError, Exception):
+                # Review fix (Important 1): `_write_loop` re-raises real
+                # (non-Cancelled) exceptions deliberately, after already
+                # logging them (e.g. a broken pipe on `drain()`) — so a
+                # caller further up (`cli/__init__.py`'s top-level handler)
+                # can turn a write-loop failure into a non-zero process
+                # exit code. Broadly suppressing `Exception` here (the
+                # Important-3 fix, previously) silently flipped that exit
+                # code back to 0 — an UN-GATED regression (this path runs
+                # with `SANAD_SESSION_LOCKS` unset too). The `finally`
+                # below already guarantees the lease release runs
+                # regardless of whether this raises, so there is no longer
+                # a reason to swallow it: capture it, let every cleanup
+                # step below (including `finally`'s lease release and the
+                # writer close after it) still run, then re-raise it once
+                # everything has actually finished, right at the end of
+                # this method.
+                try:
                     await self._write_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:  # noqa: BLE001 - re-raised below, once cleanup is done
+                    write_task_exc = exc
 
             if self._root_hub_task is not None:
                 self._root_hub_task.cancel()
@@ -416,6 +438,13 @@ class WireServer:
         self._reader = None
         self._initialized = False
 
+        if write_task_exc is not None:
+            # Review fix (Important 1): every cleanup step above —
+            # including the lease release in `finally` and the writer
+            # close just above — has already run; re-raise now so the
+            # process still exits non-zero, matching pre-P6b behavior.
+            raise write_task_exc
+
     def _start_lease_heartbeat(self) -> None:
         """P6b: start the ~10s session-lease heartbeat, IF the gate is on.
 
@@ -431,12 +460,27 @@ class WireServer:
         session_dir = self._soul.runtime.session.dir
         holder = _lease_holder_id("wire")
         # The acquire that granted (or refused) this run already happened in
-        # cli/__init__.py, before `KimiCLI.create()`. Read back what it
-        # wrote so `release()` later has the right fencing generation,
-        # without threading a new parameter through `KimiCLI.create()` /
-        # `run_wire_stdio()` / `WireServer.__init__`.
-        owner = read_owner(session_dir)
-        generation = owner.generation if owner is not None and owner.holder == holder else None
+        # cli/__init__.py, before `KimiCLI.create()`.
+        #
+        # Review fix (Important 2): re-derive the fencing generation via an
+        # idempotent SELF-re-acquire (`try_acquire`), not a bare
+        # `read_owner`. A bare read leaves the on-disk `heartbeat_at` frozen
+        # at the ORIGINAL acquire's timestamp all the way through
+        # `KimiCLI.create()` + everything `serve()` does before reaching
+        # this call, PLUS a full `HEARTBEAT_SECONDS` (`_lease_heartbeat_loop`
+        # sleeps before its first tick) — on a slow start, long enough to
+        # cross `STALE_AFTER_SECONDS` and let a second process legitimately
+        # (and correctly, per its own read of a now-stale record) seize the
+        # lease while this one is still starting up: two live owners, the
+        # exact hazard this lease exists to prevent. `try_acquire` refuses
+        # only a LIVE, DIFFERENT holder — never our own re-acquire — so
+        # calling it again for OUR holder id here is safe by construction,
+        # refreshes `heartbeat_at` to right now, and returns the correct
+        # generation directly (no separate `read_owner` needed at all).
+        reacquired = try_acquire(session_dir, holder=holder, ui_mode="wire")
+        generation = (
+            reacquired.owner.generation if reacquired.ok and reacquired.owner is not None else None
+        )
 
         self._lease_session_dir = session_dir
         self._lease_holder = holder
@@ -461,6 +505,23 @@ class WireServer:
 
         busy = self._is_streaming
         result = heartbeat(session_dir, holder=holder, busy=busy)
+        if not result.persisted and _should_warn_persist_failure(self._lease_persist_warned_at):
+            # Review fix (Important 4): `HeartbeatResult.persisted` was
+            # read by NO caller before this fix — a holder whose heartbeat
+            # writes keep failing believed it still owned the session while
+            # its on-disk stamp aged past `STALE_AFTER_SECONDS` and someone
+            # else legitimately (and silently, from this process's point of
+            # view) took over. Fail-open (per P6B-DECISIONS.md) must never
+            # mean fail-SILENT: surface it, rate-limited via
+            # `should_warn_persist_failure` so a persistently failing write
+            # doesn't log on every `HEARTBEAT_SECONDS` tick.
+            self._lease_persist_warned_at = time.time()
+            logger.warning(
+                "Session lease heartbeat for {dir} could not be written to "
+                "disk; the one-owner guarantee is unverified until the next "
+                "successful write",
+                dir=session_dir,
+            )
         action = _decide_lease_action(result, busy=busy)
 
         if action is HeartbeatAction.REFUSE_STEAL:

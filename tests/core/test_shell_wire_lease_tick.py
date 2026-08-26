@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from pathlib import Path
 from typing import Any
 
@@ -119,9 +120,14 @@ async def test_shell_run_gate_off_never_touches_the_lease_at_all(
     # names in `ui.shell`; patching `session_lock.try_acquire` would leave the
     # already-bound references untouched and this test would pass for the wrong
     # reason — the exact trap the version this replaces fell into.
+    #
+    # Review fix (Important 2): `read_owner` is no longer imported into
+    # `ui.shell` at all — `run()`'s lease setup now calls `try_acquire`
+    # exclusively (an idempotent self-re-acquire replaces the old bare
+    # read), so `try_acquire` alone is the entry point to forbid here.
     import kimi_cli.ui.shell as shell_mod
 
-    for entry in ("try_acquire", "heartbeat", "release", "read_owner"):
+    for entry in ("try_acquire", "heartbeat", "release"):
         monkeypatch.setattr(shell_mod, entry, _forbidden(entry))
 
     shell = Shell(soul)
@@ -139,6 +145,84 @@ async def test_shell_run_gate_off_never_touches_the_lease_at_all(
     # secondary signal rather than the primary one.
     assert shell._lease_session_dir is None
     assert shell._lease_holder is None
+
+
+@pytest.mark.asyncio
+async def test_shell_run_refreshes_a_stale_stamp_before_running_the_command(
+    monkeypatch: pytest.MonkeyPatch, soul: KimiSoul, runtime: Runtime
+):
+    """Important 2 (review), shell twin of the WireServer
+    `_start_lease_heartbeat` test below: `run()`'s own lease setup (which
+    runs BEFORE `_start_lease_heartbeat()` even creates the periodic loop)
+    must refresh a stale on-disk stamp via a self-re-acquire, not merely
+    read it back — same slow-start hazard as wire (`KimiCLI.create()` runs
+    between the ORIGINAL acquire in `cli/__init__.py` and `Shell.run()`
+    being reached at all, and the periodic loop's own first tick is a full
+    `HEARTBEAT_SECONDS` away)."""
+    session_dir = runtime.session.dir
+    holder = sla.holder_id("shell")
+    stale_acquire_time = time.time() - sl.STALE_AFTER_SECONDS - 5
+    acquired = sl.try_acquire(session_dir, holder=holder, ui_mode="shell", now=stale_acquire_time)
+    assert acquired.ok
+
+    shell = Shell(soul)
+
+    seen_heartbeat_at: list[float] = []
+
+    async def _fake_run_soul_command(user_input: object) -> bool:
+        owner = sl.read_owner(session_dir)
+        assert owner is not None
+        seen_heartbeat_at.append(owner.heartbeat_at)
+        return True
+
+    monkeypatch.setattr(shell, "run_soul_command", _fake_run_soul_command)
+
+    result = await shell.run(command="hi")
+
+    assert result is True
+    assert len(seen_heartbeat_at) == 1
+    # Refreshed to (about) now BEFORE the command ran, not left at the
+    # stale acquire-time stamp a bare `read_owner` would have kept.
+    assert seen_heartbeat_at[0] > stale_acquire_time + sl.STALE_AFTER_SECONDS
+    assert time.time() - seen_heartbeat_at[0] < 5.0
+
+
+@pytest.mark.asyncio
+async def test_shell_run_refuses_to_start_when_try_acquire_finds_a_live_foreign_holder(
+    monkeypatch: pytest.MonkeyPatch, soul: KimiSoul, runtime: Runtime
+):
+    """Minor (review): unlike a bare `read_owner`, `run()`'s self-re-acquire
+    can come back REFUSED — a LIVE, DIFFERENT holder legitimately seized
+    the lease in the window between the ORIGINAL acquire and `Shell.run()`
+    being reached (the exact staleness race Important 2 closes). `run()`
+    must refuse to start a full session in that case — never paint the
+    banner or run the command — rather than silently limping along under a
+    lease it no longer holds until the first real heartbeat tick (up to
+    `HEARTBEAT_SECONDS` later) catches it."""
+    session_dir = runtime.session.dir
+    foreign_holder = sla.holder_id("wire")
+    acquired = sl.try_acquire(session_dir, holder=foreign_holder, ui_mode="wire")
+    assert acquired.ok
+
+    shell = Shell(soul)
+
+    called = False
+
+    async def _fake_run_soul_command(user_input: object) -> bool:
+        nonlocal called
+        called = True
+        return True
+
+    monkeypatch.setattr(shell, "run_soul_command", _fake_run_soul_command)
+
+    result = await shell.run(command="hi")
+
+    assert result is False
+    assert called is False  # never even reached the command
+    # The foreign holder's own lease is untouched by our refused attempt.
+    owner = sl.read_owner(session_dir)
+    assert owner is not None
+    assert owner.holder == foreign_holder
 
 
 @pytest.mark.asyncio
@@ -263,6 +347,53 @@ async def test_shell_busy_holder_refuses_steal_and_clears_request_without_releas
     assert owner.steal_requested_by is None
     assert owner.generation > acquired.owner.generation
     assert shell._lease_generation == owner.generation
+    # Minor (review): the self-reacquire must PRESERVE `busy` — it is not a
+    # fresh grant. Before the fix this published "idle" to disk for up to a
+    # heartbeat while the shell was actively streaming.
+    assert owner.busy is True
+
+
+@pytest.mark.asyncio
+async def test_shell_heartbeat_tick_warns_and_toasts_when_the_write_cannot_be_persisted(
+    soul: KimiSoul, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+):
+    """Important 4 (review), shell twin of the WireServer test: unlike
+    wire (whose only channel to the user is the wire connection itself),
+    shell is the interactive TUI, so a `persisted=False` heartbeat must
+    ALSO toast, not just log — per the review's explicit "(and, for shell,
+    a toast)" instruction. Same real-write-failure technique: patches
+    `atomic_json_write` (what `session_lock._write_owner` actually calls)
+    to raise, so `heartbeat()` genuinely returns `persisted=False`."""
+    _toast_queues["left"].clear()
+    try:
+        shell = Shell(soul)
+        session_dir = runtime.session.dir
+        holder = sla.holder_id("shell")
+        acquired = _seed_lease(session_dir, holder, "shell")
+        assert acquired.owner is not None
+        shell._lease_session_dir = session_dir
+        shell._lease_holder = holder
+        shell._lease_generation = acquired.owner.generation
+
+        monkeypatch.setattr(
+            "kimi_cli.sanad.session_lock.atomic_json_write",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            "kimi_cli.ui.shell.logger.warning",
+            lambda msg, *a, **k: warnings.append(msg),
+        )
+
+        action = await shell._lease_heartbeat_tick()
+
+        assert action is sla.HeartbeatAction.CONTINUE  # still ours — just unverified
+        assert len(warnings) == 1
+        assert shell._lease_persist_warned_at is not None
+        toasted = [entry.message for entry in _toast_queues["left"]]
+        assert any("disk write failed" in message for message in toasted)
+    finally:
+        _toast_queues["left"].clear()
 
 
 @pytest.mark.asyncio
@@ -359,6 +490,47 @@ async def test_wire_start_lease_heartbeat_is_a_noop_when_gate_off(
 
 
 @pytest.mark.asyncio
+async def test_wire_start_lease_heartbeat_refreshes_a_stale_stamp_before_the_first_tick(
+    soul: KimiSoul, runtime: Runtime
+):
+    """Important 2 (review): the acquire that granted this run happened in
+    `cli/__init__.py`, before `KimiCLI.create()` — a slow start (LLM/
+    Runtime/agent/MCP setup) can eat well past `STALE_AFTER_SECONDS` before
+    `_start_lease_heartbeat()` even runs, and `_lease_heartbeat_loop` then
+    sleeps a FULL `HEARTBEAT_SECONDS` before its first real tick. A bare
+    `read_owner` (the pre-fix behavior) leaves `heartbeat_at` frozen at the
+    ORIGINAL acquire's timestamp through all of that — long enough for a
+    second process to legitimately (and correctly, per its own read of a
+    now-stale record) seize the lease. Seed an intentionally STALE acquire,
+    then prove `_start_lease_heartbeat()` itself — before any tick ever
+    runs — refreshes the on-disk stamp to (about) now via a self-re-acquire,
+    not merely reads the stale one back."""
+    server = WireServer(soul)
+    session_dir = runtime.session.dir
+    holder = sla.holder_id("wire")
+    stale_acquire_time = time.time() - sl.STALE_AFTER_SECONDS - 5
+    acquired = sl.try_acquire(session_dir, holder=holder, ui_mode="wire", now=stale_acquire_time)
+    assert acquired.ok
+
+    try:
+        server._start_lease_heartbeat()
+
+        owner = sl.read_owner(session_dir)
+        assert owner is not None
+        assert owner.holder == holder
+        # Refreshed to (about) now, not left at the stale acquire-time stamp
+        # — a bare `read_owner` would have left this exactly `stale_acquire_time`.
+        assert owner.heartbeat_at > stale_acquire_time + sl.STALE_AFTER_SECONDS
+        assert time.time() - owner.heartbeat_at < 5.0
+        assert sl.is_live(owner)
+    finally:
+        if server._lease_task is not None:
+            server._lease_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await server._lease_task
+
+
+@pytest.mark.asyncio
 async def test_wire_idle_holder_stands_down_sets_stop_event(soul: KimiSoul, runtime: Runtime):
     server = WireServer(soul)
     session_dir = runtime.session.dir
@@ -406,6 +578,87 @@ async def test_wire_busy_holder_refuses_steal_and_clears_request(soul: KimiSoul,
     assert owner.holder == holder
     assert owner.steal_requested_by is None
     assert owner.generation > acquired.owner.generation
+    # Minor (review): the self-reacquire must PRESERVE `busy` — it is not a
+    # fresh grant. Before the fix this published "idle" to disk for up to a
+    # heartbeat while the wire view was actively streaming.
+    assert owner.busy is True
+
+
+@pytest.mark.asyncio
+async def test_wire_heartbeat_tick_warns_when_the_write_cannot_be_persisted(
+    soul: KimiSoul, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+):
+    """Important 4 (review): `HeartbeatResult.persisted` was read by NO
+    caller before this fix (`grep -rn '\\.persisted' src/` found only a
+    docstring and the acquire-side warning) — a holder whose heartbeat
+    writes keep failing believed it still owned the session while its
+    on-disk stamp aged past `STALE_AFTER_SECONDS` and a legitimate
+    successor silently took over. Locked decision 5 (P6B-DECISIONS.md)
+    forbids fail-open from ALSO being fail-silent.
+
+    Patches the REAL write primitive (`atomic_json_write`, what
+    `session_lock._write_owner` actually calls) to raise, so `heartbeat()`
+    genuinely returns `persisted=False` from a real failed write — not a
+    mocked `HeartbeatResult` — and asserts the tick surfaces it."""
+    server = WireServer(soul)
+    session_dir = runtime.session.dir
+    holder = sla.holder_id("wire")
+    acquired = _seed_lease(session_dir, holder, "wire")
+    assert acquired.owner is not None
+    server._lease_session_dir = session_dir
+    server._lease_holder = holder
+    server._lease_generation = acquired.owner.generation
+
+    monkeypatch.setattr(
+        "kimi_cli.sanad.session_lock.atomic_json_write",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "kimi_cli.wire.server.logger.warning",
+        lambda msg, *a, **k: warnings.append(msg),
+    )
+
+    action = await server._lease_heartbeat_tick()
+
+    assert action is sla.HeartbeatAction.CONTINUE  # still ours — just unverified
+    assert len(warnings) == 1
+    assert server._lease_persist_warned_at is not None
+
+
+@pytest.mark.asyncio
+async def test_wire_heartbeat_tick_rate_limits_the_persist_warning(
+    soul: KimiSoul, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+):
+    """A SECOND consecutive tick, still failing to persist, must NOT warn
+    again within `LEASE_PERSIST_WARN_COOLDOWN_SECONDS` — otherwise a
+    persistently-full disk would log on every single `HEARTBEAT_SECONDS`
+    tick (the exact spam `should_warn_persist_failure`'s cooldown exists to
+    prevent)."""
+    server = WireServer(soul)
+    session_dir = runtime.session.dir
+    holder = sla.holder_id("wire")
+    acquired = _seed_lease(session_dir, holder, "wire")
+    assert acquired.owner is not None
+    server._lease_session_dir = session_dir
+    server._lease_holder = holder
+    server._lease_generation = acquired.owner.generation
+
+    monkeypatch.setattr(
+        "kimi_cli.sanad.session_lock.atomic_json_write",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "kimi_cli.wire.server.logger.warning",
+        lambda msg, *a, **k: warnings.append(msg),
+    )
+
+    await server._lease_heartbeat_tick()
+    await server._lease_heartbeat_tick()
+
+    assert len(warnings) == 1  # not 2
 
 
 @pytest.mark.asyncio
@@ -427,6 +680,48 @@ async def test_wire_shutdown_releases_the_lease_on_normal_exit(soul: KimiSoul, r
     server._write_task = asyncio.create_task(_drain(server._write_queue))
 
     await server._shutdown()
+
+    assert sl.read_owner(session_dir) is None
+
+
+@pytest.mark.asyncio
+async def test_wire_shutdown_releases_the_lease_and_reraises_a_write_task_failure(
+    soul: KimiSoul, runtime: Runtime
+):
+    """Important 1 (review): a non-Cancelled exception from `_write_task`
+    (mirroring `_write_loop`'s real behavior on a genuine failure, e.g. a
+    broken pipe on `drain()`, which re-raises deliberately after logging)
+    must still (a) let every cleanup step run — the lease release in
+    particular, so a crashed write loop never leaks `owner.json` for up to
+    `STALE_AFTER_SECONDS` — AND (b) propagate back out of `_shutdown()` so
+    the process still exits non-zero, exactly as it did before a prior
+    review fix broadened the suppress here to `contextlib.suppress(
+    asyncio.CancelledError, Exception)` and silently flipped that exit code
+    from 1 to 0 — an UN-GATED regression (this path runs with
+    `SANAD_SESSION_LOCKS` unset too).
+
+    The PRIOR test above (`test_wire_shutdown_releases_the_lease_on_normal_
+    exit`) cannot catch a regression on either half: its `_write_task`
+    never raises, so it passes whether the release is inline or in a
+    `finally`, and whether or not the exception is re-raised."""
+    server = WireServer(soul)
+    session_dir = runtime.session.dir
+    holder = sla.holder_id("wire")
+    acquired = _seed_lease(session_dir, holder, "wire")
+    assert acquired.owner is not None
+    server._lease_session_dir = session_dir
+    server._lease_holder = holder
+    server._lease_generation = acquired.owner.generation
+
+    server._write_queue = Queue()
+
+    async def _fail_write_loop() -> None:
+        raise RuntimeError("boom: write loop failed")
+
+    server._write_task = asyncio.create_task(_fail_write_loop())
+
+    with pytest.raises(RuntimeError, match="boom: write loop failed"):
+        await server._shutdown()
 
     assert sl.read_owner(session_dir) is None
 

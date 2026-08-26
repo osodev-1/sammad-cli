@@ -90,6 +90,15 @@ def test_busy_holder_refuses_steal_and_clears_the_request(session_dir: Path):
     assert owner.steal_requested_by is None
     # Self-reacquire bumped the generation (a real disk write happened).
     assert owner.generation > first_generation
+    # Minor (review): the mid-turn self-reacquire inside REFUSE_STEAL must
+    # PRESERVE `busy` — a self-reacquire is not a fresh grant. Before the
+    # fix, `try_acquire` unconditionally reset `busy=False` on every grant,
+    # so this refuse-steal write published "idle" to disk for up to a
+    # heartbeat while the holder was actively streaming — the owner-status
+    # endpoint would report `busy: false` for a genuinely busy holder.
+    # NOTHING in this suite asserted this before; it would not have noticed
+    # a busy holder publishing itself as idle.
+    assert owner.busy is True
 
     # A second heartbeat with nothing new pending just continues.
     assert _tick(session_dir, holder, "wire", busy=True) is sla.HeartbeatAction.CONTINUE

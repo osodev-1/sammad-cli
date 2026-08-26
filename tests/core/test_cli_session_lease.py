@@ -104,14 +104,34 @@ def _stub_kimi_cli_create(monkeypatch: pytest.MonkeyPatch, *, observed: dict[str
 def test_gate_off_creates_no_owner_json_and_still_reaches_kimicli_create(
     monkeypatch: pytest.MonkeyPatch, isolated_share_dir: Path, work_dir: KaosPath
 ) -> None:
+    """Fix (review): this test (and its wire twin below) used to pass even
+    with the CALL-SITE `if locks_enabled():` guard deleted entirely,
+    because `session_lock.try_acquire`'s OWN internal gate already returns
+    `ok=True, owner=None` and touches no disk when off — the observable
+    disk-state assertions below stay green either way. That leaves M8's
+    actual fix (`session.dir`'s `mkdir(parents=True, exist_ok=True)` side
+    effect must not run at ALL with the gate off, since it would otherwise
+    fire as `try_acquire`'s own argument is evaluated, before its
+    internal no-op ever gets a chance to run) completely unpinned. Spy on
+    `try_acquire` itself — made to raise if ever reached at all — so a
+    regression that deletes the call-site gate fails LOUDLY here instead
+    of silently passing."""
     monkeypatch.delenv("SANAD_SESSION_LOCKS", raising=False)
     observed: dict[str, object] = {}
     _stub_kimi_cli_create(monkeypatch, observed=observed)
 
+    def _forbidden_try_acquire(*args: object, **kwargs: object) -> object:
+        raise AssertionError("try_acquire must not be called at all with the gate off")
+
+    monkeypatch.setattr("kimi_cli.sanad.session_lock.try_acquire", _forbidden_try_acquire)
+
     # Default ui is "shell" — no --print/--wire/--acp flag needed.
     runner.invoke(cli, ["--work-dir", str(work_dir)])
 
-    # KimiCLI.create() WAS reached (gate-off never refuses) ...
+    # KimiCLI.create() WAS reached (gate-off never refuses, and the
+    # forbidden `try_acquire` above was never reached either — if the
+    # call-site gate were deleted, `_forbidden_try_acquire` would have
+    # raised and `KimiCLI.create()` would never have run) ...
     assert "session" in observed, "KimiCLI.create() was never called"
     # ... and by the time it ran, no owner.json existed on disk at all.
     assert observed["owner_json_exists_at_create_time"] is False
@@ -250,6 +270,11 @@ def test_wire_refusal_calls_refuse_wire_initialize_with_the_live_owner(
 def test_wire_gate_off_does_not_call_refuse_and_reaches_kimicli_create(
     monkeypatch: pytest.MonkeyPatch, isolated_share_dir: Path, work_dir: KaosPath
 ) -> None:
+    """Fix (review): the shell twin above explains why `refuse_calls == []`
+    alone can't catch a deleted call-site gate — `try_acquire`'s own
+    internal gate already no-ops and writes nothing, so nothing here would
+    observably differ. Same fix: make `try_acquire` raise if ever reached
+    at all with the gate off."""
     monkeypatch.delenv("SANAD_SESSION_LOCKS", raising=False)
     refuse_calls: list[object] = []
 
@@ -259,11 +284,19 @@ def test_wire_gate_off_does_not_call_refuse_and_reaches_kimicli_create(
     monkeypatch.setattr(
         "kimi_cli.sanad.session_lease.refuse_wire_initialize", _fake_refuse_wire_initialize
     )
+
+    def _forbidden_try_acquire(*args: object, **kwargs: object) -> object:
+        raise AssertionError("try_acquire must not be called at all with the gate off")
+
+    monkeypatch.setattr("kimi_cli.sanad.session_lock.try_acquire", _forbidden_try_acquire)
     observed: dict[str, object] = {}
     _stub_kimi_cli_create(monkeypatch, observed=observed)
 
     runner.invoke(cli, ["--work-dir", str(work_dir), "--wire"])
 
+    # `_forbidden_try_acquire` was never reached — if the call-site gate
+    # were deleted, it would have raised and `KimiCLI.create()` (and thus
+    # `observed["session"]`) would never have been reached.
     assert "session" in observed
     assert refuse_calls == []
 
@@ -312,3 +345,88 @@ def test_exception_during_refusal_does_not_destroy_the_foreign_owners_session(
     assert owner.holder == other_holder
     assert owner.generation == acquired.owner.generation
     assert session.context_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# Minor (review): a refused LATER Reload iteration must clear
+# `_latest_created_session`, not merely skip assigning it.
+# ---------------------------------------------------------------------------
+
+
+def test_a_refused_later_reload_iteration_clears_latest_created_session(
+    monkeypatch: pytest.MonkeyPatch, isolated_share_dir: Path, work_dir: KaosPath
+) -> None:
+    """`_latest_created_session` tracks the most recent `_run()` call
+    ACROSS Reload iterations within one process. Iteration 1 legitimately
+    acquires a fresh session (A) — `_latest_created_session` becomes A.
+    Iteration 2 (a Reload to a DIFFERENT session, B, which has a LIVE
+    foreign owner) is then refused: the refusal return itself never raises
+    here, so it must ALSO clear `_latest_created_session` — not merely
+    leave it un-assigned (that guard alone only protects the session being
+    refused RIGHT NOW, not a stale reference to an EARLIER iteration's own
+    session).
+
+    Without the fix, A's stale reference survives the refused iteration —
+    a latent third door on the exact route that already produced two
+    session-destroying bugs (see the test above): if ANYTHING unrelated
+    raises afterward, `_reload_loop`'s crash-cleanup handler acts on that
+    stale reference instead of `None`. Forced here via `Session.is_empty`
+    raising for B specifically — `_post_run`'s `_print_resume_hint` calls
+    it unconditionally, even on the SESSION_OWNED exit path, so no access
+    to any `_run()`-local closure is needed to trigger the handler."""
+    from kimi_cli.cli import Reload
+
+    monkeypatch.setenv("SANAD_SESSION_LOCKS", "1")
+
+    # Session B: pre-created, with a LIVE foreign owner — iteration 2 must
+    # be refused.
+    session_b = asyncio.run(Session.create(work_dir))
+    other_holder = "shell:777777"
+    acquired = sl.try_acquire(session_b.dir, holder=other_holder, ui_mode="shell")
+    assert acquired.ok
+    assert acquired.owner is not None
+
+    calls = {"n": 0}
+    captured: dict[str, object] = {}
+
+    async def _fake_create(session, **kwargs):  # noqa: ANN001, ANN003
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Iteration 1 legitimately acquired its OWN (fresh) session A
+            # — capture it, then simulate a Reload (e.g. `/new`) to B
+            # before doing anything else with it.
+            captured["session_a"] = session
+            raise Reload(session_id=session_b.id)
+        raise _ReachedKimiCLICreate  # must never actually run — B is refused
+
+    monkeypatch.setattr("kimi_cli.app.KimiCLI.create", _fake_create)
+
+    # `Session.is_empty` raises ONLY for B — forces `_reload_loop`'s
+    # crash-cleanup handler to fire right after the refused-iteration
+    # return, without needing to reach into any `_run()`-local closure.
+    real_is_empty = Session.is_empty
+
+    def _boom_is_empty(self: Session) -> bool:
+        if self.id == session_b.id:
+            raise RuntimeError("simulated unrelated failure")
+        return real_is_empty(self)
+
+    monkeypatch.setattr(Session, "is_empty", _boom_is_empty)
+
+    result = runner.invoke(cli, ["--work-dir", str(work_dir)])
+
+    assert calls["n"] == 1  # iteration 2 never reached KimiCLI.create() — refused first
+    assert result.exit_code != 0  # the simulated crash propagates
+    session_a = captured["session_a"]
+    assert isinstance(session_a, Session)
+
+    # Session A — iteration 1's own, legitimately acquired session — must
+    # SURVIVE: not deleted based on a stale `_latest_created_session`
+    # reference left over from before the refused iteration.
+    assert session_a.dir.exists()
+    assert session_a.context_file.exists()
+    # And B's foreign owner is of course untouched throughout.
+    owner = sl.read_owner(session_b.dir)
+    assert owner is not None
+    assert owner.holder == other_holder
+    assert owner.generation == acquired.owner.generation

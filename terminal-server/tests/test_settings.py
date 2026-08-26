@@ -208,6 +208,37 @@ def test_coder_takeover_wait_and_poll_defaults_and_parse(base_env):
     assert s.coder_takeover_poll_seconds == 1.0
 
 
+def test_coder_takeover_poll_seconds_is_clamped_off_a_hot_loop(base_env):
+    """Minor (review): `_handle_session_owned`'s poll loop does
+    `asyncio.sleep(min(settings.coder_takeover_poll_seconds, remaining))`
+    on every tick. `CODER_TAKEOVER_POLL_SECONDS=0` (or negative) turns
+    that into a hot loop that re-writes a FOREIGN owner record as fast as
+    the event loop allows, for the whole wait window — clamp to a floor
+    instead."""
+    s = TerminalSettings.load(env={**base_env, "CODER_TAKEOVER_POLL_SECONDS": "0"})
+    assert s.coder_takeover_poll_seconds == 0.05
+    s = TerminalSettings.load(env={**base_env, "CODER_TAKEOVER_POLL_SECONDS": "-3"})
+    assert s.coder_takeover_poll_seconds == 0.05
+    # A configured value ABOVE the floor is honoured verbatim.
+    s = TerminalSettings.load(env={**base_env, "CODER_TAKEOVER_POLL_SECONDS": "2"})
+    assert s.coder_takeover_poll_seconds == 2.0
+
+
+def test_coder_takeover_wait_seconds_is_clamped_to_a_sane_range(base_env):
+    """`CODER_TAKEOVER_WAIT_SECONDS` unbounded above is a milder footgun
+    than the poll interval (no hot loop), but an operator typo (e.g. a
+    missing decimal point) could still leave a takeover HTTP request
+    hanging for hours — clamp both a negative value and an unreasonably
+    huge one."""
+    s = TerminalSettings.load(env={**base_env, "CODER_TAKEOVER_WAIT_SECONDS": "-5"})
+    assert s.coder_takeover_wait_seconds == 0.0
+    s = TerminalSettings.load(env={**base_env, "CODER_TAKEOVER_WAIT_SECONDS": "999999"})
+    assert s.coder_takeover_wait_seconds == 120.0
+    # A configured value WITHIN the range is honoured verbatim.
+    s = TerminalSettings.load(env={**base_env, "CODER_TAKEOVER_WAIT_SECONDS": "45"})
+    assert s.coder_takeover_wait_seconds == 45.0
+
+
 def test_write_lease_ttl_default_matches_the_lease_module_fallback(base_env):
     """The settings default and `workspace_lease`'s fallback constant are two
     independent literals; if they drift, a lease created before any settings

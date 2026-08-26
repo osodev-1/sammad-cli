@@ -228,6 +228,8 @@ async def _handle_session_owned(
     exc: WireRunnerError,
     *,
     takeover: bool,
+    uid: int | None = None,
+    gid: int | None = None,
 ) -> JSONResponse | None:
     """Maps a `session_owned` refusal from `runner.start()` to its HTTP
     response, or — when `takeover` is set and the owner is IDLE — requests a
@@ -236,6 +238,13 @@ async def _handle_session_owned(
     Returns `None` when a retried `runner.start()` SUCCEEDED (the caller
     falls through to the normal post-start path); returns a `JSONResponse`
     for every refusal, including a timed-out takeover.
+
+    `uid`/`gid` are `_spawn`'s already-derived `settings.agent_user`
+    identity (CRITICAL, review) — threaded through to every
+    `session_owner.request_steal` call below so the `owner.json` write a
+    steal produces is chowned to the CLI child's own uid under a uid split,
+    not left root-owned and unreadable to the very holder whose heartbeat
+    must read it back (see `session_owner._write_owner`'s docstring).
 
     The wait POLLS `owner.json` directly (`session_owner.read_owner` — cheap,
     no subprocess) rather than re-spawning the CLI on every tick: a spawn
@@ -285,61 +294,82 @@ async def _handle_session_owned(
     # anyway would be exactly the wasted-CLI-startup-work Important 2
     # flagged, just moved to the end of the window instead of every tick.
     owner_departed = False
+    # Minor (review): whether OUR steal request ever actually landed —
+    # guards the best-effort rescind in `finally` below. A takeover that
+    # times out, or whose `await` is cancelled (e.g. the caller's own HTTP
+    # request disconnects mid-wait), otherwise leaves `steal_requested_by`
+    # pointing at us on the owner record — and the holder's NEXT heartbeat
+    # still cooperatively stands down for a takeover that will never
+    # actually happen, since this connection already gave up.
+    steal_requested = False
 
-    if session_owner.request_steal(session_dir, by=stolen_by):
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break  # never departed, never refused — a plain timeout
-            await asyncio.sleep(min(settings.coder_takeover_poll_seconds, remaining))
-            owner = session_owner.read_owner(session_dir)
-            if owner is None or not session_owner.is_live(owner):
-                owner_departed = True
-                break  # released, or went stale — attempt the real respawn below
-            if owner.steal_requested_by is None:
-                # Refused: the holder's own heartbeat cleared our request
-                # while the record stayed — decision 2's "mid-turn, refuse,
-                # never queue" applies just as much to a takeover that only
-                # became busy AFTER we started waiting.
-                return _err(
-                    409, "session_busy", exc.message, uiMode=owner.ui_mode, busy=owner.busy
-                )
-            # Still pending — re-issue on every tick: a request can be lost
-            # to a concurrent heartbeat write landing between ITS read and
-            # ITS own write (`session_lock.heartbeat` re-reads and preserves
-            # whatever `steal_requested_by` it saw — a request that arrives
-            # in that narrow window is overwritten, not merged, and stays
-            # lost until something asks again). Free insurance now that
-            # we're already polling.
-            session_owner.request_steal(session_dir, by=stolen_by)
-            ui_mode, busy = owner.ui_mode, owner.busy
-    else:
-        # No live owner to steal from at all (already gone, or the write
-        # itself couldn't land) — nothing to poll for, and good reason to
-        # believe a spawn now would succeed.
-        owner_departed = True
-
-    if not owner_departed:
-        return _err(409, "session_owned", exc.message, uiMode=ui_mode, busy=busy)
     try:
-        # Clamped to whatever's left of OUR window — never let this single
-        # attempt's own (default 30s) handshake timeout blow past the
-        # caller's configured budget on its own. `max(..., a tiny floor)`
-        # rather than 0/negative: `request_steal` returning False above can
-        # reach here with the full window essentially untouched, but a
-        # departure observed right at the deadline should still get a
-        # last, bounded try rather than being skipped outright.
-        remaining = max(deadline - time.monotonic(), 0.001)
-        await runner.start(init_timeout=remaining)
-    except WireRunnerError as retry_exc:
-        if retry_exc.code != "session_owned":
-            await runner.stop()
-            return _err(503, retry_exc.code, retry_exc.message)
-        data = retry_exc.data or {}
-        ui_mode, busy = data.get("ui_mode"), bool(data.get("busy"))
-        code = "session_busy" if busy else "session_owned"
-        return _err(409, code, retry_exc.message, uiMode=ui_mode, busy=busy)
-    return None  # started — fall through to the caller's success path
+        if session_owner.request_steal(session_dir, by=stolen_by, uid=uid, gid=gid):
+            steal_requested = True
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break  # never departed, never refused — a plain timeout
+                await asyncio.sleep(min(settings.coder_takeover_poll_seconds, remaining))
+                owner = session_owner.read_owner(session_dir)
+                if owner is None or not session_owner.is_live(owner):
+                    owner_departed = True
+                    break  # released, or went stale — attempt the real respawn below
+                if owner.steal_requested_by is None:
+                    # Refused: the holder's own heartbeat cleared our request
+                    # while the record stayed — decision 2's "mid-turn, refuse,
+                    # never queue" applies just as much to a takeover that only
+                    # became busy AFTER we started waiting.
+                    return _err(
+                        409, "session_busy", exc.message, uiMode=owner.ui_mode, busy=owner.busy
+                    )
+                # Still pending — re-issue on every tick: a request can be lost
+                # to a concurrent heartbeat write landing between ITS read and
+                # ITS own write (`session_lock.heartbeat` re-reads and preserves
+                # whatever `steal_requested_by` it saw — a request that arrives
+                # in that narrow window is overwritten, not merged, and stays
+                # lost until something asks again). Free insurance now that
+                # we're already polling.
+                session_owner.request_steal(session_dir, by=stolen_by, uid=uid, gid=gid)
+                ui_mode, busy = owner.ui_mode, owner.busy
+        else:
+            # No live owner to steal from at all (already gone, or the write
+            # itself couldn't land) — nothing to poll for, and good reason to
+            # believe a spawn now would succeed.
+            owner_departed = True
+
+        if not owner_departed:
+            return _err(409, "session_owned", exc.message, uiMode=ui_mode, busy=busy)
+        try:
+            # Clamped to whatever's left of OUR window — never let this single
+            # attempt's own (default 30s) handshake timeout blow past the
+            # caller's configured budget on its own. `max(..., a tiny floor)`
+            # rather than 0/negative: `request_steal` returning False above can
+            # reach here with the full window essentially untouched, but a
+            # departure observed right at the deadline should still get a
+            # last, bounded try rather than being skipped outright.
+            remaining = max(deadline - time.monotonic(), 0.001)
+            await runner.start(init_timeout=remaining)
+        except WireRunnerError as retry_exc:
+            if retry_exc.code != "session_owned":
+                await runner.stop()
+                return _err(503, retry_exc.code, retry_exc.message)
+            data = retry_exc.data or {}
+            ui_mode, busy = data.get("ui_mode"), bool(data.get("busy"))
+            code = "session_busy" if busy else "session_owned"
+            return _err(409, code, retry_exc.message, uiMode=ui_mode, busy=busy)
+        return None  # started — fall through to the caller's success path
+    finally:
+        # Best-effort rescind (minor, review) on every exit from this
+        # point on — timeout, cancellation, a refused steal, or a respawn
+        # that failed again. Safe to call unconditionally whenever we ever
+        # placed a token: `rescind_steal` only clears `steal_requested_by`
+        # when it STILL equals `stolen_by`, so this is a harmless no-op on
+        # every path that already cleared or superseded it (the holder's
+        # own refuse, or ANY fresh `try_acquire` grant — self-reacquire
+        # included — which unconditionally clears the field already).
+        if steal_requested:
+            session_owner.rescind_steal(session_dir, by=stolen_by, uid=uid, gid=gid)
 
 
 async def _spawn(
@@ -417,7 +447,7 @@ async def _spawn(
     except WireRunnerError as exc:
         if exc.code == "session_owned":
             refusal = await _handle_session_owned(
-                settings, root, cid, runner, exc, takeover=takeover
+                settings, root, cid, runner, exc, takeover=takeover, uid=uid, gid=gid
             )
             if refusal is not None:
                 return refusal

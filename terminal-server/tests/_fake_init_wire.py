@@ -22,6 +22,13 @@ agent config reaches the child):
   `parse_initialize_request_id` can't recover a STRING id (EOF, unparseable
   JSON, or a non-string id). Proves `_dispatch`'s "correlate to my only
   outstanding request" fallback rather than mocking it.
+- `FAKE_INIT_MODE=ok_then_null_error`: respond to `initialize` normally
+  (like "ok"), then respond to the NEXT message received — whatever method
+  it is — with a null-id `error` (an un-gated PARSE_ERROR-shaped payload,
+  nothing P6b-specific), then keep idling. Proves the null-id-error
+  fallback stays scoped to the HANDSHAKE: this null-id error arrives while
+  some UNRELATED later `call()` is the sole outstanding request, and must
+  never be misattributed as that call's own answer.
 """
 
 import json
@@ -65,8 +72,27 @@ def main() -> None:
                 },
             }
         )
-        # Idle after a successful init — read (and ignore) anything further
-        # so the subprocess doesn't exit and trip the "agent exited" path.
+        if mode == "ok_then_null_error":
+            for raw2 in sys.stdin:
+                raw2 = raw2.strip()
+                if not raw2:
+                    continue
+                try:
+                    json.loads(raw2)
+                except ValueError:
+                    continue
+                # Whatever this next request was, answer with an UNRELATED
+                # (post-handshake) null-id error — not addressed to it.
+                _write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": -32700, "message": "Parse error"},
+                    }
+                )
+                break
+        # Idle after that — read (and ignore) anything further so the
+        # subprocess doesn't exit and trip the "agent exited" path.
         for _ in sys.stdin:
             pass
         return
