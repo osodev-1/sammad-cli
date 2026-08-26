@@ -52,6 +52,47 @@ export function ToolCard({
   const pending = block.result === undefined;
   const display = block.result?.display ?? [];
 
+  /*
+   * Failure is rendered HERE, once, for every tool — not inside the
+   * individual cards. It used to be per-card, and the result was that only
+   * ShellCard ever surfaced `isError`: a WriteFile that failed rendered
+   * exactly like one that succeeded (just the path), so the agent would
+   * report writing a file, the file would not exist, and the UI showed
+   * nothing at all. Grep/Glob/ReadFile/SetTodoList/Generic had the same
+   * blindness. Keeping this in the frame means a new card type cannot
+   * reintroduce it by omission.
+   */
+  const card = renderCard(block, pending, display, onOpenFile);
+  if (!block.result?.isError) return card;
+  return (
+    <>
+      {card}
+      <ToolFailure message={block.result.message} />
+    </>
+  );
+}
+
+/**
+ * The failure row. `message` is the tool's own explanation and is often the
+ * ONLY thing available: kosong's `ToolError` only emits a display block when
+ * given a `brief`, so a failed call frequently arrives with an empty
+ * `display`. Falls back to a bare chip when even that is missing.
+ */
+function ToolFailure({ message }: { message?: string }) {
+  return (
+    <div style={s.failRow}>
+      <span style={s.chipFail}>✗ failed</span>
+      {message && <span style={s.failMessage}>{message}</span>}
+    </div>
+  );
+}
+
+function renderCard(
+  block: ToolBlock,
+  pending: boolean,
+  display: DisplayBlock[],
+  onOpenFile?: (path: string) => void,
+) {
   switch (block.name) {
     case "Shell":
       return <ShellCard block={block} pending={pending} display={display} />;
@@ -85,9 +126,10 @@ function ShellCard({ block, pending, display }: CardProps) {
       <LabelRow label={block.label} pending={pending} />
       {block.result && (
         <div style={s.statusRow}>
-          <span style={block.result.isError ? s.chipFail : s.chipOk}>
-            {block.result.isError ? "✗ failed" : "✓ done"}
-          </span>
+          {/* Only the SUCCESS chip lives here now — the frame renders one
+              failure row for every tool, so keeping "✗ failed" here too
+              would double it. */}
+          {!block.result.isError && <span style={s.chipOk}>✓ done</span>}
           {brief && <span style={s.brief}>{brief}</span>}
         </div>
       )}
@@ -337,6 +379,20 @@ const s: Record<string, CSSProperties> = {
   brief: {
     fontSize: "0.76rem",
     color: "var(--ink-soft)",
+  },
+  failRow: {
+    display: "flex",
+    alignItems: "baseline",
+    gap: "0.5rem",
+    flexWrap: "wrap",
+    marginTop: "0.35rem",
+  },
+  failMessage: {
+    fontFamily: "var(--font-mono)",
+    fontSize: "0.72rem",
+    color: "var(--ink-soft)",
+    whiteSpace: "pre-wrap",
+    overflowWrap: "anywhere",
   },
   pathBtn: {
     font: "inherit",

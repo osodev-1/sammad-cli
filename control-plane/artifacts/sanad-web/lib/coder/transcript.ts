@@ -38,7 +38,12 @@ export type CoderBlock =
       name: string;
       label: string;
       args: Record<string, unknown>;
-      result?: { isError: boolean; display: DisplayBlock[] };
+      /** `message` is the tool's own explanation of a FAILURE (kosong's
+       * `ToolError(message=...)`). It is carried because a failed tool can
+       * legitimately produce an EMPTY `display`: `ToolError` only builds a
+       * display block when a `brief` is supplied, so without this the UI has
+       * `isError: true` and nothing whatsoever to show. */
+      result?: { isError: boolean; message?: string; display: DisplayBlock[] };
     }
   | {
       kind: "request";
@@ -167,6 +172,10 @@ export function reduce(blocks: CoderBlock[], item: CoderItem): CoderBlock[] {
       ...existing,
       result: {
         isError: Boolean(returnValue?.is_error),
+        message:
+          typeof returnValue?.message === "string" && returnValue.message
+            ? returnValue.message
+            : undefined,
         display: normalizeDisplay(returnValue?.display),
       },
     };
