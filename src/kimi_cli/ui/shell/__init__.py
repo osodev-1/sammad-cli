@@ -232,6 +232,12 @@ class Shell:
         self._lease_session_dir: Path | None = None
         self._lease_holder: str | None = None
         self._lease_generation: int | None = None
+        self._lease_stood_down: bool = False
+        """Review fix (Critical 1): set by `_push_quit_event` whenever a
+        STAND_DOWN was decided, regardless of whether the quit event could
+        actually be delivered to `_idle_events` at that moment. The main
+        loop checks this on every re-entry as a belt-and-braces backstop —
+        the primary signal is still the `lease_taken_over` event."""
         soul_slash_commands = list(soul.available_slash_commands)
         shell_slash_commands = shell_slash_registry.list_commands()
         # sanad(governance): drop upstream's Moonshot-OAuth slash commands
@@ -485,6 +491,16 @@ class Shell:
             )
             self._start_background_task(watcher.run_forever())
             self._start_background_task(self._watch_root_wire_hub())
+            # P6b (review fix, Critical 1): `self._idle_events` must exist
+            # BEFORE the heartbeat starts. Between here and where the
+            # interactive loop used to create it (~30 lines and two awaits
+            # below — `replay_recent_history`, MCP snapshot,
+            # `CustomPromptSession` setup), a STAND_DOWN tick would find
+            # `_idle_events is None` and have no way to reach the (not yet
+            # running) main loop. Created here, once, for the lifetime of
+            # this `run()` call; the `with CustomPromptSession(...)` block
+            # below just binds the local `idle_events` alias to it.
+            self._idle_events = asyncio.Queue()
             self._start_lease_heartbeat()
             await replay_recent_history(
                 self.soul.context.history,
@@ -571,11 +587,14 @@ class Shell:
 
                     self._start_background_task(_invalidate_after_mcp_loading())
             self._exit_after_run = False
-            # P6b: promoted to instance state (`self._idle_events`) so the
-            # lease heartbeat background task can push a quit event onto it
-            # from outside this frame; `idle_events` stays the local name
-            # used throughout the rest of this method.
-            self._idle_events = asyncio.Queue()
+            # P6b: `self._idle_events` was already created above (before
+            # `_start_lease_heartbeat()`, so a STAND_DOWN tick always has
+            # somewhere to deliver its quit event) — this just binds the
+            # local `idle_events` alias used throughout the rest of this
+            # method. Defensive fallback if it somehow wasn't (shouldn't
+            # happen on this path — `command is not None` returns earlier).
+            if self._idle_events is None:
+                self._idle_events = asyncio.Queue()
             idle_events = self._idle_events
             # resume_prompt controls whether the prompt router reads input.
             # Set BEFORE an await = prompt stays live during the operation
@@ -601,6 +620,19 @@ class Shell:
             deferred_bg_trigger = False
             try:
                 while True:
+                    # P6b (review fix, Critical 1, belt-and-braces): the
+                    # normal path is the "lease_taken_over" event below,
+                    # delivered via `idle_events`. This is a second,
+                    # independent check on loop re-entry in case a
+                    # STAND_DOWN was decided but couldn't be delivered to
+                    # the queue at the time (see `_push_quit_event`) — once
+                    # the loop is running, it will still notice and exit
+                    # instead of looping forever unaware the lease is gone.
+                    if self._lease_stood_down:
+                        logger.info(
+                            "Session lease taken over (belt-and-braces check); shell exiting"
+                        )
+                        break
                     if deferred_bg_trigger and not self._should_defer_background_auto_trigger(
                         prompt_session
                     ):
@@ -1577,17 +1609,49 @@ class Shell:
             # so the taker learns it was refused instead of hanging on a
             # steal that will never be granted.
             reacquired = try_acquire(session_dir, holder=holder, ui_mode="shell")
-            if reacquired.owner is not None:
-                self._lease_generation = reacquired.owner.generation
-        elif action is HeartbeatAction.STAND_DOWN:
-            # Either genuinely lost the lease, or a cooperative steal
-            # request landed while idle.
+            if reacquired.ok:
+                if reacquired.owner is not None:
+                    self._lease_generation = reacquired.owner.generation
+            else:
+                # Review fix (M10): between `heartbeat()`'s read/write
+                # above and this self-reacquire, someone else genuinely
+                # seized the lease — `try_acquire` only ever refuses a
+                # self-reacquire when a LIVE, DIFFERENT holder is now on
+                # record. Treat this exactly like STAND_DOWN instead of
+                # tracking the OTHER holder's generation.
+                action = HeartbeatAction.STAND_DOWN
+
+        if action is HeartbeatAction.STAND_DOWN:
+            # Either genuinely lost the lease, a cooperative steal request
+            # landed while idle, or the REFUSE_STEAL branch just
+            # discovered (above) that it was actually already too late.
             logger.warning(
                 "Session lease lost/reclaimed for {dir}; shell view standing down",
                 dir=session_dir,
             )
             self._publish_takeover_notification()
-            self._push_quit_event()
+            if self._running_interrupt_handler is not None:
+                # Review fix (Important 4): mirror wire, which preempts an
+                # in-flight turn on stand-down via `_cancel_event.set()`
+                # (same mechanism SIGINT uses there). STAND_DOWN here can
+                # only coincide with `busy=True` via a genuine "taken"
+                # loss (steal+busy is refused, never reaches STAND_DOWN) —
+                # a stale-seizure zombie must not keep running/writing for
+                # the rest of the turn. `_running_interrupt_handler` is the
+                # exact callback Ctrl-C already uses for this.
+                self._running_interrupt_handler()
+            if not self._push_quit_event():
+                # Review fix (Critical 1): the interactive loop hasn't
+                # created `_idle_events` yet (or has already torn it down)
+                # — there is nowhere to deliver the quit event right now.
+                # Report CONTINUE instead of STAND_DOWN so
+                # `_lease_heartbeat_loop` keeps beating rather than
+                # abandoning the lease while the shell keeps running
+                # unaware. `self._lease_stood_down` (set inside
+                # `_push_quit_event` regardless of delivery) still lets the
+                # main loop notice and exit on its own once it starts —
+                # see the belt-and-braces check in `run()`.
+                return HeartbeatAction.CONTINUE
 
         return action
 
@@ -1607,24 +1671,36 @@ class Shell:
                 build_takeover_notification(ui_mode="shell")
             )
 
-    def _push_quit_event(self) -> None:
+    def _push_quit_event(self) -> bool:
         """Force the interactive loop to exit, mirroring the existing
         `cwd_lost` pattern (an external condition breaks the main loop with
         a message rather than raising through it).
 
-        A single-command invocation (`run(command=...)`) never opens the
-        interactive loop that creates `self._idle_events` — there is no
-        loop to break out of there. The in-flight command will finish
-        shortly regardless (mid-turn steals are refused, never queued; see
+        Always sets `self._lease_stood_down = True` — a STAND_DOWN was
+        decided regardless of whether delivery below succeeds; the main
+        loop's belt-and-braces check relies on this being set unconditionally.
+
+        Returns whether the event was actually delivered. `self._idle_events`
+        can legitimately be `None` in two cases: (a) a single-command
+        invocation (`run(command=...)`), which never opens the interactive
+        loop at all — the in-flight command will finish shortly regardless
+        (mid-turn steals are refused, never queued; see
         `decide_heartbeat_action`) and release the lease in its own
-        `finally` right after, so this just logs and returns.
+        `finally` right after, so returning False here is harmless; (b) the
+        interactive loop hasn't created it yet — a startup race the caller
+        (`_lease_heartbeat_tick`) must NOT treat as "handled": see its
+        STAND_DOWN branch, which keeps the heartbeat beating instead of
+        abandoning the lease when this returns False.
         """
+        self._lease_stood_down = True
         if self._idle_events is None:
             logger.info(
-                "Session lease taken over during a non-interactive run; letting it finish"
+                "Session lease taken over but the interactive loop has no queue yet "
+                "(non-interactive run, or not started); heartbeat keeps beating"
             )
-            return
+            return False
         self._idle_events.put_nowait(_PromptEvent(kind="lease_taken_over"))
+        return True
 
     def _release_lease(self) -> None:
         """Release the session lease, if `run()` ever acquired lease state.

@@ -27,7 +27,9 @@ from kimi_cli.soul.kimisoul import KimiSoul
 from kimi_cli.ui.shell import Shell
 from kimi_cli.ui.shell.prompt import _toast_queues
 from kimi_cli.utils.aioqueue import Queue, QueueShutDown
+from kimi_cli.wire.jsonrpc import JSONRPCEventMessage
 from kimi_cli.wire.server import WireServer
+from kimi_cli.wire.types import Notification
 
 
 @pytest.fixture(autouse=True)
@@ -87,6 +89,32 @@ async def test_shell_start_lease_heartbeat_is_a_noop_when_lease_state_unset(soul
 
 
 @pytest.mark.asyncio
+async def test_shell_run_gate_off_leaves_lease_state_unset(
+    monkeypatch: pytest.MonkeyPatch, soul: KimiSoul
+):
+    """Review fix (M11): the previous test above only proves the guard
+    inside `_start_lease_heartbeat` on a hand-built `Shell` — not that
+    `run()`'s own lease-state computation actually stays gated on
+    `locks_enabled()`. This drives the real single-command `run()` path
+    (with `run_soul_command` stubbed out — its own soul-driving internals
+    are unrelated to the lease) and checks the wiring end to end."""
+    monkeypatch.delenv("SANAD_SESSION_LOCKS", raising=False)
+    shell = Shell(soul)
+
+    async def _fake_run_soul_command(user_input: object) -> bool:
+        return True
+
+    monkeypatch.setattr(shell, "run_soul_command", _fake_run_soul_command)
+
+    result = await shell.run(command="hi")
+
+    assert result is True
+    assert shell._lease_session_dir is None
+    assert shell._lease_holder is None
+    assert shell._background_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_shell_idle_holder_stands_down_releases_and_pushes_quit_event(
     soul: KimiSoul, runtime: Runtime
 ):
@@ -124,6 +152,60 @@ async def test_shell_idle_holder_stands_down_releases_and_pushes_quit_event(
 
 
 @pytest.mark.asyncio
+async def test_shell_stand_down_before_idle_events_exists_keeps_heartbeat_alive(
+    soul: KimiSoul, runtime: Runtime
+):
+    """Review fix (Critical 1): the interactive `run()` startup window
+    (between `_start_lease_heartbeat()` and the loop that would consume
+    `lease_taken_over` actually starting) used to be able to swallow a
+    STAND_DOWN decision entirely — `_push_quit_event` found `_idle_events
+    is None`, logged, and the OLD `_lease_heartbeat_loop` simply `return`ed,
+    permanently abandoning the lease while the shell kept running and
+    writing. Fixed at the source (idle_events now created before the
+    heartbeat starts), but this pins the DEFENSIVE half: even if delivery
+    fails, the tick must report CONTINUE (not STAND_DOWN) so the loop
+    keeps beating — "heartbeat survives" — and `_lease_stood_down` must
+    still be set so the belt-and-braces check in `run()`'s main loop can
+    notice once it starts. Then, once the queue exists (the race window
+    closing), the NEXT tick must actually deliver and stop the shell —
+    "the shell still stops"."""
+    shell = Shell(soul)
+    session_dir = runtime.session.dir
+    holder = sla.holder_id("shell")
+    acquired = _seed_lease(session_dir, holder, "shell")
+    assert acquired.owner is not None
+    shell._lease_session_dir = session_dir
+    shell._lease_holder = holder
+    shell._lease_generation = acquired.owner.generation
+    # Deliberately NOT set — simulates the startup race.
+    assert shell._idle_events is None
+    assert shell._lease_stood_down is False
+
+    taker = sla.holder_id("wire")
+    assert sl.request_steal(session_dir, by=taker)
+
+    # Tick #1: STAND_DOWN was decided, but there's nowhere to deliver it.
+    action = await shell._lease_heartbeat_tick()
+
+    assert action is sla.HeartbeatAction.CONTINUE  # heartbeat survives
+    assert shell._lease_stood_down is True  # belt-and-braces flag still set
+    owner = sl.read_owner(session_dir)
+    assert owner is not None
+    assert owner.holder == holder  # still ours — nothing was released
+
+    # The interactive loop starts (closing the race window in real code;
+    # simulated here directly).
+    shell._idle_events = asyncio.Queue()
+
+    # Tick #2: now it can actually deliver and the shell stops.
+    action = await shell._lease_heartbeat_tick()
+
+    assert action is sla.HeartbeatAction.STAND_DOWN
+    event = shell._idle_events.get_nowait()
+    assert event.kind == "lease_taken_over"
+
+
+@pytest.mark.asyncio
 async def test_shell_busy_holder_refuses_steal_and_clears_request_without_releasing(
     soul: KimiSoul, runtime: Runtime
 ):
@@ -154,6 +236,55 @@ async def test_shell_busy_holder_refuses_steal_and_clears_request_without_releas
     assert owner.steal_requested_by is None
     assert owner.generation > acquired.owner.generation
     assert shell._lease_generation == owner.generation
+
+
+@pytest.mark.asyncio
+async def test_shell_taken_while_busy_interrupts_the_running_turn(soul: KimiSoul, runtime: Runtime):
+    """Review fix (Important 4): a `reason="taken"` stand-down (a genuine,
+    non-cooperative loss via stale seizure — the only way STAND_DOWN can
+    coincide with `busy=True`, since steal+busy is refused) must preempt
+    the in-flight turn, mirroring what wire already does by setting
+    `_cancel_event`. Shell's equivalent is `_running_interrupt_handler` —
+    the same callback Ctrl-C uses."""
+    shell = Shell(soul)
+    session_dir = runtime.session.dir
+    holder = sla.holder_id("shell")
+    # Explicit synthetic `now`s (not real wall-clock time) so the seizure
+    # below can see this acquire as stale without an actual 30s sleep —
+    # same technique as test_session_lease_flow.py's stale-seizure test.
+    now = 1_000_000.0
+    acquired = sl.try_acquire(session_dir, holder=holder, ui_mode="shell", now=now)
+    assert acquired.ok
+    assert acquired.owner is not None
+    shell._lease_session_dir = session_dir
+    shell._lease_holder = holder
+    shell._lease_generation = acquired.owner.generation
+    shell._idle_events = asyncio.Queue()
+
+    interrupted = False
+
+    def _mark_interrupted() -> None:
+        nonlocal interrupted
+        interrupted = True
+
+    shell._bind_running_input(lambda _user_input: None, _mark_interrupted)
+
+    # A stale seizure: someone else's plain try_acquire took the (now
+    # stale, from our point of view) lease outright — no steal request.
+    # `_lease_heartbeat_tick`'s own `heartbeat()` call uses real wall-clock
+    # time, but that's irrelevant here: "taken" is decided purely by
+    # `current.holder != holder` on a direct read, not by staleness math.
+    seizer = sla.holder_id("wire")
+    later = now + sl.STALE_AFTER_SECONDS + 1
+    seized = sl.try_acquire(session_dir, holder=seizer, ui_mode="wire", now=later)
+    assert seized.ok
+
+    action = await shell._lease_heartbeat_tick()
+
+    assert action is sla.HeartbeatAction.STAND_DOWN
+    assert interrupted is True
+    event = shell._idle_events.get_nowait()
+    assert event.kind == "lease_taken_over"
 
 
 @pytest.mark.asyncio
@@ -271,6 +402,107 @@ async def test_wire_shutdown_releases_the_lease_on_normal_exit(soul: KimiSoul, r
     await server._shutdown()
 
     assert sl.read_owner(session_dir) is None
+
+
+@pytest.mark.asyncio
+async def test_wire_stand_down_notification_reaches_the_write_queue(
+    soul: KimiSoul, runtime: Runtime
+):
+    """Review fix (M11): pins the claim in `_publish_takeover_notification`'s
+    docstring — that `_root_hub_loop` forwards the notification to the
+    client with no extra code — by actually running `_root_hub_loop` and
+    checking what lands in `_write_queue`, instead of trusting the claim."""
+    server = WireServer(soul)
+    server._initialized = True
+    assert isinstance(server._soul, KimiSoul)
+    root_wire_hub = server._soul.runtime.root_wire_hub
+    assert root_wire_hub is not None
+    server._root_hub_queue = root_wire_hub.subscribe()
+    server._root_hub_task = asyncio.create_task(server._root_hub_loop())
+    server._write_queue = Queue()
+
+    session_dir = runtime.session.dir
+    holder = sla.holder_id("wire")
+    acquired = _seed_lease(session_dir, holder, "wire")
+    assert acquired.owner is not None
+    server._lease_session_dir = session_dir
+    server._lease_holder = holder
+    server._lease_generation = acquired.owner.generation
+    server._stop_event = asyncio.Event()
+
+    taker = sla.holder_id("shell")
+    assert sl.request_steal(session_dir, by=taker)
+
+    try:
+        action = await server._lease_heartbeat_tick()
+        assert action is sla.HeartbeatAction.STAND_DOWN
+
+        msg = await asyncio.wait_for(server._write_queue.get(), timeout=1.0)
+        assert isinstance(msg, JSONRPCEventMessage)
+        assert isinstance(msg.params, Notification)
+        assert "terminal" in msg.params.body
+    finally:
+        server._root_hub_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await server._root_hub_task
+        root_wire_hub.unsubscribe(server._root_hub_queue)
+
+
+@pytest.mark.asyncio
+async def test_wire_refuse_steal_that_is_itself_refused_treats_it_as_stand_down(
+    soul: KimiSoul, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+):
+    """Review fix (M10): if the self-reacquire inside REFUSE_STEAL is
+    itself refused (a live, DIFFERENT holder is on record — the only way
+    `try_acquire` ever refuses a self-reacquire), that must be treated as
+    STAND_DOWN, not silently tracked as the other holder's generation.
+
+    There is no `await` between `heartbeat()`'s read and the self-reacquire
+    inside `_lease_heartbeat_tick`, so this TOCTOU race can't be reproduced
+    with real timing from a test — `try_acquire` itself is monkeypatched
+    for just this one call to return a refusal, decoupled from the real
+    (still "ours", steal-requested) state `heartbeat()` reads first.
+    """
+    server = WireServer(soul)
+    session_dir = runtime.session.dir
+    holder = sla.holder_id("wire")
+    acquired = _seed_lease(session_dir, holder, "wire")
+    assert acquired.owner is not None
+    server._lease_session_dir = session_dir
+    server._lease_holder = holder
+    server._lease_generation = acquired.owner.generation
+    server._cancel_event = asyncio.Event()  # busy -> REFUSE_STEAL, not STAND_DOWN
+    server._stop_event = asyncio.Event()
+
+    taker = sla.holder_id("shell")
+    assert sl.request_steal(session_dir, by=taker)
+
+    other_owner = sl.OwnerInfo(
+        holder="wire:999999",
+        pid=999999,
+        ui_mode="wire",
+        generation=7,
+        heartbeat_at=1_000_000.0,
+    )
+    reacquire_calls: list[str] = []
+
+    def _fake_try_acquire(
+        session_dir_arg: Path, *, holder: str, ui_mode: sl.UiMode, now: float | None = None
+    ) -> sl.AcquireResult:
+        reacquire_calls.append(holder)
+        return sl.AcquireResult(ok=False, owner=other_owner)
+
+    monkeypatch.setattr("kimi_cli.wire.server.try_acquire", _fake_try_acquire)
+
+    action = await server._lease_heartbeat_tick()
+
+    assert action is sla.HeartbeatAction.STAND_DOWN
+    assert server._stop_event.is_set()
+    assert reacquire_calls == [holder]
+    # `_lease_generation` was NOT overwritten with the other holder's
+    # value — the refused self-reacquire's branch never touches it.
+    assert server._lease_generation == acquired.owner.generation
+    assert server._lease_generation != other_owner.generation
 
 
 async def _drain(queue: Queue[Any]) -> None:

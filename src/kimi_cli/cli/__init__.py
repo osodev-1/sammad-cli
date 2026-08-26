@@ -599,44 +599,68 @@ def kimi(
                 session = await Session.create(work_dir)
                 logger.info("Created new session: {session_id}", session_id=session.id)
 
-            nonlocal _latest_created_session
-            _latest_created_session = session
-
             # --- P6b: session lease --------------------------------------
             # One conversation, one live owner (session_lock.py, Task 1).
             # Acquire right after the session is resolved and BEFORE any of
             # the expensive setup below (LLM, Runtime, agents, MCP) — a
-            # refusal here costs nothing. Gate-off (`SANAD_SESSION_LOCKS`
-            # unset) is a total no-op: `try_acquire` returns `ok=True`
-            # without ever touching disk, so `ui not in ("wire", "shell")`
-            # is the only OTHER reason this block does nothing — `print`/
-            # `acp` invocations aren't part of the two-view contention this
-            # lease guards against (browser panel vs. terminal TUI) and are
-            # left untouched.
+            # refusal here costs nothing. `print`/`acp` invocations aren't
+            # part of the two-view contention this lease guards against
+            # (browser panel vs. terminal TUI) and are left untouched.
+            #
+            # Review fix (M8): gated on `locks_enabled()` HERE, not just
+            # inside `try_acquire`. `session.dir` is a property with an
+            # `mkdir(parents=True, exist_ok=True)` side effect — evaluating
+            # it as `try_acquire`'s argument would run that syscall even
+            # with the gate off (arguments are evaluated before the
+            # gate-off no-op inside `try_acquire` ever gets a chance to
+            # run), which is exactly the kind of extra disk touch "gate off
+            # => byte-identical to today" forbids, even though it's an
+            # idempotent no-op in practice (`Session.create`/`find` already
+            # created this same directory).
+            #
+            # Review fix (Important 2): `_latest_created_session` is
+            # deliberately NOT assigned until AFTER this block returns
+            # normally (i.e. NOT refused). `_reload_loop`'s crash-cleanup
+            # `except Exception:` handler below can delete an empty
+            # `_latest_created_session` — if it pointed at a REFUSED
+            # session (one a live FOREIGN view holds) while some
+            # unexpected exception here propagated uncaught (e.g. from
+            # `try_acquire` itself), that handler would delete the other
+            # view's session directory, `owner.json` included. Session on
+            # refusal is passed straight through the `return` below
+            # instead — `_post_run` already knows to leave a
+            # `SESSION_OWNED` exit code alone.
             if ui in ("wire", "shell"):
-                from kimi_cli.sanad.session_lease import (
-                    build_shell_refusal_message,
-                    holder_id,
-                    refuse_wire_initialize,
-                )
-                from kimi_cli.sanad.session_lock import try_acquire
+                from kimi_cli.sanad.session_lock import locks_enabled
 
-                lease_holder = holder_id(ui)
-                # `ui in ("wire", "shell")` above already narrows `ui` to
-                # exactly `session_lock.UiMode` for the type checker.
-                acquire = try_acquire(session.dir, holder=lease_holder, ui_mode=ui)
-                if not acquire.ok:
-                    assert acquire.owner is not None
-                    if ui == "wire":
-                        await refuse_wire_initialize(acquire.owner)
-                    else:
-                        _emit_fatal_error(build_shell_refusal_message(acquire.owner))
-                    return session, ExitCode.SESSION_OWNED
-                if not acquire.persisted:
-                    logger.warning(
-                        "session lease could not be recorded — proceeding "
-                        "without a verified owner"
+                if locks_enabled():
+                    from kimi_cli.sanad.session_lease import (
+                        build_shell_refusal_message,
+                        holder_id,
+                        refuse_wire_initialize,
                     )
+                    from kimi_cli.sanad.session_lock import try_acquire
+
+                    lease_holder = holder_id(ui)
+                    # `ui in ("wire", "shell")` above already narrows `ui` to
+                    # exactly `session_lock.UiMode` for the type checker.
+                    acquire = try_acquire(session.dir, holder=lease_holder, ui_mode=ui)
+                    if not acquire.ok:
+                        assert acquire.owner is not None
+                        if ui == "wire":
+                            # Best-effort by construction; never raises.
+                            await refuse_wire_initialize(acquire.owner)
+                        else:
+                            _emit_fatal_error(build_shell_refusal_message(acquire.owner))
+                        return session, ExitCode.SESSION_OWNED
+                    if not acquire.persisted:
+                        logger.warning(
+                            "session lease could not be recorded — proceeding "
+                            "without a verified owner"
+                        )
+
+            nonlocal _latest_created_session
+            _latest_created_session = session
 
             # Add CLI-provided additional directories to session state
             if local_add_dirs:

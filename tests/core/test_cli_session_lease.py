@@ -266,3 +266,49 @@ def test_wire_gate_off_does_not_call_refuse_and_reaches_kimicli_create(
 
     assert "session" in observed
     assert refuse_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Review fix (Important 2): an exception during refusal must not destroy
+# the foreign owner's session via _reload_loop's crash-cleanup handler.
+# ---------------------------------------------------------------------------
+
+
+def test_exception_during_refusal_does_not_destroy_the_foreign_owners_session(
+    monkeypatch: pytest.MonkeyPatch, isolated_share_dir: Path, work_dir: KaosPath
+) -> None:
+    """`refuse_wire_initialize` is now hardened to never raise on its own
+    (a broken pipe from an already-gone parent is best-effort, swallowed),
+    but this pins the SEPARATE, second-door fix: even if something in the
+    lease-acquire block unexpectedly raises anyway, `_latest_created_session`
+    must not have been pointed at the refused (foreign-owned) session yet,
+    or `_reload_loop`'s `except Exception:` crash-cleanup handler would
+    `rmtree` a live foreign view's session directory — owner.json included."""
+    monkeypatch.setenv("SANAD_SESSION_LOCKS", "1")
+    session = asyncio.run(Session.create(work_dir))
+    other_holder = "shell:424242"
+    acquired = sl.try_acquire(session.dir, holder=other_holder, ui_mode="shell")
+    assert acquired.ok
+    assert acquired.owner is not None
+
+    async def _boom(owner: object) -> None:
+        raise ConnectionResetError("simulated broken pipe from an already-gone parent")
+
+    monkeypatch.setattr("kimi_cli.sanad.session_lease.refuse_wire_initialize", _boom)
+    observed: dict[str, object] = {}
+    _stub_kimi_cli_create(monkeypatch, observed=observed)
+
+    result = runner.invoke(cli, ["--work-dir", str(work_dir), "--session", session.id, "--wire"])
+
+    assert "session" not in observed
+    # The exception propagates (this test is about the SESSION surviving
+    # it, not about hiding the exception) — exit code is a generic failure,
+    # not the well-behaved SESSION_OWNED refusal.
+    assert result.exit_code != 0
+    assert result.exit_code != ExitCode.SESSION_OWNED
+
+    owner = sl.read_owner(session.dir)
+    assert owner is not None
+    assert owner.holder == other_holder
+    assert owner.generation == acquired.owner.generation
+    assert session.context_file.exists()
