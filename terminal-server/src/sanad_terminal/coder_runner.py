@@ -1081,26 +1081,7 @@ class CoderRunner(WireRunner):
         `stop()`'s own cancellation) must still propagate, not be
         swallowed.
         """
-        lease = lease_for(self._cwd)
-        while True:
-            if lease.holder_of() is not None:
-                return
-            next_holder = lease.pop_waiter()
-            if next_holder is None:
-                return
-            waiter = get_conversation(self._cwd, next_holder)
-            if waiter is None:
-                continue  # ghost waiter — dropped/stopped since it queued
-            try:
-                await asyncio.shield(waiter._maybe_drain_queue())  # noqa: SLF001
-            except Exception as exc:  # noqa: BLE001 - best-effort: must never break OUR teardown
-                logger.warning(
-                    "coder write-lease handoff from {} to {} failed: {}: {}",
-                    self.conversation_id,
-                    next_holder,
-                    type(exc).__name__,
-                    exc,
-                )
+        await wake_workspace_waiters(self._cwd, source=self.conversation_id)
 
     async def stop(self) -> None:
         await super().stop()
@@ -1164,6 +1145,53 @@ async def drop_conversation(root: Path, conversation_id: str) -> None:
     runner = _conversations.pop(_key(root, conversation_id), None)
     if runner is not None:
         await runner.stop()
+
+
+async def wake_workspace_waiters(root: Path, *, source: str | None = None) -> None:
+    """Hand the now-free workspace write-lease to the next FIFO waiter.
+
+    Module-level on purpose: BOTH release sites must hand off — a turn's
+    turn-end (`CoderRunner._consume`) and a REVERT's release (the routes
+    layer). Revert is a lease holder that is not a conversation and so has
+    no turn-end of its own; without this, a conversation that queued behind
+    a revert (202 + a waiter slot) would sit stranded until the user sent
+    again, silently breaking the queue-at-the-lease contract for the one
+    new holder this phase introduced. One implementation, two callers.
+
+    Loops rather than popping once: a declining waiter (dropped, stopped,
+    or with an empty queue) must not consume the wake-up and strand
+    everyone behind it. Terminates because a re-queue can only follow an
+    observed non-None holder, which the next iteration's own check then
+    sees — not because re-queuing is impossible (the `shield` below yields
+    to the loop before the woken drain runs, so a third conversation can
+    take the lease in that gap).
+
+    Best-effort: an exception in some OTHER conversation's drain must never
+    break the caller's teardown. `Exception` only — a `CancelledError`
+    delivered to OUR task must still propagate.
+    """
+    lease = lease_for(root)
+    while True:
+        if lease.holder_of() is not None:
+            return
+        next_holder = lease.pop_waiter()
+        if next_holder is None:
+            return
+        waiter = get_conversation(root, next_holder)
+        if waiter is None:
+            continue  # ghost waiter — dropped/stopped since it queued
+        try:
+            # `shield` so the woken runner's work is not cancelled along
+            # with whatever task happens to be doing the handing off.
+            await asyncio.shield(waiter._maybe_drain_queue())  # noqa: SLF001
+        except Exception as exc:  # noqa: BLE001 - best-effort: must never break the caller
+            logger.warning(
+                "coder write-lease handoff from {} to {} failed: {}: {}",
+                source or "<revert>",
+                next_holder,
+                type(exc).__name__,
+                exc,
+            )
 
 
 def list_conversations(root: Path) -> list[CoderRunner]:

@@ -342,7 +342,19 @@ class WireRunner:
         # one caller with no equivalent check) now gates on that SAME
         # `self._prompt_id is None` condition too, so a control message can
         # no longer precede the prompt it's meant to steer.
-        await self._before_prompt_sent(state)
+        try:
+            await self._before_prompt_sent(state)
+        except BaseException:
+            # Mirrors the `_send` failure path below. Without this, a
+            # CANCELLED hook (the realistic case — P5's pre-turn git
+            # checkpoint awaits in here) leaves `self._current` at
+            # status "running" forever: `busy` stays True, so the
+            # conversation is permanently unusable AND it keeps the
+            # machine pinned. `BaseException` on purpose — CancelledError
+            # is the whole point and is not an `Exception`.
+            state.status = "failed"
+            self._turn_queue = None
+            raise
         pid = self._next_id()
         try:
             await self._send(

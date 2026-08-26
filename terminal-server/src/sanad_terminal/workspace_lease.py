@@ -32,6 +32,7 @@ import time
 from collections import deque
 from pathlib import Path
 from typing import Final
+from uuid import uuid4
 
 from loguru import logger
 
@@ -39,6 +40,30 @@ from loguru import logger
 # `c_<12 hex>` (`coder_runner.CONVERSATION_ID_RE`), so this sentinel can
 # never collide with a real conversation.
 REVERT_HOLDER: Final[str] = "__revert__"
+
+
+def new_revert_holder() -> str:
+    """A UNIQUE holder identity for one revert.
+
+    `try_acquire` is deliberately re-entrant: a holder that retries must not
+    deadlock against its own lease. That is right for a turn, whose holder
+    identity is a unique conversation id — but it is DANGEROUS for a shared
+    constant. Two concurrent reverts acquiring under the bare
+    `REVERT_HOLDER` would BOTH be told they hold it (identity match →
+    re-entrant True), and then the first one's `finally` would free the
+    lease while the second was still running `checkout-index` — re-opening
+    the exact restore-vs-live-writer race this phase exists to close.
+
+    So every revert gets its own identity, and only the revert that
+    actually acquired can release it (`release` is holder-guarded). Use
+    `is_revert_holder` to recognise one, never `== REVERT_HOLDER`.
+    """
+    return f"{REVERT_HOLDER}:{uuid4().hex[:12]}"
+
+
+def is_revert_holder(holder: str | None) -> bool:
+    """True when `holder` is a revert (any revert), not a conversation."""
+    return holder is not None and holder.split(":", 1)[0] == REVERT_HOLDER
 
 
 class WriteLease:

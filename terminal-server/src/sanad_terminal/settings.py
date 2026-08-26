@@ -8,9 +8,40 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from loguru import logger
+
 
 class SettingsError(Exception):
     """Raised when the environment is unusable; the service must not boot."""
+
+
+def _write_lease_ttl(configured: int, max_turn_seconds: float) -> int:
+    """Keep the write-lease TTL above the turn budget — DERIVED, not merely
+    documented.
+
+    The lease is held for a whole turn, and `try_acquire`'s stale branch
+    grants unconditionally once the TTL elapses, on the assumption that a
+    lease that old means a leaked release. If the TTL can fall below the
+    turn budget that assumption is false for every long turn, and the
+    reclaim becomes a mis-grant: a second writer (or a revert running
+    `checkout-index`) let loose on a worktree an agent is still writing to.
+
+    Both values are independently env-tunable, so raising
+    CODER_MAX_TURN_SECONDS alone would silently invert the invariant. Clamp
+    instead of trusting the operator to know the coupling exists.
+    """
+    floor = int(max_turn_seconds) + 300
+    if configured < floor:
+        logger.warning(
+            "CODER_WRITE_LEASE_TTL_SECONDS={} sits below the turn budget "
+            "({}s) — clamping to {}s so a long turn's lease can never be "
+            "reclaimed while it is still running",
+            configured,
+            int(max_turn_seconds),
+            floor,
+        )
+        return floor
+    return configured
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,8 +207,9 @@ class TerminalSettings:
             coder_journal_max_bytes=int(e.get("CODER_JOURNAL_MAX_BYTES", str(20 * 1024 * 1024))),
             coder_diff_max_bytes=int(e.get("CODER_DIFF_MAX_BYTES", str(200_000))),
             coder_max_queue_depth=int(e.get("CODER_MAX_QUEUE_DEPTH", "50")),
-            coder_write_lease_ttl_seconds=int(
-                e.get("CODER_WRITE_LEASE_TTL_SECONDS", "3900")
+            coder_write_lease_ttl_seconds=_write_lease_ttl(
+                int(e.get("CODER_WRITE_LEASE_TTL_SECONDS", "3900")),
+                float(e.get("CODER_MAX_TURN_SECONDS", "3600")),
             ),
             trust_store_key=e.get("TRUST_STORE_KEY", ""),
             architect_max_turn_seconds=float(e.get("ARCHITECT_MAX_TURN_SECONDS", "1800")),
