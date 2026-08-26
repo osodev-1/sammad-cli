@@ -106,6 +106,20 @@ class TerminalSettings:
     # long-but-legitimate turn. A reclaim logs a warning; it means a
     # release leaked.
     coder_write_lease_ttl_seconds: int = 3900
+    # P6b session lease — default-off master switch, mirroring the SAME
+    # SANAD_SESSION_LOCKS var (and "1" is the only truthy) the kimi-side
+    # `session_lock.locks_enabled()` reads; `build_child_env` threads it
+    # into the spawned child so agentd and the CLI always agree on whether
+    # the lease is active. Gate off ⇒ `_spawn`/`/conversations`/
+    # `find_resumable_session` never touch `session_owner.py` at all.
+    session_locks_enabled: bool = False
+    # Takeover bounded wait (P6b): after requesting a cooperative steal on
+    # an IDLE owner, `_spawn` retries the acquire on this cadence until this
+    # deadline. ~one CLI heartbeat tick (session_lock.HEARTBEAT_SECONDS,
+    # 10s) plus margin, so a holder that stands down on its very next
+    # heartbeat is caught well within the window.
+    coder_takeover_wait_seconds: float = 15.0
+    coder_takeover_poll_seconds: float = 0.5
     # HMAC key for the blueprint trust store — agentd-env only, NEVER in the
     # child env. Empty = legacy unsigned store (local/dev/railway).
     trust_store_key: str = ""
@@ -211,6 +225,9 @@ class TerminalSettings:
                 int(e.get("CODER_WRITE_LEASE_TTL_SECONDS", "3900")),
                 float(e.get("CODER_MAX_TURN_SECONDS", "3600")),
             ),
+            session_locks_enabled=e.get("SANAD_SESSION_LOCKS", "") == "1",
+            coder_takeover_wait_seconds=float(e.get("CODER_TAKEOVER_WAIT_SECONDS", "15")),
+            coder_takeover_poll_seconds=float(e.get("CODER_TAKEOVER_POLL_SECONDS", "0.5")),
             trust_store_key=e.get("TRUST_STORE_KEY", ""),
             architect_max_turn_seconds=float(e.get("ARCHITECT_MAX_TURN_SECONDS", "1800")),
             worker_enabled=e.get("WORKER_ENABLED", "") == "1",

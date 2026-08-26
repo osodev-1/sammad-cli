@@ -17,6 +17,8 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
+from sanad_terminal import session_owner
+
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
@@ -43,6 +45,15 @@ def workspace_dir(users_root: Path, user_id: str) -> Path:
     return user_root(users_root, user_id) / "workspace"
 
 
+def kimi_share_dir(user_dir: Path) -> Path:
+    """The `kimi-share/` sibling of a user/workspace root — where the CLI's
+    `KIMI_SHARE_DIR` points (see `build_child_env`) and therefore where its
+    `sessions/<digest>/<id>/owner.json` lease files live. `user_dir` is the
+    triple's PARENT (workspace/home/kimi-share are siblings under it) —
+    i.e. the same value `_journal_dir` calls `root.parent`."""
+    return user_dir / "kimi-share"
+
+
 def prepare_single_user_dirs(data_dir: Path) -> Path:
     """Task mode: ONE user per machine — the triple lives directly under /data.
 
@@ -55,7 +66,9 @@ def prepare_single_user_dirs(data_dir: Path) -> Path:
     return data_dir
 
 
-def find_resumable_session(kimi_share: Path, workspace: Path) -> str | None:
+def find_resumable_session(
+    kimi_share: Path, workspace: Path, *, locks_enabled: bool = False
+) -> str | None:
     """Newest resumable session id for this workspace, or None.
 
     Mirrors the CLI's session layout: `<share>/sessions/<md5(workdir)>/<id>/`
@@ -66,12 +79,21 @@ def find_resumable_session(kimi_share: Path, workspace: Path) -> str | None:
     `sanad run --resume <id>`, whose Session.find loads straight from disk and
     falls back to a fresh session instead of erroring (unlike --continue,
     which exits 2 when its metadata pointer is missing).
+
+    `locks_enabled=False` (the default — "gate off") reproduces the
+    ORIGINAL algorithm verbatim: a single linear max-scan over mtime, ties
+    keeping the first-encountered candidate. `locks_enabled=True` (P6b)
+    additionally walks candidates NEWEST FIRST and skips any with a LIVE
+    session owner (`session_owner.read_owner`/`is_live`) — a session another
+    view already holds must never be hijacked by a cold-start resume; if
+    every candidate is locked, this returns None, which already degrades to
+    the existing cold-start-fresh-session path (no new downstream code).
     """
     digest = hashlib.md5(str(workspace.resolve()).encode("utf-8")).hexdigest()
     sessions_root = kimi_share / "sessions" / digest
     if not sessions_root.is_dir():
         return None
-    best: tuple[float, str] | None = None
+    candidates: list[tuple[float, str]] = []
     for child in sessions_root.iterdir():
         context = child / "context.jsonl"
         try:
@@ -80,9 +102,23 @@ def find_resumable_session(kimi_share: Path, workspace: Path) -> str | None:
             continue
         if stat.st_size <= 0:
             continue
-        if best is None or stat.st_mtime > best[0]:
-            best = (stat.st_mtime, child.name)
-    return best[1] if best else None
+        candidates.append((stat.st_mtime, child.name))
+    if not candidates:
+        return None
+
+    if not locks_enabled:
+        best = candidates[0]
+        for cand in candidates[1:]:
+            if cand[0] > best[0]:
+                best = cand
+        return best[1]
+
+    for _, session_id in sorted(candidates, key=lambda c: c[0], reverse=True):
+        owner = session_owner.read_owner(sessions_root / session_id)
+        if owner is not None and session_owner.is_live(owner):
+            continue  # live-owned elsewhere — never hijack it on cold start
+        return session_id
+    return None
 
 
 def build_child_env(
@@ -93,12 +129,21 @@ def build_child_env(
     cols: int,
     rows: int,
     trusted_hashes: Sequence[str] | None = None,
+    session_locks_enabled: bool = False,
 ) -> dict[str, str]:
     """The spawned agent's environment, built FROM SCRATCH.
 
     Never a copy of os.environ: the agent exposes a shell tool, so anything
     here is user-readable (`env`). TERMINAL_SHARED_SECRET must never appear.
     SANAD_SESSION_TOKEN is the user's own credential — acceptable by design.
+
+    `session_locks_enabled` (P6b, default False — "gate off") threads
+    `SANAD_SESSION_LOCKS` through to the child under the SAME env var name
+    `kimi_cli.sanad.session_lock.locks_enabled()` reads, so agentd and the
+    CLI it spawns always agree on whether the session lease is active.
+    Omitted entirely (not `"0"`) when False, matching every existing call
+    site that doesn't pass this parameter — the child env is byte-identical
+    to before this parameter existed.
     """
     env = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
@@ -128,6 +173,8 @@ def build_child_env(
         # here (apply-reviewed or UI-reviewed). Local dev CLIs never set it,
         # so their behavior is unchanged.
         env["SANAD_BLUEPRINT_TRUST"] = str(user_dir / "blueprint-trust.json")
+    if session_locks_enabled:
+        env["SANAD_SESSION_LOCKS"] = "1"
     return env
 
 
