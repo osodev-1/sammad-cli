@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from pathlib import Path
 from typing import Any, Literal, cast
 
 import acp  # type: ignore[reportMissingTypeStubs]
@@ -13,6 +14,17 @@ from kosong.utils.typing import JsonType
 
 from kimi_cli.approval_runtime import ApprovalRuntime
 from kimi_cli.constant import USER_AGENT
+from kimi_cli.sanad.session_lease import HeartbeatAction, build_takeover_notification
+from kimi_cli.sanad.session_lease import decide_heartbeat_action as _decide_lease_action
+from kimi_cli.sanad.session_lease import holder_id as _lease_holder_id
+from kimi_cli.sanad.session_lock import (
+    HEARTBEAT_SECONDS,
+    heartbeat,
+    locks_enabled,
+    read_owner,
+    release,
+    try_acquire,
+)
 from kimi_cli.soul import LLMNotSet, LLMNotSupported, MaxStepsReached, RunCancelled, Soul, run_soul
 from kimi_cli.soul.kimisoul import KimiSoul
 from kimi_cli.soul.toolset import KimiToolset, WireExternalTool
@@ -105,6 +117,15 @@ class WireServer:
         self._root_hub_queue: Queue[Any] | None = None
         self._root_hub_task: asyncio.Task[None] | None = None
 
+        # P6b: session lease. `stop_event` is promoted to instance state
+        # (was local to `serve()`) so the heartbeat task below can trigger
+        # the existing `_shutdown()` from outside `serve()`'s own frame.
+        self._stop_event: asyncio.Event | None = None
+        self._lease_session_dir: Path | None = None
+        self._lease_holder: str | None = None
+        self._lease_generation: int | None = None
+        self._lease_task: asyncio.Task[None] | None = None
+
     @property
     def _approval_runtime(self) -> ApprovalRuntime | None:
         if isinstance(self._soul, KimiSoul):
@@ -119,7 +140,9 @@ class WireServer:
         if isinstance(self._soul, KimiSoul) and self._soul.runtime.root_wire_hub is not None:
             self._root_hub_queue = self._soul.runtime.root_wire_hub.subscribe()
             self._root_hub_task = asyncio.create_task(self._root_hub_loop())
-        stop_event = asyncio.Event()
+        self._stop_event = asyncio.Event()
+        stop_event = self._stop_event
+        self._start_lease_heartbeat()
         loop = asyncio.get_running_loop()
         remove_sigint = install_sigint_handler(loop, stop_event.set)
         read_task = asyncio.create_task(self._read_loop())
@@ -340,6 +363,27 @@ class WireServer:
             self._soul.runtime.root_wire_hub.unsubscribe(self._root_hub_queue)
             self._root_hub_queue = None
 
+        # P6b: session lease. Cancel the heartbeat task FIRST — it is the
+        # only other caller of `try_acquire` in this process (the
+        # REFUSE_STEAL self-reacquire below) — so no acquire can possibly
+        # race the release that follows. Covers every exit path of
+        # `serve()` (normal EOF, SIGINT, an exception, or a stand-down that
+        # already set `self._stop_event` itself): `serve()`'s try/finally
+        # always reaches `_shutdown()`.
+        if self._lease_task is not None:
+            self._lease_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._lease_task
+            self._lease_task = None
+        if self._lease_session_dir is not None and self._lease_holder is not None:
+            release(
+                self._lease_session_dir,
+                holder=self._lease_holder,
+                generation=self._lease_generation,
+            )
+            self._lease_session_dir = None
+            self._lease_holder = None
+
         await asyncio.gather(*self._dispatch_tasks, return_exceptions=True)
         self._dispatch_tasks.clear()
 
@@ -351,6 +395,87 @@ class WireServer:
 
         self._reader = None
         self._initialized = False
+
+    def _start_lease_heartbeat(self) -> None:
+        """P6b: start the ~10s session-lease heartbeat, IF the gate is on.
+
+        Deliberately checked here (not left to `heartbeat()`'s own internal
+        gate) so that gate-off means no task is ever created at all — not
+        merely a task that immediately no-ops. `session.dir` is safe to
+        call again here: it already exists (created back in `cli/__init__.py`
+        at acquire time; `Session.dir` is `mkdir(parents=True,
+        exist_ok=True)`-idempotent regardless).
+        """
+        if not locks_enabled() or not isinstance(self._soul, KimiSoul):
+            return
+        session_dir = self._soul.runtime.session.dir
+        holder = _lease_holder_id("wire")
+        # The acquire that granted (or refused) this run already happened in
+        # cli/__init__.py, before `KimiCLI.create()`. Read back what it
+        # wrote so `release()` later has the right fencing generation,
+        # without threading a new parameter through `KimiCLI.create()` /
+        # `run_wire_stdio()` / `WireServer.__init__`.
+        owner = read_owner(session_dir)
+        generation = owner.generation if owner is not None and owner.holder == holder else None
+
+        self._lease_session_dir = session_dir
+        self._lease_holder = holder
+        self._lease_generation = generation
+        self._lease_task = asyncio.create_task(self._lease_heartbeat_loop())
+
+    async def _lease_heartbeat_loop(self) -> None:
+        """Thin `sleep; tick` wrapper. All the actual decision/action logic
+        lives in `_lease_heartbeat_tick`, which does no sleeping, so it can
+        be awaited directly in a test without a real 10s wait."""
+        while True:
+            await asyncio.sleep(HEARTBEAT_SECONDS)
+            if await self._lease_heartbeat_tick() is HeartbeatAction.STAND_DOWN:
+                return
+
+    async def _lease_heartbeat_tick(self) -> HeartbeatAction:
+        """One heartbeat: refresh `owner.json`, decide, act. No sleeping."""
+        assert self._lease_session_dir is not None
+        assert self._lease_holder is not None
+        session_dir = self._lease_session_dir
+        holder = self._lease_holder
+
+        busy = self._is_streaming
+        result = heartbeat(session_dir, holder=holder, busy=busy)
+        action = _decide_lease_action(result, busy=busy)
+
+        if action is HeartbeatAction.REFUSE_STEAL:
+            # Mid-turn: do NOT detach. Self-reacquire (idempotent for our
+            # own holder id — see `try_acquire`) clears `steal_requested_by`
+            # so the taker learns it was refused instead of hanging on a
+            # steal that will never be granted.
+            reacquired = try_acquire(session_dir, holder=holder, ui_mode="wire")
+            if reacquired.owner is not None:
+                self._lease_generation = reacquired.owner.generation
+        elif action is HeartbeatAction.STAND_DOWN:
+            # Either genuinely lost the lease, or a cooperative steal
+            # request landed while idle.
+            logger.warning(
+                "Session lease lost/reclaimed for {dir}; wire view standing down",
+                dir=session_dir,
+            )
+            self._publish_takeover_notification()
+            assert self._stop_event is not None
+            self._stop_event.set()
+
+        return action
+
+    def _publish_takeover_notification(self) -> None:
+        """Tell OUR OWN connected wire client (agentd -> browser panel) why
+        this connection is about to close. `_root_hub_loop` already
+        forwards any `is_event(msg)` published on `root_wire_hub` to the
+        client with no code change needed there — `Notification` is already
+        in the `Event` union (see `build_takeover_notification`)."""
+        if not isinstance(self._soul, KimiSoul) or self._soul.runtime.root_wire_hub is None:
+            return
+        with contextlib.suppress(Exception):
+            self._soul.runtime.root_wire_hub.publish_nowait(
+                build_takeover_notification(ui_mode="wire")
+            )
 
     async def _dispatch_msg(self, msg: JSONRPCInMessage) -> None:
         resp: JSONRPCSuccessResponse | JSONRPCErrorResponse | None = None

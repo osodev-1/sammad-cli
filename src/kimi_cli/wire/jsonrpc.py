@@ -271,6 +271,14 @@ class ErrorCodes:
     """There was an error from the chat provider."""
     AUTH_EXPIRED = -32004
     """Authentication has expired; user should re-login."""
+    SESSION_OWNED = -32005
+    """P6b: refused because another view (wire/shell) already holds a live
+    session lease. `error.data` carries the machine-readable payload —
+    ``{"code": "session_owned", "ui_mode": <str>, "busy": <bool>}`` — see
+    `kimi_cli.sanad.session_lease.build_session_owned_error`. Sent from the
+    CLI's `initialize` refusal path in `cli/__init__.py`, BEFORE a real
+    `WireServer` exists (the session lease is refused before `KimiCLI.
+    create()` runs), not from `WireServer._handle_initialize` itself."""
 
 
 class Statuses:

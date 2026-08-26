@@ -8,6 +8,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, Protocol
 
 from kosong.chat_provider import (
@@ -30,6 +31,17 @@ from kimi_cli.sanad.branding import GOLD as _BRAND_BORDER
 from kimi_cli.sanad.branding import NAME as _BRAND_NAME
 from kimi_cli.sanad.branding import SHELL_LOGO as _LOGO
 from kimi_cli.sanad.branding import WELCOME as _WELCOME
+from kimi_cli.sanad.session_lease import HeartbeatAction, build_takeover_notification
+from kimi_cli.sanad.session_lease import decide_heartbeat_action as _decide_lease_action
+from kimi_cli.sanad.session_lease import holder_id as _lease_holder_id
+from kimi_cli.sanad.session_lock import (
+    HEARTBEAT_SECONDS,
+    heartbeat,
+    locks_enabled,
+    read_owner,
+    release,
+    try_acquire,
+)
 from kimi_cli.sanad.shell import suppress_governed_commands
 from kimi_cli.soul import LLMNotSet, LLMNotSupported, MaxStepsReached, RunCancelled, Soul, run_soul
 from kimi_cli.soul.kimisoul import FLOW_COMMAND_PREFIX, KimiSoul
@@ -65,6 +77,7 @@ from kimi_cli.wire.types import (
     ApprovalRequest,
     ApprovalResponse,
     ContentPart,
+    Notification,
     StatusUpdate,
     WireMessage,
 )
@@ -206,6 +219,19 @@ class Shell:
         self._current_prompt_approval_request: ApprovalRequest | None = None
         self._approval_modal: ApprovalPromptDelegate | None = None
         self._exit_after_run = False
+
+        # P6b: session lease. `_idle_events` is promoted to instance state
+        # (was local to `run()`) so the heartbeat background task below can
+        # push a quit event onto it, mirroring the existing `cwd_lost`
+        # pattern (an external condition force-exits the loop with a
+        # message). It stays None outside of `run()`'s lifetime — a
+        # single-command invocation (`run(command=...)`) never opens the
+        # interactive loop that creates it, so `_push_quit_event` degrades
+        # to a log-only no-op in that mode (see its docstring).
+        self._idle_events: asyncio.Queue[_PromptEvent] | None = None
+        self._lease_session_dir: Path | None = None
+        self._lease_holder: str | None = None
+        self._lease_generation: int | None = None
         soul_slash_commands = list(soul.available_slash_commands)
         shell_slash_commands = shell_slash_registry.list_commands()
         # sanad(governance): drop upstream's Moonshot-OAuth slash commands
@@ -398,15 +424,37 @@ class Shell:
 
             set_active_theme(self.soul.runtime.config.theme)
 
+        # P6b: session lease. Computed once regardless of which branch below
+        # runs (single-command or interactive) so both share one heartbeat
+        # loop implementation and one release call. The acquire that granted
+        # (or refused) this run already happened in cli/__init__.py, before
+        # `KimiCLI.create()`; read back what it wrote so `release()` later
+        # has the right fencing generation, without threading a new
+        # parameter through `KimiCLI.create()` / `run_shell()` / `Shell.
+        # __init__`. Gate-off (or a non-KimiSoul, e.g. tests) leaves every
+        # `_lease_*` field None, which is exactly what `_start_lease_heartbeat`
+        # and `_release_lease` treat as "nothing to do."
+        if locks_enabled() and isinstance(self.soul, KimiSoul):
+            session_dir = self.soul.runtime.session.dir
+            lease_holder = _lease_holder_id("shell")
+            owner = read_owner(session_dir)
+            self._lease_session_dir = session_dir
+            self._lease_holder = lease_holder
+            self._lease_generation = (
+                owner.generation if owner is not None and owner.holder == lease_holder else None
+            )
+
         if command is not None:
             # run single command and exit
             logger.info("Running agent with command: {command}", command=command)
             if isinstance(self.soul, KimiSoul):
                 self._start_background_task(self._watch_root_wire_hub())
+                self._start_lease_heartbeat()
             try:
                 return await self.run_soul_command(command)
             finally:
                 self._cancel_background_tasks()
+                self._release_lease()
 
         # Start auto-update background task if not disabled
         if get_env_bool("KIMI_CLI_NO_AUTO_UPDATE"):
@@ -437,6 +485,7 @@ class Shell:
             )
             self._start_background_task(watcher.run_forever())
             self._start_background_task(self._watch_root_wire_hub())
+            self._start_lease_heartbeat()
             await replay_recent_history(
                 self.soul.context.history,
                 wire_file=self.soul.wire_file,
@@ -522,7 +571,12 @@ class Shell:
 
                     self._start_background_task(_invalidate_after_mcp_loading())
             self._exit_after_run = False
-            idle_events: asyncio.Queue[_PromptEvent] = asyncio.Queue()
+            # P6b: promoted to instance state (`self._idle_events`) so the
+            # lease heartbeat background task can push a quit event onto it
+            # from outside this frame; `idle_events` stays the local name
+            # used throughout the rest of this method.
+            self._idle_events = asyncio.Queue()
+            idle_events = self._idle_events
             # resume_prompt controls whether the prompt router reads input.
             # Set BEFORE an await = prompt stays live during the operation
             # (agent runs that accept steer input); set AFTER = prompt is
@@ -619,6 +673,16 @@ class Shell:
                         shell_ok = False
                         break
 
+                    if event.kind == "lease_taken_over":
+                        # Cooperative detach, not a crash — the heartbeat
+                        # task that pushed this event already published a
+                        # "taken over" notice via `root_wire_hub`, which
+                        # `_handle_root_hub_message`'s `Notification` case
+                        # renders as a toast. `shell_ok` stays at its
+                        # default True.
+                        logger.info("Session lease taken over; shell exiting")
+                        break
+
                     user_input = event.user_input
                     assert user_input is not None
                     bg_auto_failures = 0
@@ -704,6 +768,8 @@ class Shell:
                     self._approval_modal = None
                 self._prompt_session = None
                 self._cancel_background_tasks()
+                self._release_lease()
+                self._idle_events = None
                 # Track exit and flush remaining telemetry events.
                 # Cap the exit-path flush at 3 s so we don't block for ~50 s
                 # when the endpoint is unreachable (in-process retry backoff).
@@ -1161,6 +1227,16 @@ class Shell:
                 self._maybe_present_pending_approvals()
                 if self._prompt_session is not None:
                     self._prompt_session.invalidate()
+            case Notification() as notification:
+                # P6b: the session-lease heartbeat publishes a "taken over"
+                # notice here on stand-down (see `_lease_heartbeat_loop`);
+                # this is a generic out-of-band notice channel, not
+                # lease-specific, so render whatever comes through.
+                toast(
+                    f"{notification.title}: {notification.body}",
+                    topic="notification",
+                    duration=10.0,
+                )
             case _:
                 return
 
@@ -1459,6 +1535,120 @@ class Shell:
         result = await do_update(print=False, check_only=True)
         if result == UpdateResult.UPDATED:
             toast("auto updated, restart to use the new version", topic="update", duration=5.0)
+
+    def _start_lease_heartbeat(self) -> None:
+        """P6b: start the ~10s session-lease heartbeat, IF `run()` set up
+        lease state (gate on AND `self.soul` is a `KimiSoul`).
+
+        No-op otherwise — this, not any internal no-op in the loop body, is
+        what guarantees gate-off starts no extra background task at all.
+        """
+        if self._lease_session_dir is None or self._lease_holder is None:
+            return
+        self._start_background_task(self._lease_heartbeat_loop())
+
+    async def _lease_heartbeat_loop(self) -> None:
+        """Thin `sleep; tick` wrapper. All the actual decision/action logic
+        lives in `_lease_heartbeat_tick`, which does no sleeping, so it can
+        be awaited directly in a test without a real 10s wait."""
+        while True:
+            await asyncio.sleep(HEARTBEAT_SECONDS)
+            if await self._lease_heartbeat_tick() is HeartbeatAction.STAND_DOWN:
+                return
+
+    async def _lease_heartbeat_tick(self) -> HeartbeatAction:
+        """One heartbeat: refresh `owner.json`, decide, act. No sleeping."""
+        assert self._lease_session_dir is not None
+        assert self._lease_holder is not None
+        session_dir = self._lease_session_dir
+        holder = self._lease_holder
+
+        # The same state `_running_interrupt_handler` is bound to: set
+        # while a turn is actively streaming (`_bind_running_input`, wired
+        # up via `visualize()`), cleared when it finishes
+        # (`_unbind_running_input`).
+        busy = self._running_interrupt_handler is not None
+        result = heartbeat(session_dir, holder=holder, busy=busy)
+        action = _decide_lease_action(result, busy=busy)
+
+        if action is HeartbeatAction.REFUSE_STEAL:
+            # Mid-turn: do NOT detach. Self-reacquire (idempotent for our
+            # own holder id — see `try_acquire`) clears `steal_requested_by`
+            # so the taker learns it was refused instead of hanging on a
+            # steal that will never be granted.
+            reacquired = try_acquire(session_dir, holder=holder, ui_mode="shell")
+            if reacquired.owner is not None:
+                self._lease_generation = reacquired.owner.generation
+        elif action is HeartbeatAction.STAND_DOWN:
+            # Either genuinely lost the lease, or a cooperative steal
+            # request landed while idle.
+            logger.warning(
+                "Session lease lost/reclaimed for {dir}; shell view standing down",
+                dir=session_dir,
+            )
+            self._publish_takeover_notification()
+            self._push_quit_event()
+
+        return action
+
+    def _publish_takeover_notification(self) -> None:
+        """Publish the "taken over" notice on OUR OWN `root_wire_hub`.
+
+        `_watch_root_wire_hub` already forwards ANY message here to
+        `_handle_root_hub_message`, which has a `Notification` case that
+        calls `toast()` — so this is the one place that decides WHAT to
+        say; rendering it is the existing generic notice path, not
+        something this method does directly.
+        """
+        if not isinstance(self.soul, KimiSoul) or self.soul.runtime.root_wire_hub is None:
+            return
+        with contextlib.suppress(Exception):
+            self.soul.runtime.root_wire_hub.publish_nowait(
+                build_takeover_notification(ui_mode="shell")
+            )
+
+    def _push_quit_event(self) -> None:
+        """Force the interactive loop to exit, mirroring the existing
+        `cwd_lost` pattern (an external condition breaks the main loop with
+        a message rather than raising through it).
+
+        A single-command invocation (`run(command=...)`) never opens the
+        interactive loop that creates `self._idle_events` — there is no
+        loop to break out of there. The in-flight command will finish
+        shortly regardless (mid-turn steals are refused, never queued; see
+        `decide_heartbeat_action`) and release the lease in its own
+        `finally` right after, so this just logs and returns.
+        """
+        if self._idle_events is None:
+            logger.info(
+                "Session lease taken over during a non-interactive run; letting it finish"
+            )
+            return
+        self._idle_events.put_nowait(_PromptEvent(kind="lease_taken_over"))
+
+    def _release_lease(self) -> None:
+        """Release the session lease, if `run()` ever acquired lease state.
+
+        Called from the `finally` of BOTH `run()` branches (single-command
+        and interactive) — every exit path, normal or not. Always called
+        AFTER `_cancel_background_tasks()` in both callers, with no `await`
+        in between: `_cancel_background_tasks()` only *requests*
+        cancellation (it does not await the task), but `heartbeat()` /
+        `try_acquire()` / `release()` in `session_lock.py` are fully
+        synchronous — the heartbeat loop's ONLY suspension point is its
+        `await asyncio.sleep(...)` — so a cancelled heartbeat task can only
+        ever resume there and immediately unwind; it can never re-enter the
+        loop body and race this release with one more `try_acquire`.
+        """
+        if self._lease_session_dir is None or self._lease_holder is None:
+            return
+        release(
+            self._lease_session_dir,
+            holder=self._lease_holder,
+            generation=self._lease_generation,
+        )
+        self._lease_session_dir = None
+        self._lease_holder = None
 
     def _start_background_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro)

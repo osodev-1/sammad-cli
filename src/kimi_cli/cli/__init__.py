@@ -54,6 +54,13 @@ class ExitCode:
     SUCCESS = 0
     FAILURE = 1
     RETRYABLE = 75  # EX_TEMPFAIL from sysexits.h
+    SESSION_OWNED = 76
+    """P6b: the session lease was refused — another live view already
+    holds it. Not a sysexits.h code (no interactive alternative before
+    75/76 fits); deliberately distinct from FAILURE so `_post_run` can tell
+    "we were refused" apart from "our own run crashed" and skip the
+    empty-session cleanup that would otherwise delete the CURRENT (foreign)
+    owner's session directory out from under it."""
 
 
 InputFormat = Literal["text", "stream-json"]
@@ -595,6 +602,42 @@ def kimi(
             nonlocal _latest_created_session
             _latest_created_session = session
 
+            # --- P6b: session lease --------------------------------------
+            # One conversation, one live owner (session_lock.py, Task 1).
+            # Acquire right after the session is resolved and BEFORE any of
+            # the expensive setup below (LLM, Runtime, agents, MCP) — a
+            # refusal here costs nothing. Gate-off (`SANAD_SESSION_LOCKS`
+            # unset) is a total no-op: `try_acquire` returns `ok=True`
+            # without ever touching disk, so `ui not in ("wire", "shell")`
+            # is the only OTHER reason this block does nothing — `print`/
+            # `acp` invocations aren't part of the two-view contention this
+            # lease guards against (browser panel vs. terminal TUI) and are
+            # left untouched.
+            if ui in ("wire", "shell"):
+                from kimi_cli.sanad.session_lease import (
+                    build_shell_refusal_message,
+                    holder_id,
+                    refuse_wire_initialize,
+                )
+                from kimi_cli.sanad.session_lock import try_acquire
+
+                lease_holder = holder_id(ui)
+                # `ui in ("wire", "shell")` above already narrows `ui` to
+                # exactly `session_lock.UiMode` for the type checker.
+                acquire = try_acquire(session.dir, holder=lease_holder, ui_mode=ui)
+                if not acquire.ok:
+                    assert acquire.owner is not None
+                    if ui == "wire":
+                        await refuse_wire_initialize(acquire.owner)
+                    else:
+                        _emit_fatal_error(build_shell_refusal_message(acquire.owner))
+                    return session, ExitCode.SESSION_OWNED
+                if not acquire.persisted:
+                    logger.warning(
+                        "session lease could not be recorded — proceeding "
+                        "without a verified owner"
+                    )
+
             # Add CLI-provided additional directories to session state
             if local_add_dirs:
                 from kimi_cli.utils.path import is_within_directory
@@ -744,6 +787,15 @@ def kimi(
 
     async def _post_run(last_session: Session, exit_code: int) -> None:
         _print_resume_hint(last_session)
+        if exit_code == ExitCode.SESSION_OWNED:
+            # P6b: this process never actually held the session — a LIVE
+            # foreign view does. Even an "empty" session here does NOT mean
+            # abandoned: it can legitimately be a fresh session the other
+            # view just created, or one this process never loaded content
+            # for. Deleting it (the normal empty-session cleanup below)
+            # would destroy that other view's owner.json and session state
+            # out from under it. Touch nothing further.
+            return
         if last_session.is_empty():
             # Always clean up empty sessions regardless of exit code
             await _delete_empty_session(last_session)
