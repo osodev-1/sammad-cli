@@ -110,7 +110,9 @@ def test_is_live_matches_kimi_side_is_live_at_the_boundary():
     from kimi_cli.sanad.session_lock import is_live as kimi_is_live
 
     heartbeat_at = 1_000_000.0
-    ours = OwnerInfo(holder="wire:1", pid=1, ui_mode="wire", generation=1, heartbeat_at=heartbeat_at)
+    ours = OwnerInfo(
+        holder="wire:1", pid=1, ui_mode="wire", generation=1, heartbeat_at=heartbeat_at
+    )
     kimi_owner = KimiOwnerInfo(
         holder="wire:1", pid=1, ui_mode="wire", generation=1, heartbeat_at=heartbeat_at
     )
@@ -255,7 +257,9 @@ def test_request_steal_stale_owner_returns_false(tmp_path: Path):
     session_dir = tmp_path / "sess"
     session_dir.mkdir()
     now = time.time()
-    kimi_try_acquire(session_dir, holder="wire:1", ui_mode="wire", now=now - STALE_AFTER_SECONDS - 5)
+    kimi_try_acquire(
+        session_dir, holder="wire:1", ui_mode="wire", now=now - STALE_AFTER_SECONDS - 5
+    )
     assert request_steal(session_dir, by="agentd:c_1", now=now) is False
 
 

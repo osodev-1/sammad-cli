@@ -281,9 +281,7 @@ def test_create_seeds_default_mode(client: TestClient):
 
 
 def test_turn_carries_mode_field_when_no_runner(client: TestClient):
-    turn = client.get(
-        "/internal/coder/conversations/c_000000000000/turn", headers=HEADERS
-    ).json()
+    turn = client.get("/internal/coder/conversations/c_000000000000/turn", headers=HEADERS).json()
     assert turn["mode"] is None
 
 
@@ -601,9 +599,7 @@ def test_turn_exposes_queue_field(client: TestClient):
 
 
 def test_turn_carries_queue_field_when_no_runner(client: TestClient):
-    turn = client.get(
-        "/internal/coder/conversations/c_000000000000/turn", headers=HEADERS
-    ).json()
+    turn = client.get("/internal/coder/conversations/c_000000000000/turn", headers=HEADERS).json()
     assert turn["queue"] == []
 
 
@@ -647,9 +643,7 @@ def test_send_queue_true_past_the_cap_is_409_and_does_not_grow_the_queue(tmp_pat
             assert third.status_code == 409
             assert third.json()["error"]["code"] == "queue_full"
 
-            turn = client.get(
-                f"/internal/coder/conversations/{cid}/turn", headers=HEADERS
-            ).json()
+            turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
             assert turn["queue"] == [
                 {"sendId": "q1", "input": "one"},
                 {"sendId": "q2", "input": "two"},
@@ -722,8 +716,7 @@ def test_open_reconstructs_a_finished_turn_after_a_drop(client: TestClient, tmp_
     turn_id = first[0]["turnId"]
 
     assert (
-        client.post(f"/internal/coder/conversations/{cid}/stop", headers=HEADERS).status_code
-        == 200
+        client.post(f"/internal/coder/conversations/{cid}/stop", headers=HEADERS).status_code == 200
     )
     reopened = client.post(
         f"/internal/coder/conversations/{cid}/open", headers=HEADERS, json={"ticket": "tt_good"}
@@ -802,9 +795,7 @@ def test_open_reconstructs_after_a_crash_with_a_pending_approval(
     try:
         turn_id = None
         for _ in range(200):
-            turn = client.get(
-                f"/internal/coder/conversations/{cid}/turn", headers=HEADERS
-            ).json()
+            turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
             pending = turn.get("pendingRequests") or []
             if pending:
                 turn_id = turn["turn"]["turnId"]
@@ -918,9 +909,7 @@ def test_interrupted_replay_does_not_drop_the_runner(client: TestClient, tmp_pat
     try:
         turn_id = None
         for _ in range(200):
-            turn = client.get(
-                f"/internal/coder/conversations/{cid}/turn", headers=HEADERS
-            ).json()
+            turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
             if turn.get("turn") and turn["turn"]["status"] == "running":
                 turn_id = turn["turn"]["turnId"]
                 break
@@ -1285,9 +1274,7 @@ def test_revert_refuses_409_when_another_conversation_in_the_workspace_is_busy(
 
 
 @_needs_git
-def test_revert_restores_worktree_and_records_safety_and_marker(
-    client: TestClient, tmp_path: Path
-):
+def test_revert_restores_worktree_and_records_safety_and_marker(client: TestClient, tmp_path: Path):
     root = _root_for(tmp_path)
     cid = client.post(
         "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
@@ -1498,9 +1485,7 @@ def test_send_cannot_start_a_turn_while_a_revert_holds_the_lease(
         body = res.json()
         assert body["ok"] is True and body["queued"] is True
 
-        turn = client.get(
-            f"/internal/coder/conversations/{cid}/turn", headers=HEADERS
-        ).json()
+        turn = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
         assert turn.get("turn") is None, "a turn started while a revert held the lease"
         assert turn["queue"][0]["sendId"] == "m1"
         # A revert is not a conversation, so the wait is labelled distinctly
@@ -1602,9 +1587,7 @@ def test_send_from_another_conversation_while_lease_held_is_202_with_reason(
         assert res.status_code == 202, res.text
         assert res.json()["queued"] is True
 
-        turn_b = client.get(
-            f"/internal/coder/conversations/{cid_b}/turn", headers=HEADERS
-        ).json()
+        turn_b = client.get(f"/internal/coder/conversations/{cid_b}/turn", headers=HEADERS).json()
         assert turn_b.get("turn") is None
         item = turn_b["queue"][0]
         assert item["reason"] == "waiting_for_lease"
@@ -1637,9 +1620,7 @@ def test_turn_lease_never_exposes_the_revert_sentinel_as_a_conversation(
     lease = lease_for(root)
     assert lease.try_acquire(REVERT_HOLDER) is True
     try:
-        held = client.get(
-            f"/internal/coder/conversations/{cid}/turn", headers=HEADERS
-        ).json()
+        held = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
         assert held["lease"]["kind"] == "revert"
         assert held["lease"]["holder"] is None
         assert REVERT_HOLDER not in json.dumps(held)

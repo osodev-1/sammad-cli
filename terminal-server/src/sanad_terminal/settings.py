@@ -74,8 +74,7 @@ def _clamp_takeover_wait_seconds(configured: float) -> float:
     clamped = min(max(configured, _TAKEOVER_WAIT_SECONDS_FLOOR), _TAKEOVER_WAIT_SECONDS_CEILING)
     if clamped != configured:
         logger.warning(
-            "CODER_TAKEOVER_WAIT_SECONDS={} is outside [{}, {}] — clamping "
-            "to {}s",
+            "CODER_TAKEOVER_WAIT_SECONDS={} is outside [{}, {}] — clamping to {}s",
             configured,
             _TAKEOVER_WAIT_SECONDS_FLOOR,
             _TAKEOVER_WAIT_SECONDS_CEILING,

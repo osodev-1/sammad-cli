@@ -839,9 +839,7 @@ class CoderRunner(WireRunner):
                         # cancellation that brought us here does not also
                         # kill the woken runner's start-up. Terminates: each
                         # pass pops from a finite FIFO.
-                        await wake_workspace_waiters(
-                            self._cwd, source=self.conversation_id
-                        )
+                        await wake_workspace_waiters(self._cwd, source=self.conversation_id)
         # Reachable only when `super().start_turn()` returned normally (any
         # exception/cancellation propagates past the `finally` above instead
         # of falling through here) — `state` is therefore always set; the

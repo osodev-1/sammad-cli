@@ -534,9 +534,7 @@ class WireRunner:
             async with self._journal_cond:
                 self._journal_cond.notify_all()
 
-    async def _run_turn(
-        self, state: TurnState, queue: asyncio.Queue[dict[str, Any]]
-    ) -> None:
+    async def _run_turn(self, state: TurnState, queue: asyncio.Queue[dict[str, Any]]) -> None:
         """Wraps `self._consume` (a polymorphic call — runs whatever override
         chain a subclass installs) so `state.closed` flips True only once
         EVERYTHING tied to this turn has actually finished, including a

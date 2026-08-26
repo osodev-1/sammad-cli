@@ -69,13 +69,21 @@ def test_session_locks_enabled_threads_the_env_var_into_the_child(tmp_path):
     site) omits the key entirely, which is what
     `test_child_env_exact_and_leak_free` already pins."""
     env = build_child_env(
-        user_dir=tmp_path, session_token="t", api_base_url="https://cp", cols=80, rows=24,
+        user_dir=tmp_path,
+        session_token="t",
+        api_base_url="https://cp",
+        cols=80,
+        rows=24,
         session_locks_enabled=True,
     )
     assert env["SANAD_SESSION_LOCKS"] == "1"
 
     env_off = build_child_env(
-        user_dir=tmp_path, session_token="t", api_base_url="https://cp", cols=80, rows=24,
+        user_dir=tmp_path,
+        session_token="t",
+        api_base_url="https://cp",
+        cols=80,
+        rows=24,
         session_locks_enabled=False,
     )
     assert "SANAD_SESSION_LOCKS" not in env_off
@@ -83,8 +91,12 @@ def test_session_locks_enabled_threads_the_env_var_into_the_child(tmp_path):
 
 def test_inline_trust_env_replaces_file_var(tmp_path):
     env = build_child_env(
-        user_dir=tmp_path, session_token="sess_x", api_base_url="https://cp",
-        cols=80, rows=24, trusted_hashes=["a" * 64, "b" * 64],
+        user_dir=tmp_path,
+        session_token="sess_x",
+        api_base_url="https://cp",
+        cols=80,
+        rows=24,
+        trusted_hashes=["a" * 64, "b" * 64],
     )
     assert env["SANAD_BLUEPRINT_TRUST_SHA256S"] == "a" * 64 + "," + "b" * 64
     assert "SANAD_BLUEPRINT_TRUST" not in env
@@ -92,8 +104,11 @@ def test_inline_trust_env_replaces_file_var(tmp_path):
 
 def test_no_hashes_keeps_legacy_file_var(tmp_path):
     env = build_child_env(
-        user_dir=tmp_path, session_token="sess_x", api_base_url="https://cp",
-        cols=80, rows=24,
+        user_dir=tmp_path,
+        session_token="sess_x",
+        api_base_url="https://cp",
+        cols=80,
+        rows=24,
     )
     assert env["SANAD_BLUEPRINT_TRUST"].endswith("blueprint-trust.json")
     assert "SANAD_BLUEPRINT_TRUST_SHA256S" not in env

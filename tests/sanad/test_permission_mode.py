@@ -153,9 +153,7 @@ class TestHandleSetPermissionMode:
 
         server._send_msg = capture  # type: ignore[method-assign]
 
-        response = await server._handle_set_permission_mode(
-            _msg("accept-edits")
-        )
+        response = await server._handle_set_permission_mode(_msg("accept-edits"))
 
         assert isinstance(response, JSONRPCSuccessResponse)
         assert response.result == {"status": "ok", "permission_mode": "accept-edits"}
@@ -166,7 +164,9 @@ class TestHandleSetPermissionMode:
             "edit file outside of working directory",
         }
 
-        status_events = [m.params for m in sent if isinstance(getattr(m, "params", None), StatusUpdate)]
+        status_events = [
+            m.params for m in sent if isinstance(getattr(m, "params", None), StatusUpdate)
+        ]
         assert len(status_events) == 1
         assert status_events[0].permission_mode == "accept-edits"
         assert status_events[0].plan_mode is False
@@ -178,9 +178,7 @@ class TestHandleSetPermissionMode:
         server = WireServer(soul)
         assert soul.plan_mode is False
 
-        response = await server._handle_set_permission_mode(
-            _msg("plan")
-        )
+        response = await server._handle_set_permission_mode(_msg("plan"))
 
         assert isinstance(response, JSONRPCSuccessResponse)
         assert response.result == {"status": "ok", "permission_mode": "plan"}
@@ -194,9 +192,7 @@ class TestHandleSetPermissionMode:
         await soul.set_plan_mode_from_manual(True)
         assert soul.plan_mode is True
 
-        response = await server._handle_set_permission_mode(
-            _msg("default")
-        )
+        response = await server._handle_set_permission_mode(_msg("default"))
 
         assert isinstance(response, JSONRPCSuccessResponse)
         assert soul.plan_mode is False
@@ -209,13 +205,14 @@ class TestHandleSetPermissionMode:
         server = WireServer(soul)
         await soul.set_plan_mode_from_manual(True)
 
-        response = await server._handle_set_permission_mode(
-            _msg("accept-edits")
-        )
+        response = await server._handle_set_permission_mode(_msg("accept-edits"))
 
         assert isinstance(response, JSONRPCSuccessResponse)
         assert soul.plan_mode is False
-        assert "edit file outside of working directory" in soul.runtime.approval._state.auto_approve_actions
+        assert (
+            "edit file outside of working directory"
+            in soul.runtime.approval._state.auto_approve_actions
+        )
 
     async def test_rejects_when_soul_is_not_kimi_soul(self, runtime: Runtime) -> None:
         from kimi_cli.wire.jsonrpc import ErrorCodes
@@ -227,9 +224,7 @@ class TestHandleSetPermissionMode:
         server = WireServer.__new__(WireServer)
         server._soul = _NotKimiSoul()  # type: ignore[assignment]
 
-        response = await server._handle_set_permission_mode(
-            _msg("default")
-        )
+        response = await server._handle_set_permission_mode(_msg("default"))
 
         assert isinstance(response, JSONRPCErrorResponse)
         assert response.error.code == ErrorCodes.INVALID_STATE
@@ -247,9 +242,7 @@ class TestHandleSetPermissionMode:
 
         server._send_msg = capture  # type: ignore[method-assign]
 
-        await server._dispatch_msg(
-            _msg("default")
-        )
+        await server._dispatch_msg(_msg("default"))
 
         results = [m for m in sent if isinstance(m, JSONRPCSuccessResponse)]
         assert len(results) == 1

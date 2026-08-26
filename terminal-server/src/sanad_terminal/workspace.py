@@ -185,6 +185,4 @@ def verified_trust_hashes(workspace_root: Path, key: str) -> list[str]:
     entries, tampered = load_trust_checked(workspace_root, key=key)
     if tampered:
         return []
-    return sorted(
-        e["sha256"] for e in entries.values() if isinstance(e.get("sha256"), str)
-    )
+    return sorted(e["sha256"] for e in entries.values() if isinstance(e.get("sha256"), str))

@@ -82,10 +82,12 @@ def test_write_index_is_atomic_and_load_reads_it(tmp_path):
 
 def test_write_index_overwrites_previous_content(tmp_path):
     journal = CoderJournal(tmp_path, turns_keep=20, max_bytes=1_000_000)
-    journal.write_index([{"turnId": "t_1", "status": "running", "sendId": None,
-                           "startedAt": 1.0, "lastSeq": 0}])
-    journal.write_index([{"turnId": "t_2", "status": "finished", "sendId": None,
-                           "startedAt": 2.0, "lastSeq": 0}])
+    journal.write_index(
+        [{"turnId": "t_1", "status": "running", "sendId": None, "startedAt": 1.0, "lastSeq": 0}]
+    )
+    journal.write_index(
+        [{"turnId": "t_2", "status": "finished", "sendId": None, "startedAt": 2.0, "lastSeq": 0}]
+    )
     loaded_index, _ = journal.load()
     assert loaded_index == [
         {"turnId": "t_2", "status": "finished", "sendId": None, "startedAt": 2.0, "lastSeq": 0}
