@@ -367,6 +367,63 @@ def test_first_terminal_resumes_previous_conversation(tmp_path: Path):
             assert b"ARGS:." in buf  # concurrent terminal starts fresh
 
 
+def test_gate_on_threads_session_locks_env_and_skips_a_live_owned_resume(tmp_path: Path):
+    """M7 (review): gate-on (`session_locks_enabled=True`) must (a) put
+    `SANAD_SESSION_LOCKS` in the PTY child's OWN env — the terminal TUI's
+    own spawn path, the other half of "one brain, two views"; without this
+    a terminal session could never acquire/heartbeat a lease even with the
+    panel side on — and (b) apply `find_resumable_session`'s lease filter,
+    skipping a session another view currently holds live rather than
+    resuming into it out from under that view."""
+    import hashlib
+    import time
+
+    # Echoes both argv (resume flag or not) and the env var in one line.
+    argv = (
+        "bash",
+        "-c",
+        'echo "ARGS:$*|LOCKS:${SANAD_SESSION_LOCKS:-unset}."; exec cat',
+        "cli",
+    )
+    (tmp_path / "users" / "user_1" / "workspace").mkdir(parents=True)
+    _fabricate_previous_session(tmp_path)
+
+    # Live-owned right now — another view holds this exact session.
+    workspace = (tmp_path / "users" / "user_1" / "workspace").resolve()
+    digest = hashlib.md5(str(workspace).encode("utf-8")).hexdigest()
+    session_dir = tmp_path / "users" / "user_1" / "kimi-share" / "sessions" / digest / "sess-uuid"
+    (session_dir / "owner.json").write_text(
+        json.dumps(
+            {
+                "holder": "wire:1",
+                "pid": 1,
+                "ui_mode": "wire",
+                "generation": 1,
+                "heartbeat_at": time.time(),
+                "steal_requested_by": None,
+                "busy": False,
+            }
+        )
+    )
+
+    app = create_app(
+        make_settings(tmp_path, spawn_argv=argv, session_locks_enabled=True),
+        make_control_plane({"tt_a": IDENTITY}),
+    )
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        ws.send_text(json.dumps({"type": "auth", "ticket": "tt_a"}))
+        drain_until_ready(ws)
+        buf = b""
+        while b"." not in buf:
+            msg = ws.receive()
+            if msg.get("bytes"):
+                buf += msg["bytes"]
+        # The env var reached the child, and no --resume arg was passed —
+        # the live-owned session was skipped even though it's the only
+        # candidate `_fabricate_previous_session` set up.
+        assert b"ARGS:|LOCKS:1." in buf
+
+
 PRODUCER_ARGV = ("bash", "-c", "while true; do echo tick; sleep 0.1; done")
 
 

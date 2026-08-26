@@ -16,6 +16,12 @@ agent config reaches the child):
 - `FAKE_INIT_MODE=hang`: never respond to `initialize` at all — proves the
   timeout path (`start()`'s own `_INIT_TIMEOUT_SECONDS`, monkeypatched down
   in tests so this doesn't actually wait 30s).
+- `FAKE_INIT_NULL_ID=1` (combined with `FAKE_INIT_MODE=error`): answer with
+  `"id": null` instead of echoing the request's own id — exactly what
+  `kimi_cli.sanad.session_lease.refuse_wire_initialize` sends whenever
+  `parse_initialize_request_id` can't recover a STRING id (EOF, unparseable
+  JSON, or a non-string id). Proves `_dispatch`'s "correlate to my only
+  outstanding request" fallback rather than mocking it.
 """
 
 import json
@@ -45,7 +51,8 @@ def main() -> None:
             continue  # never answer — the caller's own timeout must fire
         if mode == "error":
             error = json.loads(os.environ["FAKE_INIT_ERROR_JSON"])
-            _write({"jsonrpc": "2.0", "id": mid, "error": error})
+            reply_id = None if os.environ.get("FAKE_INIT_NULL_ID") == "1" else mid
+            _write({"jsonrpc": "2.0", "id": reply_id, "error": error})
             return
         _write(
             {
