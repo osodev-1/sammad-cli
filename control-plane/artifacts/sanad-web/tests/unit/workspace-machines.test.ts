@@ -15,6 +15,7 @@ const fakeConfig: AwsComputeConfig = {
   logGroup: "/sanad/workspaces",
   controlPlaneUrl: "https://www.sanadcode.com",
   allowedOrigins: "https://www.sanadcode.com",
+  coderEnabled: false,
 };
 
 describe("machineHash", () => {

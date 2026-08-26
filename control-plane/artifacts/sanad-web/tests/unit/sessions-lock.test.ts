@@ -22,6 +22,7 @@ vi.mock("@/lib/compute/aws", () => ({
     logGroup: "/test",
     controlPlaneUrl: "https://cp.test",
     allowedOrigins: "https://cp.test",
+    coderEnabled: false,
   }),
   describeTask: vi.fn(async () => ({
     status: taskState,
