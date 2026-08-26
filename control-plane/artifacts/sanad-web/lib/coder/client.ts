@@ -1,7 +1,13 @@
 import { parseSessionGrant } from "@/lib/terminal/protocol";
 import { withSession } from "@/lib/terminal/workspace-model";
 import { streamNdjson } from "@/lib/ndjson";
-import type { CoderDiff, CoderItem, CoderTurnState, RespondPayload } from "./types";
+import type {
+  CoderDiff,
+  CoderItem,
+  CoderTurnState,
+  CoderTurnSummary,
+  RespondPayload,
+} from "./types";
 
 /** CoderPanel's phase machine (P1b + P4). Exported so pure routing helpers
  * below (and their tests) share the exact same type the component uses —
@@ -346,7 +352,36 @@ export async function fetchCoderTurn(
       pendingRequests: data?.pendingRequests ?? [],
       mode: data?.mode ?? undefined,
       queue: data?.queue ?? undefined,
+      lease: data?.lease ?? undefined,
     };
+  } catch {
+    return null;
+  }
+}
+
+/** One row of `GET /conversations` — this workspace's live conversations
+ * (P6a Task 4's switcher). Mirrors `routes_coder.conversations()`'s
+ * response shape. */
+export interface CoderConversationSummary {
+  conversationId: string;
+  alive: boolean;
+  busy: boolean;
+  turn: CoderTurnSummary | null;
+}
+
+/** List this workspace's coder conversations, for the switcher (P6a Task
+ * 4). Never throws — a failed fetch surfaces as `null` so the caller can
+ * show a fallback instead of crashing the panel. */
+export async function fetchCoderConversations(
+  sessionId?: string,
+): Promise<CoderConversationSummary[] | null> {
+  try {
+    const res = await fetch(withSession("/api/coder/conversations", sessionId));
+    if (!res.ok) return null;
+    const body = await res.json().catch(() => null);
+    const data = body?.data ?? body;
+    const list = data?.conversations;
+    return Array.isArray(list) ? list : [];
   } catch {
     return null;
   }

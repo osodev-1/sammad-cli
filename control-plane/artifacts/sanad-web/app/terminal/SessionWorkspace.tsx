@@ -36,6 +36,7 @@ import {
   type StoredCoderMessage,
 } from "@/lib/sessions/state";
 import type { CheckpointSummary } from "@/lib/coder/transcript";
+import { ensureConversation } from "@/lib/coder/client";
 
 const POLL_MS = 4000;
 const MAX_TERMINALS = 3;
@@ -118,6 +119,15 @@ export default function SessionWorkspace({
   const [coderCheckpoints, setCoderCheckpoints] = useState<
     { turnId: string; checkpoint: CheckpointSummary }[]
   >([]);
+  /* Conversation switcher (P6a Task 4) — bumped only on an EXPLICIT switch
+     or create (never on CoderPanel's own internal "just minted a fresh
+     id" auto-assign, which flows through `onConversationId` alone). Used
+     as CoderPanel's `key` below so switching conversations gets a clean
+     new instance — fresh refs, fresh polling effects, no risk of a stray
+     in-flight update from the OLD conversation's turn bleeding into the
+     NEW one's (now-empty) transcript. */
+  const [coderEpoch, setCoderEpoch] = useState(0);
+  const [creatingConversation, setCreatingConversation] = useState(false);
   /* Context dock (R4): open state persists; reviews + activity feed it. */
   const [dockOpen, setDockOpen] = useState(true);
   const [pendingReviews, setPendingReviews] = useState<string[]>([]);
@@ -395,6 +405,57 @@ export default function SessionWorkspace({
     setActivityEpoch((e) => e + 1); // dock refetches trust + history
   }, [refresh]);
 
+  /* Switch the coder panel to a DIFFERENT conversation (P6a Task 4) — the
+     ONLY place `coderConvId` changes outside CoderPanel's own first-mint
+     auto-assign (`onConversationId`). Transcript hygiene: the persisted
+     `uiState.coder.transcript`/`lastInterruptedTurnId`/checkpoints are all
+     single-conversation today (P6b's job to make that per-conversation),
+     so switching clears them rather than showing conversation A's history
+     under B's tab — CoderPanel rebuilds whatever's live (a running turn,
+     pending requests) from the server the moment it remounts for the new
+     id. Bumping `coderEpoch` is what forces that remount (see the `key` on
+     CoderPanel below) — a same-instance prop swap would leave the OLD
+     conversation's in-flight polling/follow closures free to keep writing
+     into the NEW (now-cleared) transcript state after the switch. */
+  const switchCoderConversation = useCallback(
+    (id: string) => {
+      // State updaters stay PURE — companion state changes happen
+      // alongside, never inside another setState's updater (the #185
+      // lesson, see `addTerminal`/`closeTerminal` above): read the current
+      // id directly off state rather than nesting these inside
+      // `setCoderConvId`'s own updater.
+      if (id === coderConvId) return;
+      setCoderConvId(id);
+      setCoderTranscript(undefined);
+      setCoderLastInterruptedTurnId(undefined);
+      setCoderCheckpoints([]);
+      setCoderEpoch((e) => e + 1);
+    },
+    [coderConvId],
+  );
+
+  /* "New conversation" (P6a Task 4) — mints a ticket and creates, same
+     redemption path CoderPanel's own begin() uses (`ensureConversation`
+     with no existing id skips straight to create). The one failure this
+     surfaces explicitly is `conversation_limit` (the workspace's
+     `coder_max_conversations` cap) — reusing the same toast `notice` the
+     rest of this component already uses for FileTree/reset errors, so it
+     is never silent. */
+  const createCoderConversation = useCallback(async () => {
+    if (creatingConversation) return;
+    setCreatingConversation(true);
+    try {
+      const res = await ensureConversation(undefined, sessionId);
+      if (!res.ok || !res.conversationId) {
+        setNotice(res.error ?? "Could not start a new conversation.");
+        return;
+      }
+      switchCoderConversation(res.conversationId);
+    } finally {
+      setCreatingConversation(false);
+    }
+  }, [creatingConversation, sessionId, switchCoderConversation]);
+
   /* "In addition to the main context": a draft landing while the dock is
      hidden (or the user is off the Blueprint tab) gets a toast so it is
      never missed. */
@@ -654,6 +715,14 @@ export default function SessionWorkspace({
           {coderEnabled && (
             <div style={coderActive ? s.coderPane : s.paneHidden}>
               <CoderPanel
+                // `coderEpoch` (P6a Task 4): bumped ONLY on an explicit
+                // switch/create (see `switchCoderConversation` above),
+                // never on CoderPanel's own internal first-mint auto-
+                // assign — so the panel remounts fresh exactly when the
+                // user picks a different conversation (clean transcript,
+                // no stale in-flight closures from the old one), and NOT
+                // on every ordinary render.
+                key={coderEpoch}
                 sessionId={sessionId}
                 visible={coderActive}
                 conversationId={coderConvId}
@@ -664,6 +733,9 @@ export default function SessionWorkspace({
                 onLastInterruptedTurnId={setCoderLastInterruptedTurnId}
                 onCheckpoints={setCoderCheckpoints}
                 onReverted={onCoderReverted}
+                onSwitchConversation={switchCoderConversation}
+                onCreateConversation={() => void createCoderConversation()}
+                creatingConversation={creatingConversation}
               />
             </div>
           )}
