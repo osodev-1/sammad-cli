@@ -31,6 +31,14 @@ export interface AwsComputeConfig {
   logGroup: string;
   controlPlaneUrl: string;
   allowedOrigins: string;
+  /** CODER_ENABLED — arms the agentd coder routes on the workspace task.
+   * Off unless explicitly set: agentd defaults `coder_enabled=False` and
+   * answers every /internal/coder/** call with 404 `coder_disabled`, so a
+   * workspace that never receives this is exactly today's behaviour. The
+   * per-USER gate is separate and lives on this side
+   * (SANAD_CODER_PANEL_EMAILS / isCoderPanelAllowed); this flag only decides
+   * whether the routes exist at all on the machine. */
+  coderEnabled: boolean;
 }
 
 export function awsComputeConfig(): AwsComputeConfig {
@@ -55,6 +63,7 @@ export function awsComputeConfig(): AwsComputeConfig {
     logGroup: env.SANAD_LOG_GROUP ?? "/sanad/workspaces",
     controlPlaneUrl: env.APP_URL ?? "https://www.sanadcode.com",
     allowedOrigins: env.TERMINAL_ALLOWED_ORIGINS ?? "https://www.sanadcode.com",
+    coderEnabled: env.CODER_ENABLED === "1",
   };
 }
 

@@ -130,17 +130,23 @@ export async function waitForAgentd(baseUrl: string): Promise<void> {
   throw new Error(`agentd never became healthy: ${lastError}`);
 }
 
-function agentBaseEnv(
+export function agentBaseEnv(
   config: AwsComputeConfig,
   userId: string,
 ): Record<string, string> {
-  return {
+  const env: Record<string, string> = {
     WORKSPACE_MODE: "task",
     SANAD_WORKSPACE_USER: userId,
     CONTROL_PLANE_URL: config.controlPlaneUrl,
     SANAD_API_BASE_URL: config.controlPlaneUrl,
     TERMINAL_ALLOWED_ORIGINS: config.allowedOrigins,
   };
+  // Added only when armed, never as an explicit "0": agentd reads
+  // `CODER_ENABLED == "1"`, so an absent key and a "0" are equivalent to it,
+  // and omitting it keeps the registered task definition byte-identical to
+  // what every workspace gets today.
+  if (config.coderEnabled) env.CODER_ENABLED = "1";
+  return env;
 }
 
 /* ------------------------------------------------------------- sessions --- */
