@@ -6,9 +6,11 @@ import {
   cancelCoder,
   composerButtonsForPhase,
   dequeueCoder,
+  describeStartError,
   ensureConversation,
   fetchCoderTurn,
   followCoder,
+  isTakeoverNotification,
   modeFromEvent,
   needsInterruptedReplay,
   queueCoder,
@@ -16,9 +18,12 @@ import {
   sendCoder,
   setCoderMode,
   steerCoder,
+  takeoverConversation,
+  takeoverNotificationMessage,
   textFromEvent,
   thinkFromEvent,
   toolLabel,
+  TAKEN_OVER_ERROR_CODE,
   type CoderPhase,
 } from "@/lib/coder/client";
 import {
@@ -147,6 +152,18 @@ export default function CoderPanel({
   const [phase, setPhase] = useState<CoderPhase>("idle");
   const [startError, setStartError] = useState<string | null>(null);
   const [startErrorCode, setStartErrorCode] = useState<string | null>(null);
+  /* P6b: the owning view's ui mode ("wire" | "shell") and busy state off a
+     session_owned/session_busy 409 — undefined for every other errorCode.
+     `describeStartError` (lib/coder/client.ts) is the sole reader; kept as
+     separate state (not folded into `startError`) so that pure helper stays
+     the ONE place deciding the copy/branch, mirroring `startErrorCode`'s
+     existing split from `startError` itself. */
+  const [startErrorUiMode, setStartErrorUiMode] = useState<string | undefined>(undefined);
+  const [startErrorBusy, setStartErrorBusy] = useState<boolean | undefined>(undefined);
+  /* True while a Take-over click's `takeoverConversation` request is in
+     flight — disables the button against a double-click, mirrors
+     `creatingConversation`'s treatment in ConversationSwitcher. */
+  const [takingOver, setTakingOver] = useState(false);
   const [cid, setCid] = useState<string | undefined>(conversationId);
   const [messages, setMessages] = useState<CoderMessage[]>(() =>
     fromStored(initial ?? []),
@@ -331,11 +348,18 @@ export default function CoderPanel({
     setPhase("starting");
     setStartError(null);
     setStartErrorCode(null);
+    setStartErrorUiMode(undefined);
+    setStartErrorBusy(undefined);
     const res = await ensureConversation(cidRef.current, sessionId);
     if (!res.ok || !res.conversationId) {
       setPhase("error");
       setStartError(res.error ?? "Could not start the coding agent.");
       setStartErrorCode(res.errorCode ?? null);
+      // P6b: only ever set for a session_owned/session_busy 409 —
+      // `describeStartError` ignores these for every other errorCode, so
+      // leaving them `undefined` on an ordinary failure is harmless.
+      setStartErrorUiMode(res.uiMode);
+      setStartErrorBusy(res.busy);
       startedRef.current = false; // allow retry
       return "failed";
     }
@@ -433,6 +457,34 @@ export default function CoderPanel({
     return "ready";
   }, [sessionId]);
 
+  /* P6b: "Take over" from the `session_owned` refusal state — re-POSTs
+     `/open` with `takeover:true` (agentd requests a cooperative steal; the
+     holder stands down at its next heartbeat if it's idle). Only ever
+     wired to the button `describeStartError`'s "takeover-offer" branch
+     renders, so `cidRef.current` is guaranteed set here: that branch only
+     ever appears after a FAILED open of an EXISTING conversation id (a
+     brand-new/undefined id goes straight to create, which can't 409).
+     On success, re-runs `begin()` rather than assuming idle — the newly-
+     owned conversation may still have a running turn or pending requests
+     to catch up on, exactly like a fresh open would. */
+  const handleTakeover = useCallback(async () => {
+    const targetCid = cidRef.current;
+    if (!targetCid) return;
+    setTakingOver(true);
+    const res = await takeoverConversation(targetCid, sessionId);
+    setTakingOver(false);
+    if (!res.ok || !res.conversationId) {
+      setPhase("error");
+      setStartError(res.error ?? "Could not take over the conversation.");
+      setStartErrorCode(res.errorCode ?? null);
+      setStartErrorUiMode(res.uiMode);
+      setStartErrorBusy(res.busy);
+      return;
+    }
+    startedRef.current = true;
+    void begin();
+  }, [sessionId, begin]);
+
   /* Start on first reveal — opening the tab is intent to use it (like a
      terminal), so waking the machine here is expected. */
   useEffect(() => {
@@ -528,7 +580,19 @@ export default function CoderPanel({
         { role: "assistant", blocks: [], at, ...(resume?.turnId ? { turnId: resume.turnId } : {}) },
       ]);
       const activeCid = cidRef.current;
-      const flags = { busy: false, queued: false, failed: false, ended: false };
+      const flags = {
+        busy: false,
+        queued: false,
+        failed: false,
+        ended: false,
+        // P6b: the OTHER view took over THIS conversation mid-stream (the
+        // `Notification` event Task 2's cooperative stand-down publishes).
+        // Distinct from every other flag below — none of busy/queued/failed
+        // apply (there is no server queue/turn to reconcile against once
+        // the CLI backing this conversation is standing down), and it must
+        // never fall into the generic "lost contact" copy either.
+        takenOver: false,
+      };
       let turnId: string | null = resume?.turnId ?? null;
       let lastSeq = -1;
       const saveAnchor = () => {
@@ -548,6 +612,20 @@ export default function CoderPanel({
           if (item.seq <= lastSeq) return; // duplicate from a re-follow
           lastSeq = item.seq;
           saveAnchor();
+        }
+        if (isTakeoverNotification(item)) {
+          // Checked BEFORE the mode/tool/text extractors below (all of
+          // which no-op harmlessly on a Notification anyway) so this can
+          // never be shadowed by a future extractor that starts matching
+          // event.type === "Notification" for some other purpose.
+          flags.takenOver = true;
+          flags.ended = true;
+          setStartError(takeoverNotificationMessage(item));
+          setStartErrorCode(TAKEN_OVER_ERROR_CODE);
+          setStartErrorUiMode(undefined);
+          setStartErrorBusy(undefined);
+          setPhase("error");
+          return;
         }
         const liveMode = modeFromEvent(item);
         if (
@@ -648,6 +726,19 @@ export default function CoderPanel({
         window.sessionStorage.removeItem(anchorKey);
       } catch {
         /* storage blocked */
+      }
+      if (flags.takenOver) {
+        // `consume()` already set phase "error" + the taken-over copy the
+        // instant the notification arrived — nothing left to reconcile.
+        // Deliberately skips EVERY branch below: `settleAfterTurn` would
+        // hit `/turn` for a conversation this client no longer owns, and
+        // the busy/queued/failed branches would misreport this as an
+        // ordinary send failure and offer the WRONG recovery ("Try again"
+        // reopening/resending) instead of the taken-over notice + its own
+        // (still-available) "Try again", which re-runs `begin()` and would
+        // correctly surface a fresh session_owned/takeover-offer if the
+        // other view has since gone idle.
+        return;
       }
       if (!flags.ended && turnId) {
         // Gave up re-attaching. The turn may still finish server-side — say
@@ -1213,6 +1304,19 @@ export default function CoderPanel({
   // the workspace write-lease. Never repeats "you're running a turn" —
   // that's already the statusStrip above.
   const leaseNotice = leaseStatusLabel(lease, cid);
+  // P6b: the ONE place that decides what the error state says and whether
+  // it offers Take over — see `describeStartError`'s docstring
+  // (lib/coder/client.ts) for why `busy`, not `errorCode` alone, decides
+  // takeover-offer vs busy-refusal.
+  const startErrorView =
+    phase === "error"
+      ? describeStartError(
+          startErrorCode ?? undefined,
+          startErrorUiMode,
+          startErrorBusy,
+          startError ?? undefined,
+        )
+      : null;
 
   return (
     <div style={s.wrap}>
@@ -1246,20 +1350,37 @@ export default function CoderPanel({
           </div>
         )}
 
-        {phase === "error" && (
+        {phase === "error" && startErrorView && (
           <div style={s.startError}>
-            {startErrorCode === "coder_not_enabled"
-              ? "The coding agent isn't enabled for this account."
-              : startError}
-            <button
-              style={s.retry}
-              onClick={() => {
-                startedRef.current = true;
-                void begin();
-              }}
-            >
-              Try again
-            </button>
+            {startErrorView.message}
+            {startErrorView.kind === "takeover-offer" ? (
+              // P6b: session_owned + idle — a takeover is genuinely
+              // available. NEVER rendered for "busy-refusal" (see the
+              // sibling branch below) — offering this button on a mid-turn
+              // owner would just fail (P6B-DECISIONS.md decision 2).
+              <button
+                style={{ ...s.retry, ...disabled(takingOver) }}
+                disabled={takingOver}
+                onClick={() => void handleTakeover()}
+              >
+                {takingOver ? "Taking over…" : "Take over"}
+              </button>
+            ) : (
+              // busy-refusal / taken-over / generic all get the ordinary
+              // retry — re-running begin() re-checks the server fresh
+              // rather than guessing (a busy owner may have finished, a
+              // taken-over conversation may now be idle again and offer a
+              // fresh takeover, an ordinary failure may have cleared).
+              <button
+                style={s.retry}
+                onClick={() => {
+                  startedRef.current = true;
+                  void begin();
+                }}
+              >
+                Try again
+              </button>
+            )}
           </div>
         )}
 

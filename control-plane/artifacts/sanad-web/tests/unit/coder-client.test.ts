@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ensureConversation,
+  takeoverConversation,
   sendCoder,
   fetchCoderTurn,
   fetchCoderDiff,
@@ -18,6 +19,10 @@ import {
   needsInterruptedReplay,
   isQueuedSendResponse,
   composerButtonsForPhase,
+  describeStartError,
+  isTakeoverNotification,
+  takeoverNotificationMessage,
+  TAKEN_OVER_ERROR_CODE,
 } from "@/lib/coder/client";
 import type { CoderItem, CoderTurnSummary } from "@/lib/coder/types";
 
@@ -422,6 +427,240 @@ describe("ensureConversation", () => {
     expect(result.ok).toBe(false);
     expect(result.errorCode).toBe("coder_not_enabled");
     expect(result.error).toBe("The coding agent is not enabled for this account");
+  });
+
+  // P6b: the data-losing bug this guards against is `ensureConversation`
+  // treating a `session_owned`/`session_busy` 409 as a "the conversation is
+  // gone" signal and falling through to CREATE a brand new one — silently
+  // abandoning the one the OTHER view is holding. Asserting the mock was
+  // called exactly twice (mint + open, never a third `/conversations`
+  // POST) is what actually fails against a naively-widened `fallsThrough`;
+  // asserting only `result.ok === false` would pass even if a create call
+  // happened right after (as long as ITS response also came back ok:false).
+  it("a session_owned 409 on open does NOT fall through to create — surfaces uiMode/busy instead", async () => {
+    const fetchMock = vi.fn();
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { data: { ticket: "tk_1", wsUrl: "wss://x" } }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(409, {
+          error: {
+            code: "session_owned",
+            message: "already open in the terminal",
+            uiMode: "shell",
+            busy: false,
+          },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await ensureConversation("c_owned", "sess1");
+
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe("session_owned");
+    expect(result.uiMode).toBe("shell");
+    expect(result.busy).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2); // mint + open — NEVER a create call
+    const urls = fetchMock.mock.calls.map((call: unknown[]) => String(call[0]));
+    expect(urls.some((u) => u === "/api/coder/conversations")).toBe(false);
+  });
+
+  it("a session_busy 409 on open does NOT fall through to create — surfaces uiMode/busy instead", async () => {
+    const fetchMock = vi.fn();
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { data: { ticket: "tk_1", wsUrl: "wss://x" } }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(409, {
+          error: {
+            code: "session_busy",
+            message: "mid-turn in the browser panel",
+            uiMode: "wire",
+            busy: true,
+          },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await ensureConversation("c_busy", "sess1");
+
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe("session_busy");
+    expect(result.uiMode).toBe("wire");
+    expect(result.busy).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const urls = fetchMock.mock.calls.map((call: unknown[]) => String(call[0]));
+    expect(urls.some((u) => u === "/api/coder/conversations")).toBe(false);
+  });
+});
+
+describe("takeoverConversation", () => {
+  it("re-POSTs /open with takeover:true using a FRESH ticket", async () => {
+    const fetchMock = vi.fn();
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { data: { ticket: "tk_2", wsUrl: "wss://x" } }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { data: {} }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await takeoverConversation("c_1", "sess1");
+
+    expect(result).toEqual({ ok: true, conversationId: "c_1" });
+    const [openUrl, openInit] = fetchMock.mock.calls[1];
+    expect(String(openUrl)).toContain("/api/coder/conversations/c_1/open");
+    expect(JSON.parse(openInit.body)).toEqual({ ticket: "tk_2", takeover: true });
+  });
+
+  it("a takeover against a BUSY owner surfaces session_busy distinctly (never waited on)", async () => {
+    const fetchMock = vi.fn();
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { data: { ticket: "tk_2", wsUrl: "wss://x" } }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(409, {
+          error: {
+            code: "session_busy",
+            message: "mid-turn in the terminal",
+            uiMode: "shell",
+            busy: true,
+          },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await takeoverConversation("c_1", "sess1");
+
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe("session_busy");
+    expect(result.uiMode).toBe("shell");
+  });
+
+  it("a network failure surfaces as a generic error, not a crash", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new Error("boom")),
+    );
+    const result = await takeoverConversation("c_1", "sess1");
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("Network error — check your connection.");
+  });
+});
+
+// P6b Task 4: the pure branch-selection matrix — the single place that
+// decides what the panel's error state SAYS and whether it offers a Take
+// over button. JSX is review-gated; this function is what's actually
+// tested. Every case below would fail against an unfixed
+// `startErrorCode === "coder_not_enabled" ? ... : startError` ternary (the
+// pre-P6b code) since it has no concept of session_owned/session_busy/
+// taken-over at all — it would just render the raw server `message`.
+describe("describeStartError (the takeover/busy/taken-over branch matrix, pure)", () => {
+  it("owned + idle -> takeover-offer, names the terminal from uiMode='shell'", () => {
+    const view = describeStartError("session_owned", "shell", false, "irrelevant server text");
+    expect(view.kind).toBe("takeover-offer");
+    expect(view.otherView).toBe("the terminal");
+    expect(view.message).toBe(
+      "This conversation is open in the terminal. Take it over here?",
+    );
+  });
+
+  it("owned + idle -> takeover-offer, names the browser panel from uiMode='wire'", () => {
+    const view = describeStartError("session_owned", "wire", false, undefined);
+    expect(view.kind).toBe("takeover-offer");
+    expect(view.otherView).toBe("the browser panel");
+  });
+
+  // The discriminating case: a PLAIN (non-takeover) open always comes back
+  // coded "session_owned" even when the owner is mid-turn — `busy` is the
+  // real signal here, not the code. A helper that only switches on
+  // `errorCode` (ignoring `busy`) would wrongly return "takeover-offer" and
+  // FAIL this assertion.
+  it("owned + busy (code still session_owned) -> busy-refusal, NO takeover offered", () => {
+    const view = describeStartError("session_owned", "shell", true, "irrelevant");
+    expect(view.kind).toBe("busy-refusal");
+    expect(view.message).toBe(
+      "That conversation is mid-turn in the terminal — cancel it there, or wait.",
+    );
+  });
+
+  it("session_busy code -> busy-refusal even if the busy flag were somehow missing", () => {
+    const view = describeStartError("session_busy", "wire", undefined, "irrelevant");
+    expect(view.kind).toBe("busy-refusal");
+    expect(view.otherView).toBe("the browser panel");
+  });
+
+  it("taken-over (client-synthetic code) renders its own message, no takeover/try-again copy leaks in", () => {
+    const view = describeStartError(
+      TAKEN_OVER_ERROR_CODE,
+      undefined,
+      undefined,
+      "This conversation was taken over in the terminal.",
+    );
+    expect(view.kind).toBe("taken-over");
+    expect(view.message).toBe("This conversation was taken over in the terminal.");
+  });
+
+  it("an ordinary error code falls through to generic, using the server message verbatim", () => {
+    const view = describeStartError("network", undefined, undefined, "Network error — check your connection.");
+    expect(view.kind).toBe("generic");
+    expect(view.message).toBe("Network error — check your connection.");
+  });
+
+  it("coder_not_enabled keeps its own fixed copy regardless of server message", () => {
+    const view = describeStartError("coder_not_enabled", undefined, undefined, "some server text");
+    expect(view.kind).toBe("generic");
+    expect(view.message).toBe("The coding agent isn't enabled for this account.");
+  });
+});
+
+describe("isTakeoverNotification / takeoverNotificationMessage (P6b taken-over notice)", () => {
+  it("recognizes the exact wire shape the CLI publishes on cooperative stand-down", () => {
+    const item: CoderItem = {
+      kind: "event",
+      event: {
+        type: "Notification",
+        payload: {
+          type: "session_lease_taken_over",
+          body: "This conversation was taken over in the terminal.",
+        },
+      },
+    };
+    expect(isTakeoverNotification(item)).toBe(true);
+    expect(takeoverNotificationMessage(item)).toBe(
+      "This conversation was taken over in the terminal.",
+    );
+  });
+
+  // Guards against a helper that matches on the OUTER event type alone
+  // ("Notification") without checking the inner discriminator — the CLI's
+  // generic notification channel could carry other notification kinds.
+  it("does NOT match an unrelated Notification (wrong inner type)", () => {
+    const item: CoderItem = {
+      kind: "event",
+      event: { type: "Notification", payload: { type: "some_other_notice", body: "x" } },
+    };
+    expect(isTakeoverNotification(item)).toBe(false);
+  });
+
+  it("does NOT match ordinary content/tool events", () => {
+    const item: CoderItem = {
+      kind: "event",
+      event: { type: "TextPart", payload: { text: "hi" } },
+    };
+    expect(isTakeoverNotification(item)).toBe(false);
+  });
+
+  it("falls back to generic copy when the server body is missing/malformed", () => {
+    const item: CoderItem = {
+      kind: "event",
+      event: { type: "Notification", payload: { type: "session_lease_taken_over" } },
+    };
+    expect(takeoverNotificationMessage(item)).toBe(
+      "This conversation was taken over in another view.",
+    );
   });
 });
 

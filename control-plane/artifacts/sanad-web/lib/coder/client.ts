@@ -6,6 +6,7 @@ import type {
   CoderItem,
   CoderTurnState,
   CoderTurnSummary,
+  NotificationEventPayload,
   RespondPayload,
 } from "./types";
 
@@ -25,6 +26,108 @@ export interface EnsureResult {
   conversationId?: string;
   error?: string;
   errorCode?: string;
+  /** Present only for a `session_owned`/`session_busy` 409 (P6b session
+   * lease) — the CURRENT owner's ui mode (`"wire"` the browser panel,
+   * `"shell"` a terminal), straight off the 409 body. `describeStartError`
+   * below is the sole consumer — it turns this into "the terminal" / "the
+   * browser panel" copy so the panel never hardcodes the other view's name. */
+  uiMode?: string;
+  /** Present only alongside `uiMode` — whether the current owner is
+   * mid-turn right now. THIS, not `errorCode` alone, is the authoritative
+   * busy/idle signal: a plain (non-takeover) open always comes back coded
+   * `session_owned` even when the owner is busy (see `_handle_session_owned`
+   * in `terminal-server/src/sanad_terminal/routes_coder.py`) — `errorCode`
+   * only ever becomes `session_busy` on a `takeover:true` retry. */
+  busy?: boolean;
+}
+
+/** The client-synthetic error code stamped on `startErrorCode` when the
+ * panel's OWN conversation gets taken over out from under it mid-stream
+ * (the `Notification` event `isTakeoverNotification` recognizes) — never a
+ * code any server response actually carries, so it can't collide with a
+ * real `errorCode` from `ensureConversation`/`takeoverConversation`. */
+export const TAKEN_OVER_ERROR_CODE = "taken_over";
+
+/** The P6b takeover notice's own inner discriminator
+ * (`kimi_cli.sanad.session_lease.build_takeover_notification`'s
+ * `type=`) — see `NotificationEventPayload` (lib/coder/types.ts) for why
+ * this is distinct from the OUTER `CoderItem.event.type` ("Notification"). */
+const TAKEOVER_NOTIFICATION_TYPE = "session_lease_taken_over";
+
+/** True when a streamed item is the P6b cooperative-stand-down notice
+ * (Task 2's `build_takeover_notification`) rather than an ordinary
+ * content/tool event or an unrelated notification kind. Pure so the
+ * discrimination is directly testable without a live stream. */
+export function isTakeoverNotification(item: CoderItem): boolean {
+  if (item.kind !== "event" || item.event.type !== "Notification") return false;
+  const payload = item.event.payload as NotificationEventPayload | undefined;
+  return payload?.type === TAKEOVER_NOTIFICATION_TYPE;
+}
+
+/** The human-readable takeover message to show, preferring the server's own
+ * `body` and falling back to generic copy when it's missing/malformed.
+ * Callers should guard with `isTakeoverNotification(item)` first — this
+ * never checks the discriminator itself, only reads `body` off whatever
+ * event payload is there. */
+export function takeoverNotificationMessage(item: CoderItem): string {
+  if (item.kind === "event") {
+    const payload = item.event.payload as NotificationEventPayload | undefined;
+    if (typeof payload?.body === "string" && payload.body) return payload.body;
+  }
+  return "This conversation was taken over in another view.";
+}
+
+/** The panel's own render state for a start/open failure — the ONE place
+ * that decides whether to offer "Take over", show the mid-turn busy
+ * refusal, show the taken-over notice, or fall back to a generic error.
+ * Pure (no JSX, no state) so the whole matrix is unit-testable; the panel's
+ * `phase === "error"` block just switches on `.kind`.
+ *
+ * `busy` — NOT `errorCode` alone — is the authoritative owned/busy
+ * discriminator (see `EnsureResult.busy`'s docstring): a plain open always
+ * codes `session_owned` even when the owner is mid-turn, so this checks
+ * `errorCode === "session_busy" || busy` rather than switching on the code
+ * alone — the single most likely place to confuse the two 409s (per the
+ * brief) if that got skipped. */
+export interface StartErrorView {
+  kind: "takeover-offer" | "busy-refusal" | "taken-over" | "generic";
+  message: string;
+  /** "the terminal" / "the browser panel" — only set for the two owned
+   * variants; irrelevant (and omitted) for "taken-over"/"generic". */
+  otherView?: string;
+}
+
+export function describeStartError(
+  errorCode: string | undefined,
+  uiMode: string | undefined,
+  busy: boolean | undefined,
+  message: string | undefined,
+): StartErrorView {
+  if (errorCode === TAKEN_OVER_ERROR_CODE) {
+    return {
+      kind: "taken-over",
+      message: message ?? "This conversation was taken over in another view.",
+    };
+  }
+  if (errorCode === "session_owned" || errorCode === "session_busy") {
+    const otherView = uiMode === "shell" ? "the terminal" : "the browser panel";
+    if (errorCode === "session_busy" || busy) {
+      return {
+        kind: "busy-refusal",
+        otherView,
+        message: `That conversation is mid-turn in ${otherView} — cancel it there, or wait.`,
+      };
+    }
+    return {
+      kind: "takeover-offer",
+      otherView,
+      message: `This conversation is open in ${otherView}. Take it over here?`,
+    };
+  }
+  if (errorCode === "coder_not_enabled") {
+    return { kind: "generic", message: "The coding agent isn't enabled for this account." };
+  }
+  return { kind: "generic", message: message ?? "Could not start the coding agent." };
 }
 
 /** Fallback copy for codes the server sometimes omits a message for — kept
@@ -117,6 +220,22 @@ export async function ensureConversation(
     const fallsThrough =
       openRes.status === 404 || (openRes.status === 400 && code === "invalid_conversation");
     if (!fallsThrough) {
+      // P6b: `fallsThrough` above already excludes EVERY 409 (only
+      // 404/invalid_conversation fall through to create) — a
+      // session_owned/session_busy refusal always lands here, never below.
+      // Falling through on an unrecognised failure would silently abandon
+      // the OWNED conversation and start a fresh, different one — a
+      // data-losing UX bug — so this branch must always return, never
+      // `break`/fall out of the `if (existingId)` block.
+      if (code === "session_owned" || code === "session_busy") {
+        return {
+          ok: false,
+          error: describeError(code, b?.error?.message, "Could not open the conversation."),
+          errorCode: code,
+          uiMode: typeof b?.error?.uiMode === "string" ? b.error.uiMode : undefined,
+          busy: typeof b?.error?.busy === "boolean" ? b.error.busy : undefined,
+        };
+      }
       return {
         ok: false,
         error: describeError(code, b?.error?.message, "Could not open the conversation."),
@@ -157,6 +276,64 @@ export async function ensureConversation(
     return { ok: false, error: "Could not start the coding agent." };
   }
   return { ok: true, conversationId };
+}
+
+/**
+ * P6b: re-open a conversation the OTHER view (a terminal, or another
+ * browser tab) currently holds, asking agentd to request a cooperative
+ * steal (`P6B-DECISIONS.md` decision 1) — the holder stands down at its
+ * next heartbeat (~10s) if it's idle. Mints its OWN one-time ticket (the
+ * ticket from the refused `ensureConversation` open was already consumed
+ * by that failed attempt) and re-POSTs `/open` with `{ticket,
+ * takeover:true}`.
+ *
+ * Three outcomes, mirroring `ensureConversation`'s `EnsureResult`:
+ * - `{ok:true, conversationId}` — the steal landed; open normally from here.
+ * - `{ok:false, errorCode:"session_busy", uiMode, busy:true}` — the owner
+ *   IS (or became) mid-turn — decision 2: never waited on, refused
+ *   immediately. The caller should show the busy-refusal copy, not retry.
+ * - `{ok:false, ...}` — any other failure (network, a bounded-wait timeout
+ *   with the owner still live, a genuine crash) — same shape as
+ *   `ensureConversation`'s generic failure.
+ *
+ * Deliberately does NOT fall back to create on any failure — same
+ * data-loss reasoning as `ensureConversation`'s 409 branch: a failed
+ * takeover must never silently abandon the conversation being fought over.
+ */
+export async function takeoverConversation(
+  cid: string,
+  sessionId?: string,
+): Promise<EnsureResult> {
+  const mint = await mintTicket(sessionId);
+  if (!mint.ok) return mint;
+
+  let openRes: Response;
+  try {
+    openRes = await fetch(
+      withSession(`/api/coder/conversations/${encodeURIComponent(cid)}/open`, sessionId),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ticket: mint.ticket, takeover: true }),
+      },
+    );
+  } catch {
+    return { ok: false, error: "Network error — check your connection." };
+  }
+
+  if (openRes.ok) {
+    return { ok: true, conversationId: cid };
+  }
+
+  const b = await openRes.json().catch(() => null);
+  const code = b?.error?.code as string | undefined;
+  return {
+    ok: false,
+    error: describeError(code, b?.error?.message, "Could not take over the conversation."),
+    errorCode: code,
+    uiMode: typeof b?.error?.uiMode === "string" ? b.error.uiMode : undefined,
+    busy: typeof b?.error?.busy === "boolean" ? b.error.busy : undefined,
+  };
 }
 
 /** Outcome of a `sendCoder` call: either it streamed a turn live, or the
