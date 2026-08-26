@@ -12,10 +12,13 @@ from pathlib import Path
 
 import httpx
 import pytest
-from sanad_terminal import coder_runner, routes_blueprint
+from sanad_terminal import coder_runner, routes_blueprint, session_owner
 from sanad_terminal.app import create_app
+from sanad_terminal.coder_runner import CoderRunner
 from sanad_terminal.control_plane import ControlPlaneClient
 from sanad_terminal.settings import TerminalSettings
+from sanad_terminal.wire_runner import WireRunner, WireRunnerError
+from sanad_terminal.workspace import kimi_share_dir
 from sanad_terminal.workspace_lease import REVERT_HOLDER, lease_for, new_revert_holder
 from sanad_terminal.workspace_locks import lock_for
 from starlette.testclient import TestClient
@@ -52,6 +55,9 @@ def _make_client(
     enabled: bool,
     coder_max_queue_depth: int = 50,
     coder_diff_max_bytes: int = 200_000,
+    session_locks_enabled: bool = False,
+    coder_takeover_wait_seconds: float = 15.0,
+    coder_takeover_poll_seconds: float = 0.5,
 ) -> TestClient:
     settings = TerminalSettings(
         shared_secret=SECRET,
@@ -63,6 +69,9 @@ def _make_client(
         coder_max_conversations=2,
         coder_max_queue_depth=coder_max_queue_depth,
         coder_diff_max_bytes=coder_diff_max_bytes,
+        session_locks_enabled=session_locks_enabled,
+        coder_takeover_wait_seconds=coder_takeover_wait_seconds,
+        coder_takeover_poll_seconds=coder_takeover_poll_seconds,
     )
     app = create_app(settings, _control_plane({"tt_good": IDENTITY}))
     return TestClient(app)
@@ -1739,3 +1748,229 @@ def test_a_second_revert_is_refused_while_one_is_in_flight(client: TestClient, t
         assert lease.holder_of() == first
     finally:
         lease.release(first)
+
+
+# -- P6b: session lease — session_owned/session_busy mapping, takeover ------
+#
+# `_spawn`'s own `runner.start()` call is monkeypatched (`CoderRunner.start`,
+# inherited from `WireRunner` — nothing overrides it) rather than getting the
+# REAL `sanad --wire --session <id>` fake CLI to actually acquire a lease:
+# that CLI-side acquire/heartbeat/refuse behavior is Task 1+2's own,
+# reviewed territory (`session_lock.py`/`session_lease.py`), and is not what
+# this task is proving. What IS this task's own logic — the 409 mapping,
+# the takeover retry/wait loop, and the busy-skips-the-wait rule — is
+# exercised for real over real HTTP.
+
+
+def test_open_session_owned_refusal_without_takeover_is_409(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    async def fake_start(self):
+        raise WireRunnerError(
+            "session_owned",
+            "Session is owned by another view (wire, idle)",
+            data={"code": "session_owned", "ui_mode": "wire", "busy": False},
+        )
+
+    monkeypatch.setattr(CoderRunner, "start", fake_start)
+
+    cid = "c_" + "4" * 12
+    res = client.post(
+        f"/internal/coder/conversations/{cid}/open", headers=HEADERS, json={"ticket": "tt_good"}
+    )
+    assert res.status_code == 409, res.text
+    body = res.json()["error"]
+    assert body["code"] == "session_owned"
+    assert body["uiMode"] == "wire"
+    assert body["busy"] is False
+
+
+def test_open_genuine_crash_still_503s(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    """A non-`session_owned` `start()` failure (crash, or the timeout path)
+    is UNCHANGED — the flat 503 every `WireRunnerError` already got before
+    this task, still keyed off whatever `.code` it carries."""
+
+    async def fake_start(self):
+        raise WireRunnerError("init_failed", "agent did not initialize")
+
+    monkeypatch.setattr(CoderRunner, "start", fake_start)
+
+    cid = "c_" + "5" * 12
+    res = client.post(
+        f"/internal/coder/conversations/{cid}/open", headers=HEADERS, json={"ticket": "tt_good"}
+    )
+    assert res.status_code == 503, res.text
+    assert res.json()["error"]["code"] == "init_failed"
+
+
+def test_open_with_takeover_against_a_busy_owner_returns_409_without_waiting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    with _make_client(
+        tmp_path, enabled=True, coder_takeover_wait_seconds=5.0, coder_takeover_poll_seconds=0.5
+    ) as c:
+
+        async def fake_start(self):
+            raise WireRunnerError(
+                "session_owned",
+                "owned, busy",
+                data={"code": "session_owned", "ui_mode": "shell", "busy": True},
+            )
+
+        monkeypatch.setattr(CoderRunner, "start", fake_start)
+
+        cid = "c_" + "6" * 12
+        started = time.monotonic()
+        res = c.post(
+            f"/internal/coder/conversations/{cid}/open",
+            headers=HEADERS,
+            json={"ticket": "tt_good", "takeover": True},
+        )
+        elapsed = time.monotonic() - started
+
+        assert res.status_code == 409, res.text
+        body = res.json()["error"]
+        assert body["code"] == "session_busy"
+        assert body["uiMode"] == "shell"
+        assert body["busy"] is True
+        # Decision 2: a mid-turn takeover is refused, never queued — no
+        # steal, no wait. Well under the configured 5s window (and even a
+        # single 0.5s poll tick) proves this returned WITHOUT waiting.
+        assert elapsed < 1.0
+
+
+def test_open_with_takeover_retries_and_succeeds_once_the_holder_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _root_for(tmp_path)
+    cid = "c_" + "7" * 12
+    session_dir = session_owner.session_dir_for(kimi_share_dir(root.parent), root, cid)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "owner.json").write_text(
+        json.dumps(
+            {
+                "holder": "wire:999",
+                "pid": 999,
+                "ui_mode": "wire",
+                "generation": 1,
+                "heartbeat_at": time.time(),
+                "steal_requested_by": None,
+                "busy": False,
+            }
+        )
+    )
+
+    with _make_client(
+        tmp_path, enabled=True, coder_takeover_wait_seconds=2.0, coder_takeover_poll_seconds=0.02
+    ) as c:
+        calls = {"n": 0}
+        real_start = WireRunner.start
+
+        async def fake_start(self):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                # Still owned, still idle — the holder hasn't stood down yet.
+                raise WireRunnerError(
+                    "session_owned",
+                    "owned",
+                    data={"code": "session_owned", "ui_mode": "wire", "busy": False},
+                )
+            await real_start(self)  # the holder released — a real spawn now succeeds
+
+        monkeypatch.setattr(CoderRunner, "start", fake_start)
+
+        res = c.post(
+            f"/internal/coder/conversations/{cid}/open",
+            headers=HEADERS,
+            json={"ticket": "tt_good", "takeover": True},
+        )
+        assert res.status_code == 200, res.text
+        assert res.json() == {"ok": True, "started": True}
+        # The initial attempt plus at least one genuine retry before success
+        # — proves this actually waited/retried rather than getting lucky
+        # on the very first call.
+        assert calls["n"] >= 3
+
+    # And a steal request was genuinely written for the holder to observe
+    # on its next heartbeat — the SAME file a real CLI's `heartbeat()` reads.
+    recorded = json.loads((session_dir / "owner.json").read_text())
+    assert recorded["steal_requested_by"] == f"agentd:{cid}"
+
+
+def test_open_with_takeover_times_out_if_the_holder_never_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """No retry ever succeeds within the bounded window → still 409
+    `session_owned` (not `session_busy` — the owner stayed idle the whole
+    time, it just never actually stood down)."""
+    with _make_client(
+        tmp_path, enabled=True, coder_takeover_wait_seconds=0.1, coder_takeover_poll_seconds=0.02
+    ) as c:
+
+        async def fake_start(self):
+            raise WireRunnerError(
+                "session_owned",
+                "owned",
+                data={"code": "session_owned", "ui_mode": "wire", "busy": False},
+            )
+
+        monkeypatch.setattr(CoderRunner, "start", fake_start)
+
+        cid = "c_" + "8" * 12
+        res = c.post(
+            f"/internal/coder/conversations/{cid}/open",
+            headers=HEADERS,
+            json={"ticket": "tt_good", "takeover": True},
+        )
+        assert res.status_code == 409, res.text
+        assert res.json()["error"]["code"] == "session_owned"
+
+
+def test_conversations_listing_has_no_owner_key_when_gate_is_off(client: TestClient):
+    """Gate off (the default): the listing's response shape is
+    byte-identical to today — no `owner` key at all, not even `null`."""
+    created = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    )
+    assert created.status_code == 200, created.text
+    listed = client.get("/internal/coder/conversations", headers=HEADERS).json()
+    assert len(listed["conversations"]) == 1
+    assert "owner" not in listed["conversations"][0]
+
+
+def test_conversations_listing_includes_owner_when_gate_is_on(tmp_path: Path):
+    with _make_client(tmp_path, enabled=True, session_locks_enabled=True) as c:
+        created = c.post(
+            "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+        )
+        assert created.status_code == 200, created.text
+        cid = created.json()["conversationId"]
+        root = _root_for(tmp_path)
+
+        # No owner.json exists (the fake CLI never acquires a real lease) —
+        # None, not a synthesized "owned" record.
+        listed = c.get("/internal/coder/conversations", headers=HEADERS).json()
+        assert listed["conversations"][0]["owner"] is None
+
+        # Once an owner file exists, the listing reports it verbatim.
+        session_dir = session_owner.session_dir_for(kimi_share_dir(root.parent), root, cid)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "owner.json").write_text(
+            json.dumps(
+                {
+                    "holder": "wire:123",
+                    "pid": 123,
+                    "ui_mode": "wire",
+                    "generation": 1,
+                    "heartbeat_at": time.time(),
+                    "steal_requested_by": None,
+                    "busy": True,
+                }
+            )
+        )
+        listed = c.get("/internal/coder/conversations", headers=HEADERS).json()
+        assert listed["conversations"][0]["owner"] == {
+            "uiMode": "wire",
+            "busy": True,
+            "live": True,
+        }

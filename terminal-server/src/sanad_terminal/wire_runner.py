@@ -29,7 +29,14 @@ _TURN_KEEP = 5
 
 
 class WireRunnerError(Exception):
-    def __init__(self, code: str, message: str, *, holder: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        holder: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
@@ -39,6 +46,15 @@ class WireRunnerError(Exception):
         # without parsing `message`. `None` for every other error code —
         # every existing raise site omits it, so this is purely additive.
         self.holder = holder
+        # P6b: the app-level `error.data` payload from a JSON-RPC error
+        # response — populated only when `start()`'s `initialize` handshake
+        # is refused with one (today, only the `session_owned` refusal from
+        # `kimi_cli.sanad.session_lease.build_session_owned_error`, whose
+        # `data` shape is `{"code": "session_owned", "ui_mode": str, "busy":
+        # bool}`). `None` for every other error — a timeout, a crash, or any
+        # non-dict/data-less error response — so a route can safely do
+        # `(exc.data or {}).get("ui_mode")` without a None-check dance.
+        self.data = data
 
 
 def _preexec(
@@ -223,7 +239,32 @@ class WireRunner:
                 raise WireRunnerError("init_failed", "agent did not initialize") from exc
             if "error" in resp:
                 await self.stop()
-                raise WireRunnerError("init_failed", str(resp.get("error")))
+                # P6b: don't collapse every initialize refusal into the same
+                # flat "init_failed" — the child's ONLY channel to explain a
+                # `session_owned` refusal (its stderr is DEVNULL) is this
+                # response's `error.data.code` (an app-level string
+                # discriminator; JSON-RPC's own `error.code` is required to
+                # be an int, so it can't carry it — see
+                # `kimi_cli.sanad.session_lease.build_session_owned_error`).
+                # When present, THAT becomes this exception's `.code` (and
+                # `.data` carries the rest — `ui_mode`/`busy`) so a caller
+                # like `routes_coder._spawn` can map it to its own HTTP
+                # status instead of every failure flattening to a 503. Any
+                # error without that shape (or a non-dict `error` at all)
+                # falls back to `init_failed`, exactly as before — a
+                # genuine crash/timeout is not, and must not become,
+                # distinguishable from any other opaque init failure.
+                err = resp.get("error")
+                err_obj = err if isinstance(err, dict) else {}
+                data = err_obj.get("data")
+                data_obj = data if isinstance(data, dict) else None
+                app_code = data_obj.get("code") if data_obj is not None else None
+                message = err_obj.get("message")
+                raise WireRunnerError(
+                    app_code if isinstance(app_code, str) else "init_failed",
+                    message if isinstance(message, str) else str(err),
+                    data=data_obj,
+                )
             self._touch()
 
     async def stop(self) -> None:

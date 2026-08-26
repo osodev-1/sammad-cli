@@ -2,6 +2,7 @@
 deny-by-default request hook, and the probe registry. No LLM, no FastAPI."""
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from sanad_terminal.wire_runner import (
 )
 
 FAKE_WIRE = Path(__file__).parent / "_fake_coder_wire.py"
+FAKE_INIT_WIRE = Path(__file__).parent / "_fake_init_wire.py"
 
 
 def _runner(**kwargs) -> WireRunner:
@@ -783,3 +785,147 @@ async def test_concurrent_drain_calls_never_double_pop(tmp_path):
         assert started.send_id == "s1"
     finally:
         await runner.stop()
+
+
+# -- P6b: WireRunner.start()'s initialize-error propagation -----------------
+#
+# `_fake_init_wire.py` controls exactly what `initialize` answers with (env
+# `FAKE_INIT_MODE`), so these exercise the REAL parsing logic in `start()`
+# against a real subprocess round trip rather than mocking it.
+
+
+def _init_runner(*, mode: str = "ok", error: dict | None = None, **kwargs) -> WireRunner:
+    env = {"FAKE_INIT_MODE": mode}
+    if error is not None:
+        env["FAKE_INIT_ERROR_JSON"] = json.dumps(error)
+    return WireRunner(
+        argv=(sys.executable, str(FAKE_INIT_WIRE)),
+        cwd=Path.cwd(),
+        env=env,
+        client_name="test-init",
+        capabilities={"supports_question": False, "supports_plan_mode": False},
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_owned_init_error_propagates_app_code_and_data():
+    """The exact wire shape Task 2 emits (`build_session_owned_error`):
+    JSON-RPC `error.code` is the int `-32005`, and the app-level string
+    discriminator plus ui_mode/busy live in `error.data`. `start()` must
+    surface THAT string as `.code` (not the flat `init_failed` every other
+    initialize failure gets) and carry `.data` through unchanged."""
+    runner = _init_runner(
+        mode="error",
+        error={
+            "code": -32005,
+            "message": "Session is owned by another view (wire, idle)",
+            "data": {"code": "session_owned", "ui_mode": "wire", "busy": False},
+        },
+    )
+    with pytest.raises(WireRunnerError) as exc:
+        await runner.start()
+    assert exc.value.code == "session_owned"
+    assert exc.value.message == "Session is owned by another view (wire, idle)"
+    assert exc.value.data == {"code": "session_owned", "ui_mode": "wire", "busy": False}
+
+
+@pytest.mark.asyncio
+async def test_generic_init_error_without_app_code_falls_back_to_init_failed():
+    """An initialize error with NO `data.code` (every JSON-RPC error other
+    than `session_owned` today) must still fall back to `init_failed` —
+    this is the "everything else stays today's flat error" half of the
+    contract, proven against a shape that ISN'T the timeout path."""
+    runner = _init_runner(mode="error", error={"code": -32001, "message": "llm not set"})
+    with pytest.raises(WireRunnerError) as exc:
+        await runner.start()
+    assert exc.value.code == "init_failed"
+    assert exc.value.message == "llm not set"
+    assert exc.value.data is None
+
+
+@pytest.mark.asyncio
+async def test_init_timeout_still_uses_init_failed(monkeypatch):
+    """A timeout (no `error` object at all — the child never answers) must
+    stay `init_failed`, unaffected by the new error-parsing branch, which
+    this exercises via a genuinely non-responding subprocess rather than a
+    mocked timeout."""
+    monkeypatch.setattr("sanad_terminal.wire_runner._INIT_TIMEOUT_SECONDS", 0.2)
+    runner = _init_runner(mode="hang")
+    with pytest.raises(WireRunnerError) as exc:
+        await runner.start()
+    assert exc.value.code == "init_failed"
+    assert exc.value.data is None
+
+
+@pytest.mark.asyncio
+async def test_architect_runner_start_unaffected_by_the_propagation_change():
+    """`ArchitectRunner` doesn't override `start()` — it inherits this
+    change verbatim. Proves BOTH the ordinary successful-start path AND the
+    error path still work exactly as `routes_architect.py`'s flat
+    `_err(503, exc.code, exc.message)` mapping needs (plain strings,
+    regardless of what `.code` now holds)."""
+    from sanad_terminal.architect_runner import ArchitectRunner
+
+    ok_runner = ArchitectRunner(
+        argv=(sys.executable, str(FAKE_INIT_WIRE)), cwd=Path.cwd(), env={"FAKE_INIT_MODE": "ok"}
+    )
+    await ok_runner.start()
+    try:
+        assert ok_runner.alive
+    finally:
+        await ok_runner.stop()
+
+    err_runner = ArchitectRunner(
+        argv=(sys.executable, str(FAKE_INIT_WIRE)),
+        cwd=Path.cwd(),
+        env={
+            "FAKE_INIT_MODE": "error",
+            "FAKE_INIT_ERROR_JSON": json.dumps({"code": -32603, "message": "boom"}),
+        },
+    )
+    with pytest.raises(WireRunnerError) as exc:
+        await err_runner.start()
+    assert exc.value.code == "init_failed"  # no data.code in this error → unchanged fallback
+    assert isinstance(exc.value.message, str)
+
+
+@pytest.mark.asyncio
+async def test_run_runner_start_unaffected_by_the_propagation_change():
+    """Same proof as above for `RunRunner` — the OTHER `WireRunner`
+    subclass that doesn't override `start()`, and whose route
+    (`routes_worker.py`) also maps `start()` failures with a flat
+    `_err(503, exc.code, exc.message)`."""
+    from sanad_terminal.run_runner import RunRunner
+
+    ok_runner = RunRunner(
+        run_id="r_000000000000",
+        argv=(sys.executable, str(FAKE_INIT_WIRE)),
+        cwd=Path.cwd(),
+        env={"FAKE_INIT_MODE": "ok"},
+        max_turn_seconds=60.0,
+        max_steps_per_turn=10,
+        max_tokens_per_run=1000,
+    )
+    await ok_runner.start()
+    try:
+        assert ok_runner.alive
+    finally:
+        await ok_runner.stop()
+
+    err_runner = RunRunner(
+        run_id="r_000000000001",
+        argv=(sys.executable, str(FAKE_INIT_WIRE)),
+        cwd=Path.cwd(),
+        env={
+            "FAKE_INIT_MODE": "error",
+            "FAKE_INIT_ERROR_JSON": json.dumps({"code": -32603, "message": "boom"}),
+        },
+        max_turn_seconds=60.0,
+        max_steps_per_turn=10,
+        max_tokens_per_run=1000,
+    )
+    with pytest.raises(WireRunnerError) as exc:
+        await err_runner.start()
+    assert exc.value.code == "init_failed"
+    assert exc.value.message == "boom"

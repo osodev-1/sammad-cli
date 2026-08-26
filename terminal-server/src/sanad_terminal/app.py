@@ -312,6 +312,12 @@ def create_app(
                     trusted_hashes=verified_trust_hashes(
                         user_dir / "workspace", resolved.trust_store_key
                     ),
+                    # P6b: this is the TUI's own spawn path (`sanad run`),
+                    # the other half of "one brain, two views" — without
+                    # this, a terminal session could never acquire/heartbeat
+                    # the session lease even when the panel side has it on,
+                    # breaking cooperative takeover from this side entirely.
+                    session_locks_enabled=resolved.session_locks_enabled,
                 )
                 spawn_uid: int | None = None
                 spawn_gid: int | None = None
@@ -331,7 +337,9 @@ def create_app(
                     argv = list(resolved.spawn_argv)
                     if manager.count_for(user_id, kind="agent") == 0:
                         resume_id = find_resumable_session(
-                            user_dir / "kimi-share", user_dir / "workspace"
+                            user_dir / "kimi-share",
+                            user_dir / "workspace",
+                            locks_enabled=resolved.session_locks_enabled,
                         )
                         if resume_id:
                             argv += ["--resume", resume_id]

@@ -14,6 +14,7 @@ credential (`workspace_root`).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -26,6 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from sanad_terminal import session_owner
 from sanad_terminal.coder_runner import (
     CONVERSATION_ID_RE,
     CoderRunner,
@@ -39,8 +41,9 @@ from sanad_terminal.coder_runner import (
 from sanad_terminal.control_plane import ControlPlaneError
 from sanad_terminal.git_ops import GitError, _checkpoint_ref
 from sanad_terminal.routes_workspace import _settings, workspace_root
+from sanad_terminal.settings import TerminalSettings
 from sanad_terminal.wire_runner import WireRunnerError
-from sanad_terminal.workspace import build_child_env, verified_trust_hashes
+from sanad_terminal.workspace import build_child_env, kimi_share_dir, verified_trust_hashes
 from sanad_terminal.workspace_lease import (
     is_revert_holder,
     lease_for,
@@ -67,6 +70,13 @@ Gated = Annotated[None, Depends(_gate)]
 
 class TicketBody(BaseModel):
     ticket: str = Field(min_length=1, max_length=256)
+    # P6b: request a cooperative steal of this conversation's session lease
+    # if it's owned by another view (idle only — decision 2 refuses a
+    # mid-turn takeover rather than queuing it). Meaningful only on `/open`
+    # (a fresh `/conversations` POST mints a brand-new cid that can never
+    # already have an owner); harmless no-op on `create` since that branch
+    # is simply never reached there.
+    takeover: bool = False
 
 
 class SendBody(BaseModel):
@@ -102,8 +112,14 @@ class RevertBody(BaseModel):
     turnId: str = Field(min_length=1, max_length=64)
 
 
-def _err(status: int, code: str, message: str) -> JSONResponse:
-    return JSONResponse(status_code=status, content={"error": {"code": code, "message": message}})
+def _err(status: int, code: str, message: str, **extra: Any) -> JSONResponse:
+    # `**extra` (P6b) merges straight into the `error` object — mirrors the
+    # existing `busy` 409's own `turnId` field (see `send()` below), never a
+    # new top-level sibling. Every pre-existing call site passes none, so
+    # this is purely additive.
+    return JSONResponse(
+        status_code=status, content={"error": {"code": code, "message": message, **extra}}
+    )
 
 
 def _bad_cid(cid: str) -> JSONResponse | None:
@@ -187,8 +203,88 @@ def _record_revert(root: Path, cid: str, marker: dict[str, Any]) -> None:
         logger.warning("coder revert: could not record marker for {}: {}", cid, exc)
 
 
+def _session_dir(root: Path, cid: str) -> Path:
+    """Where this conversation's `owner.json` lease file lives — `root` is
+    `<user_dir>/workspace`, matching every other `root.parent`-relative path
+    in this module (`_journal_dir` etc.)."""
+    return session_owner.session_dir_for(kimi_share_dir(root.parent), root, cid)
+
+
+def _owner_snapshot(root: Path, cid: str) -> dict[str, Any] | None:
+    """`GET /conversations`'s per-entry `owner` field. Caller (`conversations()`)
+    only invokes this when the gate is on — see `_session_dir`/`read_owner`,
+    neither of which self-gates (see `session_owner`'s module docstring)."""
+    owner = session_owner.read_owner(_session_dir(root, cid))
+    if owner is None:
+        return None
+    return {"uiMode": owner.ui_mode, "busy": owner.busy, "live": session_owner.is_live(owner)}
+
+
+async def _handle_session_owned(
+    settings: TerminalSettings,
+    root: Path,
+    cid: str,
+    runner: CoderRunner,
+    exc: WireRunnerError,
+    *,
+    takeover: bool,
+) -> JSONResponse | None:
+    """Maps a `session_owned` refusal from `runner.start()` to its HTTP
+    response, or — when `takeover` is set and the owner is IDLE — requests a
+    cooperative steal and retries the spawn for a bounded window.
+
+    Returns `None` when a retried `runner.start()` SUCCEEDED (the caller
+    falls through to the normal post-start path); returns a `JSONResponse`
+    for every refusal, including a timed-out takeover. `runner` is reused
+    across retries — `WireRunner.start()` already fully `stop()`s itself on
+    every failure path, so calling it again on the same instance is a plain,
+    safe respawn (P3's journal reconstruction is `__init__`-time only).
+    """
+    data = exc.data or {}
+    ui_mode = data.get("ui_mode")
+    busy = bool(data.get("busy"))
+
+    if not takeover:
+        return _err(409, "session_owned", exc.message, uiMode=ui_mode, busy=busy)
+    if busy:
+        # Decision 2 (P6B-DECISIONS.md): a mid-turn takeover is refused,
+        # never queued — no steal request, no wait. `session_busy` is a
+        # DISTINCT code from `session_owned` so the UI can tell "owned, can
+        # take over" from "mid-turn, cannot" without parsing `message`.
+        return _err(409, "session_busy", exc.message, uiMode=ui_mode, busy=busy)
+
+    session_owner.request_steal(_session_dir(root, cid), by=f"agentd:{cid}")
+
+    deadline = time.monotonic() + settings.coder_takeover_wait_seconds
+    while time.monotonic() < deadline:
+        await asyncio.sleep(settings.coder_takeover_poll_seconds)
+        try:
+            await runner.start()
+        except WireRunnerError as retry_exc:
+            if retry_exc.code != "session_owned":
+                await runner.stop()
+                return _err(503, retry_exc.code, retry_exc.message)
+            data = retry_exc.data or {}
+            ui_mode, busy = data.get("ui_mode"), bool(data.get("busy"))
+            if busy:
+                # The holder resumed a turn while we were waiting — same
+                # refuse-never-queue rule applies to the retry.
+                return _err(409, "session_busy", retry_exc.message, uiMode=ui_mode, busy=busy)
+            exc = retry_exc
+            continue
+        else:
+            return None  # started — fall through to the caller's success path
+    return _err(409, "session_owned", exc.message, uiMode=ui_mode, busy=busy)
+
+
 async def _spawn(
-    request: Request, root: Path, cid: str, ticket: str, *, seed_default: bool = False
+    request: Request,
+    root: Path,
+    cid: str,
+    ticket: str,
+    *,
+    seed_default: bool = False,
+    takeover: bool = False,
 ) -> JSONResponse | CoderRunner:
     settings = _settings(request)
     live = [r for r in list_conversations(root) if r.alive]
@@ -221,6 +317,7 @@ async def _spawn(
         cols=80,
         rows=24,
         trusted_hashes=verified_trust_hashes(root, settings.trust_store_key),
+        session_locks_enabled=settings.session_locks_enabled,
     )
     uid = gid = None
     if settings.agent_user:
@@ -253,8 +350,16 @@ async def _spawn(
     try:
         await runner.start()
     except WireRunnerError as exc:
-        await runner.stop()
-        return _err(503, exc.code, exc.message)
+        if exc.code == "session_owned":
+            refusal = await _handle_session_owned(
+                settings, root, cid, runner, exc, takeover=takeover
+            )
+            if refusal is not None:
+                return refusal
+            # else: the retried runner.start() succeeded — fall through.
+        else:
+            await runner.stop()
+            return _err(503, exc.code, exc.message)
     put_conversation(root, runner)
     if seed_default:
         # CREATE only — never on `open`, which resumes a session that may
@@ -271,20 +376,24 @@ async def _spawn(
 
 
 @router.get("/conversations")
-async def conversations(_: Gated, root: Root) -> JSONResponse:
-    return JSONResponse(
-        {
-            "conversations": [
-                {
-                    "conversationId": r.conversation_id,
-                    "alive": r.alive,
-                    "busy": r.busy,
-                    "turn": r.turn_summary(),
-                }
-                for r in list_conversations(root)
-            ]
+async def conversations(_: Gated, root: Root, request: Request) -> JSONResponse:
+    settings = _settings(request)
+    entries: list[dict[str, Any]] = []
+    for r in list_conversations(root):
+        entry: dict[str, Any] = {
+            "conversationId": r.conversation_id,
+            "alive": r.alive,
+            "busy": r.busy,
+            "turn": r.turn_summary(),
         }
-    )
+        # P6b — SESSION owner (per-conversation, on disk), NOT P6a's `lease`
+        # field (`/turn`'s per-WORKSPACE, in-RAM write-lease). Gate off:
+        # never touch `session_owner.py` at all, so this key doesn't even
+        # appear — byte-identical to today's response.
+        if settings.session_locks_enabled:
+            entry["owner"] = _owner_snapshot(root, r.conversation_id)
+        entries.append(entry)
+    return JSONResponse({"conversations": entries})
 
 
 @router.post("/conversations")
@@ -305,7 +414,7 @@ async def open_conversation(
     existing = get_conversation(root, cid)
     if existing is not None and existing.alive:
         return JSONResponse({"ok": True, "started": False})
-    result = await _spawn(request, root, cid, body.ticket)
+    result = await _spawn(request, root, cid, body.ticket, takeover=body.takeover)
     if isinstance(result, JSONResponse):
         return result
     return JSONResponse({"ok": True, "started": True})

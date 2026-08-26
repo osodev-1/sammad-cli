@@ -178,6 +178,36 @@ def test_write_lease_ttl_is_clamped_above_the_turn_budget(base_env):
     assert s.coder_write_lease_ttl_seconds > s.coder_max_turn_seconds
 
 
+def test_session_locks_default_off_and_parses_from_env(base_env):
+    """`SANAD_SESSION_LOCKS` (P6b) — default off, "1" the only truthy, SAME
+    var name `kimi_cli.sanad.session_lock.locks_enabled()` reads so agentd
+    and the CLI it spawns agree on whether the lease is active."""
+    assert TerminalSettings.load(env=base_env).session_locks_enabled is False
+    assert (
+        TerminalSettings.load(env={**base_env, "SANAD_SESSION_LOCKS": "1"}).session_locks_enabled
+        is True
+    )
+    assert (
+        TerminalSettings.load(env={**base_env, "SANAD_SESSION_LOCKS": "true"}).session_locks_enabled
+        is False
+    )
+
+
+def test_coder_takeover_wait_and_poll_defaults_and_parse(base_env):
+    s = TerminalSettings.load(env=base_env)
+    assert s.coder_takeover_wait_seconds == 15.0
+    assert s.coder_takeover_poll_seconds == 0.5
+    s = TerminalSettings.load(
+        env={
+            **base_env,
+            "CODER_TAKEOVER_WAIT_SECONDS": "20",
+            "CODER_TAKEOVER_POLL_SECONDS": "1",
+        }
+    )
+    assert s.coder_takeover_wait_seconds == 20.0
+    assert s.coder_takeover_poll_seconds == 1.0
+
+
 def test_write_lease_ttl_default_matches_the_lease_module_fallback(base_env):
     """The settings default and `workspace_lease`'s fallback constant are two
     independent literals; if they drift, a lease created before any settings
