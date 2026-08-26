@@ -126,8 +126,20 @@ describe("queueEntryLabel — P6a final-review hardening", () => {
   });
 
   it("still names a genuine conversation", () => {
+    // NOT `.toContain("conversation")` — the generic fallback ("waiting for
+    // another conversation") satisfies that too, so such an assertion would
+    // pass even if the guard wrongly rejected this id. Pin the exact label.
     expect(
       queueEntryLabel({ reason: "waiting_for_lease", blockedBy: "c_abcdef123456" }),
-    ).toContain("conversation");
+    ).toBe("waiting for conversation ef123456");
+  });
+
+  it("still names a conversation whose id is not exactly 12 hex chars", () => {
+    // The guard rejects sentinels, it does not validate id length — pinning
+    // the current length would silently degrade every real label if the id
+    // format ever changed.
+    expect(
+      queueEntryLabel({ reason: "waiting_for_lease", blockedBy: "c_1234567890abcdef" }),
+    ).toBe("waiting for conversation 90abcdef");
   });
 });
