@@ -244,6 +244,22 @@ export default function CoderPanel({
      directly — an inline arrow from the parent would give begin() a new
      identity on every parent render, re-arming startedRef's retry gate and
      firing a fresh ensureConversation() each time while phase is "error". */
+  /* Switching conversations remounts this panel (a bumped `key`), but React
+   * does NOT cancel the OLD instance's in-flight promises — and the parent
+   * setters below are stable, so they keep working after the old fiber is
+   * gone. Without this latch a stale `begin()` resolving after a switch
+   * writes the OLD conversation id back into the parent while the NEW
+   * conversation's transcript keeps accumulating, persisting a mismatched
+   * {conversationId: A, transcript: B}. `onPersist` already dodges this by
+   * notifying from an effect; these two call the parent directly, so they
+   * need the explicit guard. */
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const onConversationIdRef = useRef(onConversationId);
   onConversationIdRef.current = onConversationId;
   /* Same latest-value treatment for the interrupted-turn idempotency guard
@@ -326,7 +342,7 @@ export default function CoderPanel({
     const newCid = res.conversationId;
     cidRef.current = newCid;
     setCid(newCid);
-    onConversationIdRef.current?.(newCid);
+    if (mountedRef.current) onConversationIdRef.current?.(newCid);
 
     const state = await fetchCoderTurn(newCid, sessionId);
     if (
@@ -387,7 +403,7 @@ export default function CoderPanel({
         { ...msg, at },
       ]);
       lastInterruptedTurnIdRef.current = turnMeta.turnId;
-      onLastInterruptedTurnIdRef.current?.(turnMeta.turnId);
+      if (mountedRef.current) onLastInterruptedTurnIdRef.current?.(turnMeta.turnId);
       setPhase("ready");
       return "ready";
     }
