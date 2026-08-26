@@ -61,6 +61,30 @@ def test_stale_after_seconds_matches_kimi_side():
     assert STALE_AFTER_SECONDS == KIMI_STALE_AFTER_SECONDS
 
 
+def test_is_live_matches_kimi_side_is_live_at_the_boundary():
+    """M9 (review): pinning only the CONSTANT leaves the actual comparison
+    (`<` vs `<=`, or an added condition like a pid check) unpinned — a
+    kimi-side change there would stay green here. Compare
+    `session_owner.is_live` against the REAL `kimi_cli.sanad.session_lock.
+    is_live` directly, over the SAME timestamps, including exactly at the
+    staleness boundary where a `<`-vs-`<=` drift would first show up."""
+    from kimi_cli.sanad.session_lock import is_live as kimi_is_live
+
+    heartbeat_at = 1_000_000.0
+    ours = OwnerInfo(holder="wire:1", pid=1, ui_mode="wire", generation=1, heartbeat_at=heartbeat_at)
+    kimi_owner = KimiOwnerInfo(
+        holder="wire:1", pid=1, ui_mode="wire", generation=1, heartbeat_at=heartbeat_at
+    )
+
+    for now in (
+        heartbeat_at,  # elapsed 0
+        heartbeat_at + STALE_AFTER_SECONDS - 1,  # just inside
+        heartbeat_at + STALE_AFTER_SECONDS,  # EXACTLY at the boundary
+        heartbeat_at + STALE_AFTER_SECONDS + 1,  # just outside
+    ):
+        assert is_live(ours, now=now) == kimi_is_live(kimi_owner, now=now), now
+
+
 # -- parity: the digest rule (session_dir_for) --------------------------------
 
 

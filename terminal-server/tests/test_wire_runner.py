@@ -4,6 +4,7 @@ deny-by-default request hook, and the probe registry. No LLM, no FastAPI."""
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -794,10 +795,14 @@ async def test_concurrent_drain_calls_never_double_pop(tmp_path):
 # against a real subprocess round trip rather than mocking it.
 
 
-def _init_runner(*, mode: str = "ok", error: dict | None = None, **kwargs) -> WireRunner:
+def _init_runner(
+    *, mode: str = "ok", error: dict | None = None, null_id: bool = False, **kwargs
+) -> WireRunner:
     env = {"FAKE_INIT_MODE": mode}
     if error is not None:
         env["FAKE_INIT_ERROR_JSON"] = json.dumps(error)
+    if null_id:
+        env["FAKE_INIT_NULL_ID"] = "1"
     return WireRunner(
         argv=(sys.executable, str(FAKE_INIT_WIRE)),
         cwd=Path.cwd(),
@@ -831,6 +836,35 @@ async def test_session_owned_init_error_propagates_app_code_and_data():
 
 
 @pytest.mark.asyncio
+async def test_null_id_session_owned_error_still_correlates_to_the_lone_outstanding_request():
+    """Review Important 1: `kimi_cli.sanad.session_lease.refuse_wire_initialize`
+    answers with a NULL id whenever `parse_initialize_request_id` can't
+    recover a STRING id from our request (EOF, bad JSON, or a non-string
+    id) — the binding P6b contract is to correlate this to our one
+    outstanding request rather than silently dropping it. Before the fix,
+    `_dispatch` returned immediately on `raw_id is None`, so the pending
+    `initialize` future was left unresolved; the child then closes its
+    streams and exits right after answering this way (mirroring the real
+    CLI), which trips `_read_loop`'s EOF path and resolves the SAME future
+    with a flat `WireRunnerError("exited", "agent exited")` instead —
+    discarding the real `session_owned` payload and degrading every
+    takeover to an uninformative 503."""
+    runner = _init_runner(
+        mode="error",
+        null_id=True,
+        error={
+            "code": -32005,
+            "message": "Session is owned by another view (wire, idle)",
+            "data": {"code": "session_owned", "ui_mode": "wire", "busy": False},
+        },
+    )
+    with pytest.raises(WireRunnerError) as exc:
+        await runner.start()
+    assert exc.value.code == "session_owned"
+    assert exc.value.data == {"code": "session_owned", "ui_mode": "wire", "busy": False}
+
+
+@pytest.mark.asyncio
 async def test_generic_init_error_without_app_code_falls_back_to_init_failed():
     """An initialize error with NO `data.code` (every JSON-RPC error other
     than `session_owned` today) must still fall back to `init_failed` —
@@ -856,6 +890,25 @@ async def test_init_timeout_still_uses_init_failed(monkeypatch):
         await runner.start()
     assert exc.value.code == "init_failed"
     assert exc.value.data is None
+
+
+@pytest.mark.asyncio
+async def test_start_init_timeout_parameter_clamps_below_the_module_default():
+    """Important 2 (review): `routes_coder._handle_session_owned` clamps its
+    final takeover respawn to whatever remains of its own bounded window via
+    `start(init_timeout=...)`, rather than risking the full 30s module
+    default blowing that window by up to 2x. Proven directly here — no
+    module-constant monkeypatch — against a genuinely non-responding
+    subprocess, so a regression that ignores the parameter (falls back to
+    `_INIT_TIMEOUT_SECONDS`) would time THIS test out instead of silently
+    passing."""
+    runner = _init_runner(mode="hang")
+    start = time.monotonic()
+    with pytest.raises(WireRunnerError) as exc:
+        await asyncio.wait_for(runner.start(init_timeout=0.15), timeout=5.0)
+    elapsed = time.monotonic() - start
+    assert exc.value.code == "init_failed"
+    assert elapsed < 1.0  # nowhere near the 30s module default
 
 
 @pytest.mark.asyncio

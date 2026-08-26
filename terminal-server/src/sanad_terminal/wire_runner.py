@@ -200,8 +200,16 @@ class WireRunner:
     def idle_seconds(self) -> float:
         return time.monotonic() - self._last_activity
 
-    async def start(self) -> None:
-        """Spawn (if needed) and complete the initialize handshake. Idempotent."""
+    async def start(self, *, init_timeout: float | None = None) -> None:
+        """Spawn (if needed) and complete the initialize handshake. Idempotent.
+
+        `init_timeout` overrides `_INIT_TIMEOUT_SECONDS` for just this call's
+        handshake wait. `None` (every pre-P6b call site) keeps the module
+        default. P6b's takeover retry (`routes_coder._handle_session_owned`)
+        clamps this to whatever remains of its own bounded window, so a
+        single final respawn attempt can never blow that window by up to the
+        full 30s default on its own.
+        """
         async with self._start_lock:
             if self.alive:
                 return
@@ -233,7 +241,9 @@ class WireRunner:
                 }
             )
             try:
-                resp = await asyncio.wait_for(fut, timeout=_INIT_TIMEOUT_SECONDS)
+                resp = await asyncio.wait_for(
+                    fut, timeout=init_timeout if init_timeout is not None else _INIT_TIMEOUT_SECONDS
+                )
             except (TimeoutError, asyncio.CancelledError) as exc:
                 await self.stop()
                 raise WireRunnerError("init_failed", "agent did not initialize") from exc
@@ -734,6 +744,28 @@ class WireRunner:
         # Otherwise a response to one of our requests (initialize / prompt / cancel).
         raw_id = msg.get("id")
         if raw_id is None:
+            # A null id is normally unaddressable and dropped — but
+            # `kimi_cli.sanad.session_lease.refuse_wire_initialize` answers
+            # THIS way whenever `parse_initialize_request_id` couldn't
+            # recover a STRING id from our request (EOF, unparseable JSON,
+            # or — the id `_send` gives every request IS a string today,
+            # but nothing enforces that staying true — a non-string id).
+            # P6b's binding contract (Task 2 review): correlate this to "the
+            # error to my only outstanding request", not strictly by id.
+            # When exactly one request is outstanding, a null-id ERROR
+            # response can only be that request's answer — there is no
+            # other addressee it could mean, and leaving it to `_read_loop`'s
+            # EOF handler (the child exits right after answering this way)
+            # would instead resolve that same future with a flat
+            # `WireRunnerError("exited", ...)`, discarding the real
+            # `session_owned` payload entirely. Restricted to `error`
+            # responses (never a bare/malformed message) so this can't
+            # misattribute an unrelated null-id message as a false success.
+            if "error" in msg and len(self._pending) == 1:
+                ((only_mid, fut),) = self._pending.items()
+                self._pending.pop(only_mid, None)
+                if not fut.done():
+                    fut.set_result(msg)
             return
         try:
             mid = int(raw_id)

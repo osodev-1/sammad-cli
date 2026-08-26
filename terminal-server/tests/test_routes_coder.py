@@ -1806,11 +1806,34 @@ def test_open_genuine_crash_still_503s(client: TestClient, monkeypatch: pytest.M
 def test_open_with_takeover_against_a_busy_owner_returns_409_without_waiting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    root = _root_for(tmp_path)
+    cid = "c_" + "6" * 12
+    session_dir = session_owner.session_dir_for(kimi_share_dir(root.parent), root, cid)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    owner_path = session_dir / "owner.json"
+    owner_path.write_text(
+        json.dumps(
+            {
+                "holder": "shell:1",
+                "pid": 1,
+                "ui_mode": "shell",
+                "generation": 1,
+                "heartbeat_at": time.time(),
+                "steal_requested_by": None,
+                "busy": True,
+            }
+        )
+    )
+    poll_seconds = 0.5
+
     with _make_client(
-        tmp_path, enabled=True, coder_takeover_wait_seconds=5.0, coder_takeover_poll_seconds=0.5
+        tmp_path,
+        enabled=True,
+        coder_takeover_wait_seconds=5.0,
+        coder_takeover_poll_seconds=poll_seconds,
     ) as c:
 
-        async def fake_start(self):
+        async def fake_start(self, **kwargs):
             raise WireRunnerError(
                 "session_owned",
                 "owned, busy",
@@ -1819,7 +1842,6 @@ def test_open_with_takeover_against_a_busy_owner_returns_409_without_waiting(
 
         monkeypatch.setattr(CoderRunner, "start", fake_start)
 
-        cid = "c_" + "6" * 12
         started = time.monotonic()
         res = c.post(
             f"/internal/coder/conversations/{cid}/open",
@@ -1834,19 +1856,30 @@ def test_open_with_takeover_against_a_busy_owner_returns_409_without_waiting(
         assert body["uiMode"] == "shell"
         assert body["busy"] is True
         # Decision 2: a mid-turn takeover is refused, never queued — no
-        # steal, no wait. Well under the configured 5s window (and even a
-        # single 0.5s poll tick) proves this returned WITHOUT waiting.
-        assert elapsed < 1.0
+        # steal, no wait. Tighter than the 5s window: strictly under a
+        # SINGLE poll tick, which a "sleep once then check" implementation
+        # would also fail (M6).
+        assert elapsed < poll_seconds
+
+    # And no steal was ever requested — the busy check short-circuits
+    # before `request_steal` is even reachable.
+    recorded = json.loads(owner_path.read_text())
+    assert recorded["steal_requested_by"] is None
 
 
 def test_open_with_takeover_retries_and_succeeds_once_the_holder_releases(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """Important 2: the wait must POLL `owner.json` (cheap) rather than
+    re-spawn the CLI on every tick — proven here by asserting `start()` is
+    called exactly twice (the initial refusal, then ONE final respawn once
+    polling observes the owner is gone), never once per poll tick."""
     root = _root_for(tmp_path)
     cid = "c_" + "7" * 12
     session_dir = session_owner.session_dir_for(kimi_share_dir(root.parent), root, cid)
     session_dir.mkdir(parents=True, exist_ok=True)
-    (session_dir / "owner.json").write_text(
+    owner_path = session_dir / "owner.json"
+    owner_path.write_text(
         json.dumps(
             {
                 "holder": "wire:999",
@@ -1866,18 +1899,25 @@ def test_open_with_takeover_retries_and_succeeds_once_the_holder_releases(
         calls = {"n": 0}
         real_start = WireRunner.start
 
-        async def fake_start(self):
+        async def fake_start(self, **kwargs):
             calls["n"] += 1
-            if calls["n"] <= 2:
-                # Still owned, still idle — the holder hasn't stood down yet.
+            if calls["n"] == 1:
+                # The initial attempt from `_spawn` — still owned, idle.
                 raise WireRunnerError(
                     "session_owned",
                     "owned",
                     data={"code": "session_owned", "ui_mode": "wire", "busy": False},
                 )
-            await real_start(self)  # the holder released — a real spawn now succeeds
+            await real_start(self, **kwargs)  # the ONE respawn attempt — succeeds for real
 
         monkeypatch.setattr(CoderRunner, "start", fake_start)
+
+        # Simulate the holder standing down partway through the wait —
+        # `session_lock.release()` deletes `owner.json` outright. A plain
+        # deletion (rather than rewriting the record) can never race our
+        # own "still pending → re-request" write: `request_steal` is a
+        # documented no-op once there is no live owner to read back.
+        threading.Timer(0.08, owner_path.unlink).start()
 
         res = c.post(
             f"/internal/coder/conversations/{cid}/open",
@@ -1886,28 +1926,45 @@ def test_open_with_takeover_retries_and_succeeds_once_the_holder_releases(
         )
         assert res.status_code == 200, res.text
         assert res.json() == {"ok": True, "started": True}
-        # The initial attempt plus at least one genuine retry before success
-        # — proves this actually waited/retried rather than getting lucky
-        # on the very first call.
-        assert calls["n"] >= 3
-
-    # And a steal request was genuinely written for the holder to observe
-    # on its next heartbeat — the SAME file a real CLI's `heartbeat()` reads.
-    recorded = json.loads((session_dir / "owner.json").read_text())
-    assert recorded["steal_requested_by"] == f"agentd:{cid}"
+        assert calls["n"] == 2
 
 
-def test_open_with_takeover_times_out_if_the_holder_never_releases(
+def test_open_with_takeover_detects_a_refused_steal_promptly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """No retry ever succeeds within the bounded window → still 409
-    `session_owned` (not `session_busy` — the owner stayed idle the whole
-    time, it just never actually stood down)."""
+    """The signal Tasks 1-2 built specifically for this: `steal_requested_by`
+    CLEARED while the owner record PERSISTS — never `busy` alone, which the
+    holder's own refuse-and-reacquire transiently resets too. Detected on
+    the very next poll tick, well inside the window — not after the full
+    wait, and not silently reported as a plain `session_owned` timeout."""
+    root = _root_for(tmp_path)
+    cid = "c_" + "9" * 12
+    session_dir = session_owner.session_dir_for(kimi_share_dir(root.parent), root, cid)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    owner_path = session_dir / "owner.json"
+
+    def _write_owner(*, steal_requested_by: str | None, busy: bool) -> None:
+        owner_path.write_text(
+            json.dumps(
+                {
+                    "holder": "wire:999",
+                    "pid": 999,
+                    "ui_mode": "wire",
+                    "generation": 1,
+                    "heartbeat_at": time.time(),
+                    "steal_requested_by": steal_requested_by,
+                    "busy": busy,
+                }
+            )
+        )
+
+    _write_owner(steal_requested_by=None, busy=False)
+
     with _make_client(
-        tmp_path, enabled=True, coder_takeover_wait_seconds=0.1, coder_takeover_poll_seconds=0.02
+        tmp_path, enabled=True, coder_takeover_wait_seconds=5.0, coder_takeover_poll_seconds=0.02
     ) as c:
 
-        async def fake_start(self):
+        async def fake_start(self, **kwargs):
             raise WireRunnerError(
                 "session_owned",
                 "owned",
@@ -1916,14 +1973,109 @@ def test_open_with_takeover_times_out_if_the_holder_never_releases(
 
         monkeypatch.setattr(CoderRunner, "start", fake_start)
 
-        cid = "c_" + "8" * 12
+        # Repeatedly (not a one-shot write) re-assert the REFUSED state
+        # after a short delay — simulating the holder's own heartbeat
+        # clearing our request because it went busy. Repeating rather than
+        # writing once means this can never lose a race against our own
+        # "still pending → re-request" write (M3): even if one tick's
+        # re-request clobbers it, the next repeat wins within ~10ms.
+        stop = threading.Event()
+
+        def _refuse_repeatedly() -> None:
+            time.sleep(0.05)
+            while not stop.is_set():
+                _write_owner(steal_requested_by=None, busy=True)
+                time.sleep(0.01)
+
+        thread = threading.Thread(target=_refuse_repeatedly, daemon=True)
+        thread.start()
+        try:
+            started = time.monotonic()
+            res = c.post(
+                f"/internal/coder/conversations/{cid}/open",
+                headers=HEADERS,
+                json={"ticket": "tt_good", "takeover": True},
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            stop.set()
+            thread.join(timeout=1.0)
+
+        assert res.status_code == 409, res.text
+        body = res.json()["error"]
+        assert body["code"] == "session_busy"
+        assert body["uiMode"] == "wire"
+        assert body["busy"] is True
+        # Well inside the 5s window — a real timeout would take ~5s.
+        assert elapsed < 2.0
+
+
+def test_open_with_takeover_times_out_if_the_holder_never_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The owner stays live, idle, and pending — steal never accepted NOR
+    refused within the bounded window → still 409 `session_owned` (not
+    `session_busy`: nothing ever actually refused it, it just never
+    arrived in time). Also proves the deadline is honoured AND that no
+    doomed final respawn is attempted (Important 2): once the poll's own
+    last `read_owner` already shows the owner still live/pending, another
+    real spawn would just be refused again — it must not be attempted."""
+    root = _root_for(tmp_path)
+    cid = "c_" + "8" * 12
+    session_dir = session_owner.session_dir_for(kimi_share_dir(root.parent), root, cid)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "owner.json").write_text(
+        json.dumps(
+            {
+                "holder": "wire:999",
+                "pid": 999,
+                "ui_mode": "wire",
+                "generation": 1,
+                "heartbeat_at": time.time(),
+                "steal_requested_by": None,
+                "busy": False,
+            }
+        )
+    )
+    wait_seconds = 0.15
+
+    with _make_client(
+        tmp_path,
+        enabled=True,
+        coder_takeover_wait_seconds=wait_seconds,
+        coder_takeover_poll_seconds=0.03,
+    ) as c:
+        calls = {"n": 0}
+
+        async def fake_start(self, **kwargs):
+            calls["n"] += 1
+            raise WireRunnerError(
+                "session_owned",
+                "owned",
+                data={"code": "session_owned", "ui_mode": "wire", "busy": False},
+            )
+
+        monkeypatch.setattr(CoderRunner, "start", fake_start)
+
+        started = time.monotonic()
         res = c.post(
             f"/internal/coder/conversations/{cid}/open",
             headers=HEADERS,
             json={"ticket": "tt_good", "takeover": True},
         )
+        elapsed = time.monotonic() - started
+
         assert res.status_code == 409, res.text
         assert res.json()["error"]["code"] == "session_owned"
+        # Exactly ONE attempt total: `_spawn`'s own initial call. The poll
+        # loop's last `read_owner` still showed the SAME live, pending
+        # owner, so no final respawn is attempted at all — never one per
+        # poll tick (there would be ~5 ticks in this window), and not even
+        # a single doomed one at the deadline.
+        assert calls["n"] == 1
+        # The overall budget is honoured — nowhere near a 30s-timeout-driven
+        # overrun off an unclamped (or wastefully repeated) final spawn.
+        assert elapsed < 2.0
 
 
 def test_conversations_listing_has_no_owner_key_when_gate_is_off(client: TestClient):
