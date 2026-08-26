@@ -89,16 +89,41 @@ async def test_shell_start_lease_heartbeat_is_a_noop_when_lease_state_unset(soul
 
 
 @pytest.mark.asyncio
-async def test_shell_run_gate_off_leaves_lease_state_unset(
+async def test_shell_run_gate_off_never_touches_the_lease_at_all(
     monkeypatch: pytest.MonkeyPatch, soul: KimiSoul
 ):
-    """Review fix (M11): the previous test above only proves the guard
-    inside `_start_lease_heartbeat` on a hand-built `Shell` — not that
-    `run()`'s own lease-state computation actually stays gated on
-    `locks_enabled()`. This drives the real single-command `run()` path
-    (with `run_soul_command` stubbed out — its own soul-driving internals
-    are unrelated to the lease) and checks the wiring end to end."""
+    """Gate off ⇒ `run()` must never reach the lease layer AT ALL.
+
+    The previous version of this test asserted `_lease_session_dir is None`
+    and `_background_tasks == set()` AFTER `run()` returned — which the
+    `finally` clears unconditionally, so it passed even with the
+    `locks_enabled()` guard deleted (re-review caught it; verified by
+    sabotage). Assert on the thing the `finally` cannot erase instead:
+    that no lease entry point is ever CALLED. This ships in every local
+    `sanad` install, so "the gate is off" has to mean untouched, not
+    tidied-up-afterwards.
+    """
     monkeypatch.delenv("SANAD_SESSION_LOCKS", raising=False)
+
+    called: list[str] = []
+
+    def _forbidden(name: str):
+        def _fail(*_args: object, **_kwargs: object):
+            called.append(name)
+            raise AssertionError(f"{name} must not be called with the gate off")
+
+        return _fail
+
+    # Patch the names WHERE THE SHELL BOUND THEM. `ui.shell` does
+    # `from ...session_lock import try_acquire, ...`, so those are module-level
+    # names in `ui.shell`; patching `session_lock.try_acquire` would leave the
+    # already-bound references untouched and this test would pass for the wrong
+    # reason — the exact trap the version this replaces fell into.
+    import kimi_cli.ui.shell as shell_mod
+
+    for entry in ("try_acquire", "heartbeat", "release", "read_owner"):
+        monkeypatch.setattr(shell_mod, entry, _forbidden(entry))
+
     shell = Shell(soul)
 
     async def _fake_run_soul_command(user_input: object) -> bool:
@@ -109,9 +134,11 @@ async def test_shell_run_gate_off_leaves_lease_state_unset(
     result = await shell.run(command="hi")
 
     assert result is True
+    assert called == [], f"gate-off run touched the lease layer: {called}"
+    # Belt-and-braces: the post-run state the old test checked, kept as a
+    # secondary signal rather than the primary one.
     assert shell._lease_session_dir is None
     assert shell._lease_holder is None
-    assert shell._background_tasks == set()
 
 
 @pytest.mark.asyncio
