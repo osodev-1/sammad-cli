@@ -37,6 +37,27 @@ class SwitchToVis(Exception):
         self.session_id = session_id
 
 
+class SessionOwned(Exception):
+    """A LIVE foreign view holds this session's lease (P6b).
+
+    Raised by the shell when its start-of-run re-acquire finds another view
+    (a panel `--wire` process, another TUI) already holding the session. The
+    refusal message has already been printed at the raise site; this carries
+    no payload and exists purely so the CLI can map the outcome to
+    `ExitCode.SESSION_OWNED` rather than a generic `ExitCode.FAILURE`.
+
+    That distinction is load-bearing, not cosmetic: `_post_run` deletes any
+    session it considers empty, and a session held by a *live* foreign view
+    is routinely "empty" from this process's point of view (the other view
+    just created it, or this process never loaded its content). Reporting
+    this refusal as `FAILURE` would rmtree the foreign holder's `owner.json`
+    and session state out from under it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("session_owned")
+
+
 cli = typer.Typer(
     cls=LazySubcommandGroup,
     epilog="""\b\
@@ -749,8 +770,19 @@ def kimi(
             try:
                 match ui:
                     case "shell":
-                        shell_ok = await instance.run_shell(prompt, prefill_text=prefill_text)
-                        exit_code = ExitCode.SUCCESS if shell_ok else ExitCode.FAILURE
+                        try:
+                            shell_ok = await instance.run_shell(prompt, prefill_text=prefill_text)
+                        except SessionOwned:
+                            # A live foreign view seized the lease between
+                            # this process's own acquire above and the
+                            # shell's start-of-run re-acquire. Mirror the
+                            # cli-level refusal exactly: clear
+                            # `_latest_created_session` so `_reload_loop`'s
+                            # crash cleanup can never act on it either.
+                            _latest_created_session = None
+                            exit_code = ExitCode.SESSION_OWNED
+                        else:
+                            exit_code = ExitCode.SUCCESS if shell_ok else ExitCode.FAILURE
                     case "print":
                         exit_code = await instance.run_print(
                             input_format or "text",

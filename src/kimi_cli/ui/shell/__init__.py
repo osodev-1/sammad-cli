@@ -475,7 +475,15 @@ class Shell:
             if not reacquired.ok:
                 assert reacquired.owner is not None
                 console.print(f"[red]{build_shell_refusal_message(reacquired.owner)}[/red]")
-                return False
+                # NOT `return False`: that becomes `ExitCode.FAILURE`, which
+                # `_post_run` treats as an ordinary failed run and follows
+                # with its empty-session cleanup — rmtree-ing the session
+                # directory of the LIVE foreign view that just refused us.
+                # `SessionOwned` maps to `ExitCode.SESSION_OWNED`, the one
+                # code `_post_run` knows to leave completely alone.
+                from kimi_cli.cli import SessionOwned
+
+                raise SessionOwned
             self._lease_session_dir = session_dir
             self._lease_holder = lease_holder
             self._lease_generation = (

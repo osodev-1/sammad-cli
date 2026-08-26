@@ -45,7 +45,9 @@ def test_holder_id_distinguishes_ui_modes_for_the_same_process():
 def _result(
     *, still_ours: bool, steal_requested_by: str | None = None, reason=None
 ) -> HeartbeatResult:
-    return HeartbeatResult(still_ours=still_ours, steal_requested_by=steal_requested_by, reason=reason)
+    return HeartbeatResult(
+        still_ours=still_ours, steal_requested_by=steal_requested_by, reason=reason
+    )
 
 
 def test_taken_stands_down_even_if_we_are_busy():

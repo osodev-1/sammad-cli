@@ -215,9 +215,17 @@ async def test_shell_run_refuses_to_start_when_try_acquire_finds_a_live_foreign_
 
     monkeypatch.setattr(shell, "run_soul_command", _fake_run_soul_command)
 
-    result = await shell.run(command="hi")
+    # Must RAISE `SessionOwned`, not return False. A bare `False` becomes
+    # `ExitCode.FAILURE`, which `_post_run` follows with its empty-session
+    # cleanup — rmtree-ing the LIVE foreign holder's session directory. The
+    # CLI-level consequence is pinned by
+    # `test_a_shell_refusal_must_not_delete_the_live_foreign_holders_session`
+    # in `test_cli_session_lease.py`; this half pins the raise itself.
+    from kimi_cli.cli import SessionOwned
 
-    assert result is False
+    with pytest.raises(SessionOwned):
+        await shell.run(command="hi")
+
     assert called is False  # never even reached the command
     # The foreign holder's own lease is untouched by our refused attempt.
     owner = sl.read_owner(session_dir)
