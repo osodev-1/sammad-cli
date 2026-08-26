@@ -17,6 +17,7 @@ lease's own fail-open/atomicity guarantees.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
@@ -25,6 +26,7 @@ import uuid
 from enum import Enum
 from typing import TYPE_CHECKING, cast
 
+from kimi_cli.utils.logging import logger
 from kimi_cli.wire.jsonrpc import (
     ErrorCodes,
     JSONRPCErrorObject,
@@ -203,6 +205,12 @@ def build_session_owned_error(
     return JSONRPCErrorResponseNullableID(id=None, error=error)
 
 
+REFUSE_WIRE_INITIALIZE_READ_TIMEOUT_SECONDS = 5.0
+"""How long to wait for the client's first line before giving up and
+answering with a null-id error anyway (review fix M6) — without this, a
+parent that never sends `initialize` would hang this process forever."""
+
+
 async def refuse_wire_initialize(owner: OwnerInfo) -> None:
     """Speak just enough wire protocol to refuse a competing agentd child.
 
@@ -219,22 +227,39 @@ async def refuse_wire_initialize(owner: OwnerInfo) -> None:
     than at module level so that a shell-mode refusal (which never calls
     this function) does not pull in `kimi_cli.wire.server`'s much heavier
     dependency chain (soul, approval_runtime, kosong chat providers, ...).
+
+    Best-effort, by construction: this function must NEVER raise. The
+    refusal is a courtesy to a client that may have already gone away (a
+    `BrokenPipeError`/`ConnectionResetError` from a parent that closed the
+    pipe is entirely expected), and `cli/__init__.py` does not wrap this
+    call — an exception here previously propagated out of `_run()`
+    (review fix Important 2, together with moving `_latest_created_session`'s
+    assignment) risking `_reload_loop`'s crash-cleanup path treating a
+    session we never actually held as our own to delete.
     """
     import acp  # type: ignore[reportMissingTypeStubs]
 
     from kimi_cli.wire.server import STDIO_BUFFER_LIMIT
 
-    reader, writer = await acp.stdio_streams(limit=STDIO_BUFFER_LIMIT)
     try:
-        raw_line = await reader.readline()
+        reader, writer = await acp.stdio_streams(limit=STDIO_BUFFER_LIMIT)
     except Exception:
-        raw_line = b""
-    request_id = parse_initialize_request_id(raw_line)
-    response = build_session_owned_error(owner, request_id)
+        logger.debug("refuse_wire_initialize: could not open stdio streams")
+        return
+
     try:
-        writer.write(response.model_dump_json().encode("utf-8") + b"\n")
-        await writer.drain()
+        raw_line = b""
+        with contextlib.suppress(Exception):
+            raw_line = await asyncio.wait_for(
+                reader.readline(), timeout=REFUSE_WIRE_INITIALIZE_READ_TIMEOUT_SECONDS
+            )
+        request_id = parse_initialize_request_id(raw_line)
+        response = build_session_owned_error(owner, request_id)
+        with contextlib.suppress(Exception):
+            writer.write(response.model_dump_json().encode("utf-8") + b"\n")
+            await writer.drain()
     finally:
-        writer.close()
+        with contextlib.suppress(Exception):
+            writer.close()
         with contextlib.suppress(Exception):
             await writer.wait_closed()

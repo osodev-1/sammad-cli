@@ -319,73 +319,93 @@ class WireServer:
             self._dispatch_tasks.add(task)
 
     async def _shutdown(self) -> None:
-        for request in self._pending_requests.values():
-            if request.resolved:
-                continue
-            match request:
-                case ApprovalRequest():
-                    if request.source_kind == "foreground_turn":
-                        request.resolve("reject")
-                        if self._approval_runtime is not None:
-                            self._approval_runtime.resolve(request.id, "reject")
-                case ToolCallRequest():
-                    request.resolve(
-                        ToolError(
-                            message="Wire connection closed before tool result was received.",
-                            brief="Wire closed",
+        # Review fix (Important 3): the lease cancel+release now lives in
+        # this `finally`, so it ALWAYS runs — even if something above it
+        # raises (e.g. `_write_task`; see the broadened suppress below,
+        # which already prevents the most likely case, but the `finally`
+        # is the actual guarantee, not that suppress). Without this, an
+        # abruptly-disconnected client could leak `owner.json` for up to
+        # `STALE_AFTER_SECONDS`, with the user told "already open in the
+        # browser" the whole time. Placing the lease code in `finally`
+        # ALSO means that on the normal (non-exceptional) path it runs
+        # right after `asyncio.gather(*self._dispatch_tasks, ...)` below —
+        # i.e. after a cancelled in-flight turn has actually finished
+        # unwinding/flushing, not while it's still in progress, so a
+        # successor can't acquire and start writing into the same
+        # `context.jsonl`/`state.json` this process hasn't finished with.
+        try:
+            for request in self._pending_requests.values():
+                if request.resolved:
+                    continue
+                match request:
+                    case ApprovalRequest():
+                        if request.source_kind == "foreground_turn":
+                            request.resolve("reject")
+                            if self._approval_runtime is not None:
+                                self._approval_runtime.resolve(request.id, "reject")
+                    case ToolCallRequest():
+                        request.resolve(
+                            ToolError(
+                                message="Wire connection closed before tool result was received.",
+                                brief="Wire closed",
+                            )
                         )
-                    )
-                case QuestionRequest():
-                    request.resolve({})
-                case HookRequest():
-                    request.resolve("allow")
-        self._pending_requests.clear()
+                    case QuestionRequest():
+                        request.resolve({})
+                    case HookRequest():
+                        request.resolve("allow")
+            self._pending_requests.clear()
 
-        if self._cancel_event is not None:
-            self._cancel_event.set()
-            self._cancel_event = None
+            if self._cancel_event is not None:
+                self._cancel_event.set()
+                self._cancel_event = None
 
-        self._write_queue.shutdown()
-        if self._write_task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._write_task
+            self._write_queue.shutdown()
+            if self._write_task is not None:
+                # Review fix (Important 3): `_write_loop` re-raises real
+                # exceptions after logging them (e.g. a broken pipe on
+                # `drain()`) — suppressing only `CancelledError` here let
+                # that exception propagate out of `_shutdown()` and skip
+                # everything below (root hub cleanup, the dispatch gather,
+                # and — before this fix — the lease release). Already
+                # logged inside `_write_loop`; nothing is lost by not
+                # re-raising it a second time here.
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await self._write_task
 
-        if self._root_hub_task is not None:
-            self._root_hub_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._root_hub_task
-            self._root_hub_task = None
-        if (
-            isinstance(self._soul, KimiSoul)
-            and self._root_hub_queue is not None
-            and self._soul.runtime.root_wire_hub is not None
-        ):
-            self._soul.runtime.root_wire_hub.unsubscribe(self._root_hub_queue)
-            self._root_hub_queue = None
+            if self._root_hub_task is not None:
+                self._root_hub_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._root_hub_task
+                self._root_hub_task = None
+            if (
+                isinstance(self._soul, KimiSoul)
+                and self._root_hub_queue is not None
+                and self._soul.runtime.root_wire_hub is not None
+            ):
+                self._soul.runtime.root_wire_hub.unsubscribe(self._root_hub_queue)
+                self._root_hub_queue = None
 
-        # P6b: session lease. Cancel the heartbeat task FIRST — it is the
-        # only other caller of `try_acquire` in this process (the
-        # REFUSE_STEAL self-reacquire below) — so no acquire can possibly
-        # race the release that follows. Covers every exit path of
-        # `serve()` (normal EOF, SIGINT, an exception, or a stand-down that
-        # already set `self._stop_event` itself): `serve()`'s try/finally
-        # always reaches `_shutdown()`.
-        if self._lease_task is not None:
-            self._lease_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._lease_task
-            self._lease_task = None
-        if self._lease_session_dir is not None and self._lease_holder is not None:
-            release(
-                self._lease_session_dir,
-                holder=self._lease_holder,
-                generation=self._lease_generation,
-            )
-            self._lease_session_dir = None
-            self._lease_holder = None
-
-        await asyncio.gather(*self._dispatch_tasks, return_exceptions=True)
-        self._dispatch_tasks.clear()
+            await asyncio.gather(*self._dispatch_tasks, return_exceptions=True)
+            self._dispatch_tasks.clear()
+        finally:
+            # P6b: session lease. Cancel the heartbeat task FIRST — it is
+            # the only other caller of `try_acquire` in this process (the
+            # REFUSE_STEAL self-reacquire below) — so no acquire can
+            # possibly race the release that follows.
+            if self._lease_task is not None:
+                self._lease_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._lease_task
+                self._lease_task = None
+            if self._lease_session_dir is not None and self._lease_holder is not None:
+                release(
+                    self._lease_session_dir,
+                    holder=self._lease_holder,
+                    generation=self._lease_generation,
+                )
+                self._lease_session_dir = None
+                self._lease_holder = None
 
         if self._writer is not None:
             self._writer.close()
@@ -449,11 +469,22 @@ class WireServer:
             # so the taker learns it was refused instead of hanging on a
             # steal that will never be granted.
             reacquired = try_acquire(session_dir, holder=holder, ui_mode="wire")
-            if reacquired.owner is not None:
-                self._lease_generation = reacquired.owner.generation
-        elif action is HeartbeatAction.STAND_DOWN:
-            # Either genuinely lost the lease, or a cooperative steal
-            # request landed while idle.
+            if reacquired.ok:
+                if reacquired.owner is not None:
+                    self._lease_generation = reacquired.owner.generation
+            else:
+                # Review fix (M10): between `heartbeat()`'s read/write
+                # above and this self-reacquire, someone else genuinely
+                # seized the lease — `try_acquire` only ever refuses a
+                # self-reacquire when a LIVE, DIFFERENT holder is now on
+                # record. Treat this exactly like STAND_DOWN instead of
+                # tracking the OTHER holder's generation.
+                action = HeartbeatAction.STAND_DOWN
+
+        if action is HeartbeatAction.STAND_DOWN:
+            # Either genuinely lost the lease, a cooperative steal request
+            # landed while idle, or the REFUSE_STEAL branch just
+            # discovered (above) that it was actually already too late.
             logger.warning(
                 "Session lease lost/reclaimed for {dir}; wire view standing down",
                 dir=session_dir,

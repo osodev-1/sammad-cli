@@ -132,3 +132,39 @@ def test_taken_over_by_a_stale_seizure_stands_down_unconditionally(session_dir: 
     assert result.still_ours is False
     assert result.reason == "taken"
     assert sla.decide_heartbeat_action(result, busy=True) is sla.HeartbeatAction.STAND_DOWN
+
+
+def test_vanished_owner_continues_and_leaves_nothing_to_release(session_dir: Path):
+    """Review fix (M11): `owner.json` going missing out from under a live
+    holder (corrupt file, external deletion, unreadable) must NOT be
+    treated as an eviction — `heartbeat()` reports `reason="vanished"`
+    fail-open by design (Task 1), and `decide_heartbeat_action` must
+    CONTINUE, never STAND_DOWN, for it. Also pins that nothing is left for
+    a caller to release afterward: a `release()` call using the holder we
+    "lost" is correctly a no-op (there is genuinely no owner record to
+    guard against), since `read_owner` already returns None."""
+    holder = sla.holder_id("shell")
+    acquired = sl.try_acquire(session_dir, holder=holder, ui_mode="shell")
+    assert acquired.ok
+    assert acquired.owner is not None
+
+    (session_dir / sl.OWNER_FILE_NAME).unlink()
+    assert sl.read_owner(session_dir) is None
+
+    result = sl.heartbeat(session_dir, holder=holder, busy=False)
+    assert result.still_ours is False
+    assert result.reason == "vanished"
+    assert sla.decide_heartbeat_action(result, busy=False) is sla.HeartbeatAction.CONTINUE
+
+    # No release happens on CONTINUE (the caller only releases on
+    # STAND_DOWN) — but even if it were called, it's correctly a no-op:
+    # there's nothing on disk to protect a successor from.
+    sl.release(session_dir, holder=holder, generation=acquired.owner.generation)
+    assert sl.read_owner(session_dir) is None
+
+    # A fresh acquire after "vanishing" succeeds cleanly (self-healing on
+    # the NEXT deliberate acquire, not inside heartbeat() itself).
+    reacquired = sl.try_acquire(session_dir, holder=holder, ui_mode="shell")
+    assert reacquired.ok
+    assert reacquired.owner is not None
+    assert reacquired.owner.generation == 1  # no prior record => counter restarts
