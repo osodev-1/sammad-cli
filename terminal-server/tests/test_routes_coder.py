@@ -1900,15 +1900,22 @@ def test_open_with_takeover_retries_and_succeeds_once_the_holder_releases(
         real_start = WireRunner.start
 
         async def fake_start(self, **kwargs):
+            # Model REALITY, not a call counter: the CLI refuses for as long
+            # as the lease is actually held, and only succeeds once it is
+            # free. Keying on `calls["n"] == 1` instead (the previous
+            # version of this test) made the assertion undiscriminating —
+            # a blind per-tick respawn also reaches call #2 on its very
+            # first retry, so both designs converged and the test passed
+            # against the unfixed code. Re-review caught that by executing
+            # it against a reconstructed pre-fix loop.
             calls["n"] += 1
-            if calls["n"] == 1:
-                # The initial attempt from `_spawn` — still owned, idle.
+            if owner_path.exists():
                 raise WireRunnerError(
                     "session_owned",
                     "owned",
                     data={"code": "session_owned", "ui_mode": "wire", "busy": False},
                 )
-            await real_start(self, **kwargs)  # the ONE respawn attempt — succeeds for real
+            await real_start(self, **kwargs)  # the ONE respawn, once genuinely free
 
         monkeypatch.setattr(CoderRunner, "start", fake_start)
 
@@ -1926,7 +1933,11 @@ def test_open_with_takeover_retries_and_succeeds_once_the_holder_releases(
         )
         assert res.status_code == 200, res.text
         assert res.json() == {"ok": True, "started": True}
-        assert calls["n"] == 2
+        # Exactly two: the initial refusal, then ONE respawn after polling
+        # observed the owner had gone. A blind per-tick respawn would have
+        # burned an attempt on every 0.02s tick of the ~0.08s hold and
+        # landed well above 2.
+        assert calls["n"] == 2, f"expected one respawn after polling, got {calls['n']} attempts"
 
 
 def test_open_with_takeover_detects_a_refused_steal_promptly(
