@@ -16,6 +16,7 @@ from sanad_terminal import coder_runner, routes_blueprint
 from sanad_terminal.app import create_app
 from sanad_terminal.control_plane import ControlPlaneClient
 from sanad_terminal.settings import TerminalSettings
+from sanad_terminal.workspace_lease import REVERT_HOLDER, lease_for
 from sanad_terminal.workspace_locks import lock_for
 from starlette.testclient import TestClient
 
@@ -1449,3 +1450,199 @@ def test_revert_does_not_touch_the_blueprint_trust_store(client: TestClient, tmp
     )
     assert revert_res.status_code == 200, revert_res.text
     assert trust_path.read_text(encoding="utf-8") == '{"sentinel": true}\n'
+
+
+# -- P6a Task 3: the write-lease at the HTTP surface ------------------------
+# The centrepiece is the TOCTOU regression. P5's revert snapshot-checked
+# `any(r.busy ...)` and only THEN took `lock_for(root)`, while `/send` took
+# no lock at all — so a turn could begin in the gap and its file writes would
+# race `restore_to`'s `checkout-index`. Revert now ACQUIRES the same lease
+# `start_turn` requires, so there is no window to race through.
+
+
+@_needs_git
+def test_send_cannot_start_a_turn_while_a_revert_holds_the_lease(
+    client: TestClient, tmp_path: Path
+):
+    """THE TOCTOU REGRESSION. Holding the lease as a revert does, a `/send`
+    must NOT be able to start a turn — it queues instead. Under the old
+    snapshot-check implementation nothing stopped `start_turn` here, which
+    is exactly how a turn could write files underneath a running restore."""
+    root = _root_for(tmp_path)
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    _seed_repo(root)
+
+    # Take the lease exactly as the revert route does, and hold it across
+    # the send — standing in for the window the revert occupies.
+    lease = lease_for(root)
+    assert lease.try_acquire(REVERT_HOLDER) is True
+    try:
+        res = client.post(
+            f"/internal/coder/conversations/{cid}/send",
+            headers=HEADERS,
+            json={"input": "WRITEFILE:during_revert.txt:nope\n", "sendId": "m1"},
+        )
+        # Queued, not started, and NOT an error the client has to special-case.
+        assert res.status_code == 202, res.text
+        body = res.json()
+        assert body["ok"] is True and body["queued"] is True
+
+        turn = client.get(
+            f"/internal/coder/conversations/{cid}/turn", headers=HEADERS
+        ).json()
+        assert turn.get("turn") is None, "a turn started while a revert held the lease"
+        assert turn["queue"][0]["sendId"] == "m1"
+        assert turn["queue"][0]["reason"] == "waiting_for_lease"
+        # The file the queued turn would have written must not exist yet.
+        assert not (root / "during_revert.txt").exists()
+    finally:
+        lease.release(REVERT_HOLDER)
+
+
+@_needs_git
+def test_revert_releases_the_lease_on_success(client: TestClient, tmp_path: Path):
+    root = _root_for(tmp_path)
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    _seed_repo(root)
+    turn = client.post(
+        f"/internal/coder/conversations/{cid}/send",
+        headers=HEADERS,
+        json={"input": "WRITEFILE:a.txt:one\n", "sendId": "m1"},
+    )
+    turn_id = _lines(turn.text)[0]["turnId"]
+
+    res = client.post(
+        f"/internal/coder/conversations/{cid}/revert",
+        headers=HEADERS,
+        json={"turnId": turn_id},
+    )
+    assert res.status_code == 200, res.text
+    assert lease_for(root).holder_of() is None, "revert leaked the lease"
+
+    # And the workspace is genuinely usable again.
+    after = client.post(
+        f"/internal/coder/conversations/{cid}/send",
+        headers=HEADERS,
+        json={"input": "hello", "sendId": "m2"},
+    )
+    assert after.status_code == 200, after.text
+
+
+@_needs_git
+def test_revert_releases_the_lease_when_it_fails(client: TestClient, tmp_path: Path):
+    """A leaked lease on the error path would wedge the whole workspace —
+    every conversation, until the TTL. The 404 path must still release."""
+    root = _root_for(tmp_path)
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    _seed_repo(root)
+
+    res = client.post(
+        f"/internal/coder/conversations/{cid}/revert",
+        headers=HEADERS,
+        json={"turnId": "t_neverexisted"},
+    )
+    assert res.status_code == 404
+    assert lease_for(root).holder_of() is None, "revert leaked the lease on its error path"
+
+    after = client.post(
+        f"/internal/coder/conversations/{cid}/send",
+        headers=HEADERS,
+        json={"input": "hello", "sendId": "m1"},
+    )
+    assert after.status_code == 200, after.text
+
+
+def test_send_from_another_conversation_while_lease_held_is_202_with_reason(
+    client: TestClient,
+):
+    """Cross-conversation queue-at-the-lease: B's send must be a 202 queued
+    (the SAME envelope P4 established — the Next proxy short-circuits on
+    202), never a 500 or a new error code, and `/turn` must explain the wait."""
+    cid_a = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    cid_b = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+
+    send_thread = threading.Thread(
+        target=client.post,
+        args=(f"/internal/coder/conversations/{cid_a}/send",),
+        kwargs={"headers": HEADERS, "json": {"input": "HANG"}},
+        daemon=True,
+    )
+    send_thread.start()
+    try:
+        _wait_for_running_turn(client, cid_a)
+
+        res = client.post(
+            f"/internal/coder/conversations/{cid_b}/send",
+            headers=HEADERS,
+            json={"input": "b work", "sendId": "b1"},
+        )
+        assert res.status_code == 202, res.text
+        assert res.json()["queued"] is True
+
+        turn_b = client.get(
+            f"/internal/coder/conversations/{cid_b}/turn", headers=HEADERS
+        ).json()
+        assert turn_b.get("turn") is None
+        item = turn_b["queue"][0]
+        assert item["reason"] == "waiting_for_lease"
+        assert item["blockedBy"] == cid_a
+
+        # The lease readout is workspace-scoped: B sees A holding it.
+        assert turn_b["lease"]["kind"] == "conversation"
+        assert turn_b["lease"]["holder"] == cid_a
+
+        client.post(f"/internal/coder/conversations/{cid_a}/cancel", headers=HEADERS)
+    finally:
+        send_thread.join(timeout=10)
+    assert not send_thread.is_alive()
+
+
+def test_turn_lease_never_exposes_the_revert_sentinel_as_a_conversation(
+    client: TestClient, tmp_path: Path
+):
+    """`REVERT_HOLDER` is an internal sentinel, not a conversation the user
+    could ever look up — surfacing it raw would make the UI say "waiting for
+    conversation __revert__"."""
+    root = _root_for(tmp_path)
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+
+    idle = client.get(f"/internal/coder/conversations/{cid}/turn", headers=HEADERS).json()
+    assert idle["lease"] == {"kind": None, "holder": None, "heldSeconds": 0.0}
+
+    lease = lease_for(root)
+    assert lease.try_acquire(REVERT_HOLDER) is True
+    try:
+        held = client.get(
+            f"/internal/coder/conversations/{cid}/turn", headers=HEADERS
+        ).json()
+        assert held["lease"]["kind"] == "revert"
+        assert held["lease"]["holder"] is None
+        assert REVERT_HOLDER not in json.dumps(held)
+    finally:
+        lease.release(REVERT_HOLDER)
+
+
+def test_empty_send_id_is_rejected_by_the_body_model(client: TestClient):
+    """Defense in depth for the lease-bypass Critical: the runner guards
+    against `""` itself, but it should never get that far from HTTP."""
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    res = client.post(
+        f"/internal/coder/conversations/{cid}/send",
+        headers=HEADERS,
+        json={"input": "hello", "sendId": ""},
+    )
+    assert res.status_code == 422, res.text

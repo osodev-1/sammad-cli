@@ -40,6 +40,7 @@ from sanad_terminal.git_ops import GitError, _checkpoint_ref
 from sanad_terminal.routes_workspace import _settings, workspace_root
 from sanad_terminal.wire_runner import WireRunnerError
 from sanad_terminal.workspace import build_child_env, verified_trust_hashes
+from sanad_terminal.workspace_lease import REVERT_HOLDER, lease_for
 from sanad_terminal.workspace_locks import lock_for
 
 router = APIRouter(prefix="/internal/coder")
@@ -65,7 +66,12 @@ class TicketBody(BaseModel):
 
 class SendBody(BaseModel):
     input: str = Field(min_length=1, max_length=32_000)
-    sendId: str | None = Field(default=None, max_length=64)
+    # `min_length=1` (P6a Task 3): without it `""` reaches the runner
+    # straight from HTTP (only `max_length` was set before). Belt-and-
+    # suspenders — `coder_runner._is_idempotent_start_turn_passthrough`
+    # already treats `""` as truthy-false / never-idempotent defensively —
+    # this just stops the empty string from arriving at all.
+    sendId: str | None = Field(default=None, min_length=1, max_length=64)
     # Force-queue instead of starting immediately, even on an idle runner
     # (P4b) — the ordinary busy case auto-queues regardless of this flag;
     # see `send()` below.
@@ -99,6 +105,28 @@ def _bad_cid(cid: str) -> JSONResponse | None:
     if not CONVERSATION_ID_RE.fullmatch(cid):
         return _err(400, "invalid_conversation", "malformed conversation id")
     return None
+
+
+def _lease_summary(root: Path) -> dict[str, Any]:
+    """`GET /turn`'s `"lease"` field (P6a Task 3) — workspace-scoped, not
+    conversation-scoped: every conversation in this workspace sees the same
+    reading, since the write-lease is per-workspace, not per-conversation.
+
+    `holder` is a real conversation id ONLY when a conversation genuinely
+    holds the lease. A revert never surfaces as one — a prior review
+    flagged that leaking the raw `REVERT_HOLDER` sentinel here would make
+    the UI say "waiting for conversation __revert__", as if it were a
+    conversation the user could look up. `kind` disambiguates instead:
+    `None` (nobody holds it), `"conversation"` (a real conversation does —
+    see `holder`), or `"revert"` (a human-triggered revert does — `holder`
+    stays `None` in that case)."""
+    lease = lease_for(root)
+    holder = lease.holder_of()
+    if holder is None:
+        return {"kind": None, "holder": None, "heldSeconds": 0.0}
+    if holder == REVERT_HOLDER:
+        return {"kind": "revert", "holder": None, "heldSeconds": lease.held_seconds()}
+    return {"kind": "conversation", "holder": holder, "heldSeconds": lease.held_seconds()}
 
 
 # -- checkpoints (P5 Task 3) — human-only diff/revert over the durable
@@ -156,6 +184,16 @@ async def _spawn(
     live = [r for r in list_conversations(root) if r.alive]
     if len(live) >= settings.coder_max_conversations:
         return _err(409, "conversation_limit", "too many live conversations; stop one first")
+    # Write-lease TTL (P6a Task 3 — a prior review found this was never
+    # passed anywhere, so an env override silently did nothing). `_spawn`
+    # runs before any turn can possibly touch this workspace's lease, so
+    # this is the earliest point the configured TTL can become
+    # authoritative. Every call site in this module passes the SAME
+    # app-wide `settings.coder_write_lease_ttl_seconds`, so `lease_for`'s
+    # "update on get" (see its docstring) is a no-op in practice after the
+    # first spawn or revert touches a given root — this is not the only
+    # call site that sets it (see `revert` below), just the earliest.
+    lease_for(root, stale_after_seconds=settings.coder_write_lease_ttl_seconds)
     cp = request.app.state.control_plane
     try:
         identity = await cp.redeem_ticket(ticket)
@@ -354,6 +392,28 @@ async def send(_: Gated, root: Root, cid: str, body: SendBody) -> StreamingRespo
                     }
                 },
             )
+        if exc.code == "lease_unavailable":
+            # Write-lease (P6a Task 3): a DIFFERENT conversation — or a
+            # revert, `exc.holder == REVERT_HOLDER` — holds this
+            # workspace's write-lease, and `start_turn` (coder_runner.py)
+            # declined to start a turn rather than race it. It already
+            # registered us as a FIFO waiter before raising, so all that's
+            # left here is to enqueue: the SAME 202 envelope the sibling
+            # "own runner busy" branch above returns, so the frontend's
+            # `status === 202` short-circuit behaves identically whether
+            # the wait is for our own turn or someone else's.
+            send_id = body.sendId or f"q_{uuid.uuid4().hex[:12]}"
+            try:
+                position = runner.enqueue(
+                    send_id, body.input, reason="waiting_for_lease", blocked_by=exc.holder
+                )
+            except WireRunnerError as enqueue_exc:
+                # queue_full — same envelope as the sibling busy-queue path
+                # above; never a 500.
+                return _err(409, enqueue_exc.code, enqueue_exc.message)
+            return JSONResponse(
+                status_code=202, content={"ok": True, "queued": True, "position": position}
+            )
         return _err(409, exc.code, exc.message)
     return StreamingResponse(
         _recycling_stream(root, runner, runner.follow(state.turn_id, 0)),
@@ -401,7 +461,17 @@ async def turn(_: Gated, root: Root, cid: str) -> JSONResponse:
     runner = get_conversation(root, cid)
     if runner is None:
         return JSONResponse(
-            {"turn": None, "alive": False, "pendingRequests": [], "mode": None, "queue": []}
+            {
+                "turn": None,
+                "alive": False,
+                "pendingRequests": [],
+                "mode": None,
+                "queue": [],
+                # Workspace-scoped (P6a Task 3), not conversation-scoped —
+                # meaningful even when THIS cid has no runner, since a
+                # DIFFERENT conversation (or a revert) may still hold it.
+                "lease": _lease_summary(root),
+            }
         )
     return JSONResponse(
         {
@@ -410,6 +480,7 @@ async def turn(_: Gated, root: Root, cid: str) -> JSONResponse:
             "pendingRequests": runner.pending_summaries(),
             "mode": runner.permission_mode,
             "queue": runner.queue_summary(),
+            "lease": _lease_summary(root),
         }
     )
 
@@ -535,45 +606,85 @@ async def revert(
     _: Gated, root: Root, request: Request, cid: str, body: RevertBody
 ) -> JSONResponse:
     """Restore the worktree to one turn's PRE-checkpoint state — human-only,
-    no agent-facing equivalent. Refuses while ANY conversation in this
-    workspace is busy (whole-workspace, cross-conversation: there is no
-    write-lease until P6), takes a safety checkpoint of whatever the tree
-    looked like right before restoring (so the revert itself is undoable),
-    and shares `lock_for(root)` with the blueprint apply/rollback/trust
-    routes so the two families of workspace-tree writers can never
-    interleave."""
+    no agent-facing equivalent.
+
+    P6a Task 3 — THE TOCTOU CLOSURE. Before this, "is it safe to revert?"
+    was a two-step snapshot-then-lock: `any(r.busy for r in
+    list_conversations(root))`, THEN — as a wholly separate step —
+    `async with lock_for(root)`. `POST /send` never took `lock_for` (it
+    only guards the blueprint-family routes), so a turn could start in the
+    gap between those two steps and race this route's own
+    checkpoint/restore: the agent's file writes against `restore_to`'s
+    `checkout-index`, and the safety checkpoint's `git add -A` could
+    snapshot a half-written file.
+
+    The fix: acquire the SAME workspace write-lease `start_turn`
+    (coder_runner.py) now requires before it can start a turn, under the
+    reserved `REVERT_HOLDER` identity — ATOMICALLY (`try_acquire` contains
+    no `await`; see workspace_lease.py), so there is no separate "check"
+    step for a turn to slip in behind. From the instant this call returns
+    True, every `start_turn` anywhere in this workspace sees the lease
+    already held and fails with `lease_unavailable` (queuing instead — see
+    `send()` above) until this route's `finally` releases it. One object
+    consulted by both paths closes the window completely.
+
+    On failure, the SAME shipped response as the old busy-check: 409
+    `workspace_busy` — the frontend's existing "can't revert while a turn
+    is running" handling depends on this exact code/message staying put.
+
+    `lock_for(root)` is STILL taken, INSIDE the lease-held region: it is
+    the blueprint apply/rollback/trust mutex, a different actor entirely
+    (one that does not take the write-lease), so the two families of
+    workspace-tree writers must keep serializing against each other too.
+    Order: acquire lease -> read checkpoint entry -> blueprint lock ->
+    safety checkpoint -> restore_to -> marker -> (finally) release lease.
+    The lease is released on EVERY exit path — success, the 404 checkpoint
+    check, a caught `GitError` (500), or any other exception — via the
+    outer `try/finally`: a leaked lease here would deadlock the entire
+    workspace, since nothing else can ever release on `REVERT_HOLDER`'s
+    behalf."""
     if bad := _bad_cid(cid):
         return bad
-    if any(r.busy for r in list_conversations(root)):
+    settings = _settings(request)
+    # Write-lease TTL (P6a Task 3): same app-wide value as `_spawn` passes
+    # (see the comment there) — this is the SECOND call site that sets it,
+    # deliberately harmless per `lease_for`'s own "update on get" contract.
+    lease = lease_for(root, stale_after_seconds=settings.coder_write_lease_ttl_seconds)
+    if not lease.try_acquire(REVERT_HOLDER):
         return _err(409, "workspace_busy", "a turn is running in this workspace")
-    entry = _read_checkpoint_entry(root, cid, body.turnId)
-    pre = entry.get("checkpointPre") if entry else None
-    if not isinstance(pre, str) or not pre:
-        return _err(404, "no_checkpoint", "no checkpoint for this turn")
+    try:
+        entry = _read_checkpoint_entry(root, cid, body.turnId)
+        pre = entry.get("checkpointPre") if entry else None
+        if not isinstance(pre, str) or not pre:
+            return _err(404, "no_checkpoint", "no checkpoint for this turn")
 
-    from sanad_terminal.routes_git import _repo
+        from sanad_terminal.routes_git import _repo
 
-    repo = _repo(request, root)
-    async with lock_for(root):
-        try:
-            # A fresh, monotonically increasing suffix per revert (never
-            # reused) — two reverts of the SAME turnId must not clobber
-            # each other's safety ref, or the first revert's "undo the
-            # undo" net would be silently lost.
-            safety_ref = _checkpoint_ref(cid, body.turnId, f"safety-{time.time_ns() // 1000}")
-            # `parent=None`: a safety checkpoint is a standalone snapshot of
-            # right-now, not chained onto the runner's own checkpoint
-            # history — it must never skip-when-clean (create_checkpoint's
-            # skip only applies when a `parent` is given).
-            safety_sha = await repo.create_checkpoint(
-                safety_ref, f"safety before revert to turn {body.turnId}", parent=None
+        repo = _repo(request, root)
+        async with lock_for(root):
+            try:
+                # A fresh, monotonically increasing suffix per revert (never
+                # reused) — two reverts of the SAME turnId must not clobber
+                # each other's safety ref, or the first revert's "undo the
+                # undo" net would be silently lost.
+                safety_ref = _checkpoint_ref(cid, body.turnId, f"safety-{time.time_ns() // 1000}")
+                # `parent=None`: a safety checkpoint is a standalone snapshot of
+                # right-now, not chained onto the runner's own checkpoint
+                # history — it must never skip-when-clean (create_checkpoint's
+                # skip only applies when a `parent` is given).
+                safety_sha = await repo.create_checkpoint(
+                    safety_ref, f"safety before revert to turn {body.turnId}", parent=None
+                )
+                await repo.restore_to(pre)
+            except GitError as exc:
+                return _err(500, exc.code, exc.message)
+            _record_revert(
+                root,
+                cid,
+                {"kind": "revert", "turnId": body.turnId, "toPre": pre, "safety": safety_sha},
             )
-            await repo.restore_to(pre)
-        except GitError as exc:
-            return _err(500, exc.code, exc.message)
-        _record_revert(
-            root, cid, {"kind": "revert", "turnId": body.turnId, "toPre": pre, "safety": safety_sha}
-        )
+    finally:
+        lease.release(REVERT_HOLDER)
 
     return JSONResponse(
         {"ok": True, "safetyCheckpoint": safety_sha, "reverted": {"turnId": body.turnId}}
