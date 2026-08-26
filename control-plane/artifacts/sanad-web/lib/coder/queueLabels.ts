@@ -42,13 +42,21 @@ export function shortConversationId(cid: string): string {
  * waiting on nothing. Any other/future `reason` value also falls back to
  * the generic queued label rather than rendering an unrecognized string
  * verbatim. */
-/** A conversation id is `c_<12 hex>`. Anything else — notably the internal
+/** Conversation ids are minted as `c_<hex>` (12 hex chars today, per the
+ * server's own CONVERSATION_ID_RE). Anything else — notably the internal
  * `__revert__` lease sentinel — must never be rendered as one. The backend
  * already strips it, so this is defence in depth at the render boundary:
  * the cost is one regex, the failure it prevents is a user being told they
- * are "waiting for conversation revert__". */
+ * are "waiting for conversation revert__".
+ *
+ * Deliberately NOT pinned to exactly 12 characters. This guard exists to
+ * reject a sentinel, not to validate an id — so it accepts any `c_`+hex
+ * shape. Pinning the current length would mean that changing the id format
+ * silently downgrades every real "waiting for conversation X" label to the
+ * generic fallback, which is a worse failure than the one being prevented
+ * and would be invisible in testing. */
 function isConversationId(id: string): boolean {
-  return /^c_[a-f0-9]{12}$/.test(id);
+  return /^c_[a-f0-9]+$/.test(id);
 }
 
 export function queueEntryLabel(entry: QueueEntryLike): string {
