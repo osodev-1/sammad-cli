@@ -35,7 +35,9 @@ def test_unparseable_falls_back_to_legacy():
 
 
 def test_background_prefix():
-    assert action_for("npm run dev", prefix="run background command") == "run background command (npm)"
+    assert (
+        action_for("npm run dev", prefix="run background command") == "run background command (npm)"
+    )
 
 
 def test_quoted_separators_are_not_boundaries():

@@ -686,9 +686,7 @@ async def test_cancelled_pre_prompt_hook_does_not_leave_the_turn_busy(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_a_failed_start_turn_still_hands_the_lease_to_the_next_waiter(
-    tmp_path, monkeypatch
-):
+async def test_a_failed_start_turn_still_hands_the_lease_to_the_next_waiter(tmp_path, monkeypatch):
     """Final-review residual. Three of the four lease-release sites handed off
     to the next FIFO waiter; `start_turn`'s FAILURE path did not — so a
     conversation queued behind a turn whose start_turn raised (a dead child,

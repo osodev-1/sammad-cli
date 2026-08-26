@@ -464,9 +464,7 @@ async def _spawn(
         try:
             await runner.set_permission_mode("default")
         except WireRunnerError as exc:
-            logger.warning(
-                "default-mode seeding failed for conversation {}: {}", cid, exc.message
-            )
+            logger.warning("default-mode seeding failed for conversation {}: {}", cid, exc.message)
     return runner
 
 

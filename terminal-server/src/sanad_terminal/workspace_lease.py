@@ -195,9 +195,7 @@ def lease_for(root: Path, *, stale_after_seconds: float | None = None) -> WriteL
     if lease is None:
         lease = WriteLease(
             stale_after_seconds=(
-                DEFAULT_STALE_AFTER_SECONDS
-                if stale_after_seconds is None
-                else stale_after_seconds
+                DEFAULT_STALE_AFTER_SECONDS if stale_after_seconds is None else stale_after_seconds
             )
         )
         _leases[key] = lease

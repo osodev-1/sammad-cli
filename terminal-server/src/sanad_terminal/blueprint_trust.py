@@ -127,9 +127,7 @@ def load_trust(root: Path, *, key: str = "") -> dict[str, dict]:
     return load_trust_checked(root, key=key)[0]
 
 
-def record_trust(
-    root: Path, hashes: dict[str, str], source: TrustSource, *, key: str = ""
-) -> None:
+def record_trust(root: Path, hashes: dict[str, str], source: TrustSource, *, key: str = "") -> None:
     """Merge ``{rel_path: sha256}`` into the store atomically (tempfile+replace)."""
     if not hashes:
         return

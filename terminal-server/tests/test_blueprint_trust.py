@@ -163,7 +163,11 @@ def test_tampered_store_fails_closed(tmp_path):
     record_trust(root, {".sanad/skills/review/SKILL.md": digest}, "manual", key=KEY)
     # The in-session-agent attack: edit entries directly, keep the old sig.
     raw = json.loads(trust_file_for(root).read_text())
-    raw["entries"][".sanad/skills/evil/SKILL.md"] = {"sha256": "f" * 64, "source": "manual", "at": 0}
+    raw["entries"][".sanad/skills/evil/SKILL.md"] = {
+        "sha256": "f" * 64,
+        "source": "manual",
+        "at": 0,
+    }
     trust_file_for(root).write_text(json.dumps(raw))
     entries, tampered = load_trust_checked(root, key=KEY)
     assert tampered and entries == {}

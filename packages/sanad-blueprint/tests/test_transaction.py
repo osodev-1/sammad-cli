@@ -440,9 +440,7 @@ def test_write_files_legacy_misplaced_manifest_updates_and_deletes(tmp_path: Pat
     # An UPDATE that keeps feeding a manifest under a non-manifest filename is
     # rejected (migration, not perpetuation)…
     with pytest.raises(PlanError) as e:
-        plan_write_files(
-            index, [(".sanad/mcp-servers/old/server.yaml", MCP_MANIFEST)], "s"
-        )
+        plan_write_files(index, [(".sanad/mcp-servers/old/server.yaml", MCP_MANIFEST)], "s")
     assert e.value.code == "misplaced_manifest"
 
     # …but deleting it is fine.

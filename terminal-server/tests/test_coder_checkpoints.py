@@ -68,7 +68,14 @@ def _ref_exists(root: Path, ref: str) -> bool:
 
 def _checkpoint_refs(root: Path, cid: str) -> set[str]:
     res = subprocess.run(
-        ["git", "-C", str(root), "for-each-ref", "--format=%(refname)", f"refs/sanad/checkpoints/{cid}/"],
+        [
+            "git",
+            "-C",
+            str(root),
+            "for-each-ref",
+            "--format=%(refname)",
+            f"refs/sanad/checkpoints/{cid}/",
+        ],
         capture_output=True,
         text=True,
     )
@@ -108,7 +115,9 @@ async def _follow_all(runner: CoderRunner, turn_id: str) -> list[dict]:
 
 
 def _load_index(journal_dir: Path, **kw: Any) -> list[dict]:
-    journal = CoderJournal(journal_dir, turns_keep=kw.get("turns_keep", 20), max_bytes=20 * 1024 * 1024)
+    journal = CoderJournal(
+        journal_dir, turns_keep=kw.get("turns_keep", 20), max_bytes=20 * 1024 * 1024
+    )
     index, _ = journal.load()
     return index
 
@@ -153,8 +162,12 @@ async def test_mutating_turn_records_pre_and_post_checkpoints_and_follow_items(t
 
         # The checkpoint refs really exist in git, and the post commit's
         # content really is the new file.
-        assert _ref_exists(workspace, f"refs/sanad/checkpoints/{runner.conversation_id}/{state.turn_id}-pre")
-        assert _ref_exists(workspace, f"refs/sanad/checkpoints/{runner.conversation_id}/{state.turn_id}-post")
+        assert _ref_exists(
+            workspace, f"refs/sanad/checkpoints/{runner.conversation_id}/{state.turn_id}-pre"
+        )
+        assert _ref_exists(
+            workspace, f"refs/sanad/checkpoints/{runner.conversation_id}/{state.turn_id}-post"
+        )
         assert _git(workspace, "show", f"{post_item['sha']}:new.txt") == "hello\n"
         with pytest.raises(subprocess.CalledProcessError):
             _git(workspace, "show", f"{pre_item['sha']}:new.txt")
@@ -248,13 +261,17 @@ async def test_pre_checkpoint_chains_onto_the_previous_turns_post(tmp_path):
     try:
         state1 = await _run_turn_to_completion(runner, "WRITEFILE:a.txt:one\n")
         items1 = await _follow_all(runner, state1.turn_id)
-        post1_sha = next(i["sha"] for i in items1 if i.get("kind") == "checkpoint" and i["when"] == "post")
+        post1_sha = next(
+            i["sha"] for i in items1 if i.get("kind") == "checkpoint" and i["when"] == "post"
+        )
 
         (workspace / "external.txt").write_text("out of band edit\n")
 
         state2 = await _run_turn_to_completion(runner, "WRITEFILE:b.txt:two\n")
         items2 = await _follow_all(runner, state2.turn_id)
-        pre2_sha = next(i["sha"] for i in items2 if i.get("kind") == "checkpoint" and i["when"] == "pre")
+        pre2_sha = next(
+            i["sha"] for i in items2 if i.get("kind") == "checkpoint" and i["when"] == "pre"
+        )
         assert pre2_sha is not None
 
         parents = _git(workspace, "log", "-1", "--format=%P", pre2_sha).strip()
