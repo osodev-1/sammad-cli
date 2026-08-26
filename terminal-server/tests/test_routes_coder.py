@@ -2086,7 +2086,18 @@ def test_open_with_takeover_times_out_if_the_holder_never_releases(
         assert calls["n"] == 1
         # The overall budget is honoured — nowhere near a 30s-timeout-driven
         # overrun off an unclamped (or wastefully repeated) final spawn.
-        assert elapsed < 2.0
+        # Fix (review): `elapsed < 2.0` against a 0.15s window could never
+        # catch even a ~3x overrun (the exact class of bug Important 2 was
+        # about) — tie the bound to `wait_seconds` itself instead of an
+        # arbitrary constant that dwarfs it.
+        assert elapsed < wait_seconds * 2
+        # Minor (review): a timed-out takeover must RESCIND its own steal
+        # token — otherwise it persists on the owner record after this
+        # connection gives up, and the holder's NEXT heartbeat still
+        # cooperatively stands down for a takeover that will never happen.
+        owner = session_owner.read_owner(session_dir)
+        assert owner is not None
+        assert owner.steal_requested_by is None
 
 
 def test_conversations_listing_has_no_owner_key_when_gate_is_off(client: TestClient):

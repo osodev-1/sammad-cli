@@ -31,14 +31,18 @@ from kimi_cli.sanad.branding import GOLD as _BRAND_BORDER
 from kimi_cli.sanad.branding import NAME as _BRAND_NAME
 from kimi_cli.sanad.branding import SHELL_LOGO as _LOGO
 from kimi_cli.sanad.branding import WELCOME as _WELCOME
-from kimi_cli.sanad.session_lease import HeartbeatAction, build_takeover_notification
+from kimi_cli.sanad.session_lease import (
+    HeartbeatAction,
+    build_shell_refusal_message,
+    build_takeover_notification,
+)
 from kimi_cli.sanad.session_lease import decide_heartbeat_action as _decide_lease_action
 from kimi_cli.sanad.session_lease import holder_id as _lease_holder_id
+from kimi_cli.sanad.session_lease import should_warn_persist_failure as _should_warn_persist_failure
 from kimi_cli.sanad.session_lock import (
     HEARTBEAT_SECONDS,
     heartbeat,
     locks_enabled,
-    read_owner,
     release,
     try_acquire,
 )
@@ -238,6 +242,13 @@ class Shell:
         actually be delivered to `_idle_events` at that moment. The main
         loop checks this on every re-entry as a belt-and-braces backstop —
         the primary signal is still the `lease_taken_over` event."""
+        self._lease_persist_warned_at: float | None = None
+        """Review fix (Important 4): last time `_lease_heartbeat_tick`
+        warned about `HeartbeatResult.persisted is False` — rate-limits
+        that warning (log + toast) via `should_warn_persist_failure`
+        instead of either never warning (fail-SILENT, forbidden by
+        P6B-DECISIONS.md) or warning on every single `HEARTBEAT_SECONDS`
+        tick."""
         soul_slash_commands = list(soul.available_slash_commands)
         shell_slash_commands = shell_slash_registry.list_commands()
         # sanad(governance): drop upstream's Moonshot-OAuth slash commands
@@ -434,20 +445,41 @@ class Shell:
         # runs (single-command or interactive) so both share one heartbeat
         # loop implementation and one release call. The acquire that granted
         # (or refused) this run already happened in cli/__init__.py, before
-        # `KimiCLI.create()`; read back what it wrote so `release()` later
-        # has the right fencing generation, without threading a new
-        # parameter through `KimiCLI.create()` / `run_shell()` / `Shell.
-        # __init__`. Gate-off (or a non-KimiSoul, e.g. tests) leaves every
-        # `_lease_*` field None, which is exactly what `_start_lease_heartbeat`
-        # and `_release_lease` treat as "nothing to do."
+        # `KimiCLI.create()`. Gate-off (or a non-KimiSoul, e.g. tests) leaves
+        # every `_lease_*` field None, which is exactly what
+        # `_start_lease_heartbeat` and `_release_lease` treat as "nothing to
+        # do."
+        #
+        # Review fix (Important 2): re-derive the fencing generation via an
+        # idempotent SELF-re-acquire (`try_acquire`), not a bare
+        # `read_owner` — see `WireServer._start_lease_heartbeat`'s docstring
+        # for the full rationale (same hazard here: `KimiCLI.create()` runs
+        # LLM/Runtime/agent/MCP setup between the original acquire and this
+        # point, and `_lease_heartbeat_loop` sleeps a full HEARTBEAT_SECONDS
+        # before its first tick — a bare read leaves `heartbeat_at` frozen
+        # long enough on a slow start to go stale and let a second process
+        # legitimately seize the lease).
+        #
+        # Review fix (minor): unlike a bare read, `try_acquire` can also
+        # come back REFUSED — a LIVE, DIFFERENT holder legitimately seized
+        # the lease in the window between the original acquire and here
+        # (the exact staleness race Important 2 closes). Refuse to start a
+        # full interactive session in that case instead of silently
+        # painting the banner and accepting input for up to
+        # `HEARTBEAT_SECONDS` before the first real heartbeat tick would
+        # have caught it.
         if locks_enabled() and isinstance(self.soul, KimiSoul):
             session_dir = self.soul.runtime.session.dir
             lease_holder = _lease_holder_id("shell")
-            owner = read_owner(session_dir)
+            reacquired = try_acquire(session_dir, holder=lease_holder, ui_mode="shell")
+            if not reacquired.ok:
+                assert reacquired.owner is not None
+                console.print(f"[red]{build_shell_refusal_message(reacquired.owner)}[/red]")
+                return False
             self._lease_session_dir = session_dir
             self._lease_holder = lease_holder
             self._lease_generation = (
-                owner.generation if owner is not None and owner.holder == lease_holder else None
+                reacquired.owner.generation if reacquired.owner is not None else None
             )
 
         if command is not None:
@@ -1601,6 +1633,30 @@ class Shell:
         # (`_unbind_running_input`).
         busy = self._running_interrupt_handler is not None
         result = heartbeat(session_dir, holder=holder, busy=busy)
+        if not result.persisted and _should_warn_persist_failure(self._lease_persist_warned_at):
+            # Review fix (Important 4): `HeartbeatResult.persisted` was
+            # read by NO caller before this fix — a holder whose heartbeat
+            # writes keep failing believed it still owned the session while
+            # its on-disk stamp aged past `STALE_AFTER_SECONDS` and someone
+            # else legitimately (and silently, from this process's point of
+            # view) took over. Fail-open (per P6B-DECISIONS.md) must never
+            # mean fail-SILENT: surface it — log AND toast, since this is
+            # the interactive TUI — rate-limited via
+            # `should_warn_persist_failure` so a persistently failing write
+            # doesn't log/toast on every `HEARTBEAT_SECONDS` tick.
+            self._lease_persist_warned_at = time.time()
+            logger.warning(
+                "Session lease heartbeat for {dir} could not be written to "
+                "disk; the one-owner guarantee is unverified until the next "
+                "successful write",
+                dir=session_dir,
+            )
+            toast(
+                "Warning: could not confirm this session is still exclusively "
+                "yours (a disk write failed) — it may be taken over unexpectedly.",
+                topic="lease_persist_warning",
+                duration=10.0,
+            )
         action = _decide_lease_action(result, busy=busy)
 
         if action is HeartbeatAction.REFUSE_STEAL:

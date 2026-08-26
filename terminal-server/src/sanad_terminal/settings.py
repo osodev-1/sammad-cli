@@ -44,6 +44,46 @@ def _write_lease_ttl(configured: int, max_turn_seconds: float) -> int:
     return configured
 
 
+# Minor (review): `_handle_session_owned`'s poll loop does
+# `await asyncio.sleep(min(settings.coder_takeover_poll_seconds, remaining))`
+# on every tick — `CODER_TAKEOVER_POLL_SECONDS=0` (or a negative value)
+# turns that into a hot loop that re-writes a FOREIGN owner record as fast
+# as the event loop allows, for the whole `coder_takeover_wait_seconds`
+# window. `CODER_TAKEOVER_WAIT_SECONDS` unbounded above is a milder
+# footgun (an operator typo like a missing decimal point could leave a
+# takeover HTTP request hanging for hours), so both get a floor and this
+# one also gets a ceiling.
+_TAKEOVER_POLL_SECONDS_FLOOR = 0.05
+_TAKEOVER_WAIT_SECONDS_FLOOR = 0.0
+_TAKEOVER_WAIT_SECONDS_CEILING = 120.0
+
+
+def _clamp_takeover_poll_seconds(configured: float) -> float:
+    clamped = max(configured, _TAKEOVER_POLL_SECONDS_FLOOR)
+    if clamped != configured:
+        logger.warning(
+            "CODER_TAKEOVER_POLL_SECONDS={} is below the floor — clamping "
+            "to {}s so a takeover wait can never become a hot poll loop",
+            configured,
+            clamped,
+        )
+    return clamped
+
+
+def _clamp_takeover_wait_seconds(configured: float) -> float:
+    clamped = min(max(configured, _TAKEOVER_WAIT_SECONDS_FLOOR), _TAKEOVER_WAIT_SECONDS_CEILING)
+    if clamped != configured:
+        logger.warning(
+            "CODER_TAKEOVER_WAIT_SECONDS={} is outside [{}, {}] — clamping "
+            "to {}s",
+            configured,
+            _TAKEOVER_WAIT_SECONDS_FLOOR,
+            _TAKEOVER_WAIT_SECONDS_CEILING,
+            clamped,
+        )
+    return clamped
+
+
 @dataclass(frozen=True, slots=True)
 class TerminalSettings:
     # "railway" = the shared multi-user container (legacy); "task" = one
@@ -226,8 +266,12 @@ class TerminalSettings:
                 float(e.get("CODER_MAX_TURN_SECONDS", "3600")),
             ),
             session_locks_enabled=e.get("SANAD_SESSION_LOCKS", "") == "1",
-            coder_takeover_wait_seconds=float(e.get("CODER_TAKEOVER_WAIT_SECONDS", "15")),
-            coder_takeover_poll_seconds=float(e.get("CODER_TAKEOVER_POLL_SECONDS", "0.5")),
+            coder_takeover_wait_seconds=_clamp_takeover_wait_seconds(
+                float(e.get("CODER_TAKEOVER_WAIT_SECONDS", "15"))
+            ),
+            coder_takeover_poll_seconds=_clamp_takeover_poll_seconds(
+                float(e.get("CODER_TAKEOVER_POLL_SECONDS", "0.5"))
+            ),
             trust_store_key=e.get("TRUST_STORE_KEY", ""),
             architect_max_turn_seconds=float(e.get("ARCHITECT_MAX_TURN_SECONDS", "1800")),
             worker_enabled=e.get("WORKER_ENABLED", "") == "1",

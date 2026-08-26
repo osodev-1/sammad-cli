@@ -278,6 +278,17 @@ def try_acquire(
         return AcquireResult(ok=False, owner=current)
 
     generation = current.generation + 1 if current is not None else 1
+    # Review fix (minor): a SELF-reacquire (`current.holder == holder` —
+    # the mid-turn REFUSE_STEAL branch's own clear-the-request write in
+    # `_lease_heartbeat_tick`) is not a fresh grant; it must PRESERVE
+    # `current.busy`, not reset it to `False`. Resetting it published
+    # "idle" to disk for up to a heartbeat while the holder was actively
+    # streaming — the owner-status endpoint (`session_owner._owner_snapshot`)
+    # would then report `busy: false` for a genuinely busy holder. A grant
+    # to anyone ELSE (a brand-new acquire, or one that outlived a stale/
+    # absent prior owner) still starts `busy=False` — there is no PRIOR
+    # holder's live state to carry forward in that case.
+    busy = current.busy if current is not None and current.holder == holder else False
     granted = OwnerInfo(
         holder=holder,
         pid=os.getpid(),
@@ -285,7 +296,7 @@ def try_acquire(
         generation=generation,
         heartbeat_at=stamp,
         steal_requested_by=None,
-        busy=False,
+        busy=busy,
     )
     # A write that can't land still fails open — the caller is granted the
     # lease in the only sense that matters (the session stays usable); a

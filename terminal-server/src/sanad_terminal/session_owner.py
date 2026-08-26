@@ -178,10 +178,29 @@ def is_live(owner: OwnerInfo, *, now: float | None = None) -> bool:
     return (_now(now) - owner.heartbeat_at) < STALE_AFTER_SECONDS
 
 
-def _write_owner(session_dir: Path, owner: OwnerInfo) -> bool:
+def _write_owner(
+    session_dir: Path, owner: OwnerInfo, *, uid: int | None = None, gid: int | None = None
+) -> bool:
     """Atomic (tmp + os.replace) write; returns False (never raises) if it
     couldn't land — same discipline as `kimi_cli.utils.io.atomic_json_write`,
-    reimplemented rather than imported (see module docstring)."""
+    reimplemented rather than imported (see module docstring).
+
+    CRITICAL (review): under the deployed uid split, agentd runs as root
+    and the CLI child (the actual holder that must READ this file back on
+    its own next heartbeat) runs as `uid`/`gid`. `mkstemp` + `os.replace`
+    alone leaves the temp file — and therefore the replaced `owner.json` —
+    owned `root:root 0600`, permanently unreadable to the holder. That
+    holder's `heartbeat` then reads `None` and (correctly, per the
+    fail-open rule) does NOT stand down, while agentd's own next
+    `read_owner` ALSO fails and treats the session as unowned — two live
+    writers on one session, the exact corruption this lease exists to
+    prevent. `git_ops.GitRepo._new_scratch_index` documents and fixes the
+    identical hazard for the scratch git index: create under the CURRENT
+    (caller) identity, then `os.chown` to the agent uid/gid BEFORE the file
+    is put where the agent will read it. Mirrored here — chown the temp
+    file before `os.replace`, so the file that lands at `owner.json` is
+    already agent-owned; `uid`/`gid` default to None (no chown) so callers
+    that never configured a uid split behave exactly as before."""
     try:
         fd, tmp_path = tempfile.mkstemp(dir=session_dir, suffix=".tmp")
         try:
@@ -189,6 +208,8 @@ def _write_owner(session_dir: Path, owner: OwnerInfo) -> bool:
                 json.dump(dataclasses.asdict(owner), f, indent=2, ensure_ascii=False)
                 f.flush()
                 os.fsync(f.fileno())
+            if uid is not None:
+                os.chown(tmp_path, uid, gid if gid is not None else -1)
             os.replace(tmp_path, _owner_path(session_dir))
         except BaseException:
             with contextlib.suppress(OSError):
@@ -199,17 +220,56 @@ def _write_owner(session_dir: Path, owner: OwnerInfo) -> bool:
     return True
 
 
-def request_steal(session_dir: Path, *, by: str, now: float | None = None) -> bool:
+def request_steal(
+    session_dir: Path,
+    *,
+    by: str,
+    now: float | None = None,
+    uid: int | None = None,
+    gid: int | None = None,
+) -> bool:
     """Ask the current LIVE owner to stand down (cooperative detach) — the
     same read-modify-atomic-write `session_lock.request_steal` performs;
     see the module docstring for why a write from agentd is safe here.
     Returns False when there is no live owner to steal from, or when the
     write itself couldn't land — either way nothing was recorded for the
     holder's next heartbeat to see, so the caller should treat it as "not
-    stolen yet."""
+    stolen yet."
+
+    `uid`/`gid` — the agent user's identity under a uid split (see
+    `routes_coder._spawn`'s `settings.agent_user` resolution) — are
+    threaded straight through to `_write_owner` so the record this call
+    updates stays readable by the holder's own (unprivileged) process; see
+    its docstring for why that matters."""
     stamp = _now(now)
     current = read_owner(session_dir)
     if current is None or not is_live(current, now=stamp):
         return False
     updated = dataclasses.replace(current, steal_requested_by=by)
-    return _write_owner(session_dir, updated)
+    return _write_owner(session_dir, updated, uid=uid, gid=gid)
+
+
+def rescind_steal(
+    session_dir: Path, *, by: str, uid: int | None = None, gid: int | None = None
+) -> bool:
+    """Best-effort clear of a steal request WE placed (`request_steal(...,
+    by=by)`), for a takeover attempt that gave up — timed out, or was
+    cancelled — before the holder ever noticed it (minor, review).
+
+    Without this, `steal_requested_by` stays on the owner record after
+    `_handle_session_owned` gives up and closes its connection, and the
+    holder's NEXT heartbeat still cooperatively stands down for a takeover
+    that will never actually happen.
+
+    Only clears when the CURRENT `steal_requested_by` is still exactly
+    `by` — never blindly clears the field: a DIFFERENT (later) taker's
+    still-pending request, or a fresh grant that already cleared it (every
+    `try_acquire` unconditionally sets `steal_requested_by=None` on ANY
+    grant — self-reacquire included), must both be left alone. Returns
+    False (never raises) whenever there is nothing to do: no owner, the
+    field no longer matches `by`, or the write itself couldn't land."""
+    current = read_owner(session_dir)
+    if current is None or current.steal_requested_by != by:
+        return False
+    updated = dataclasses.replace(current, steal_requested_by=None)
+    return _write_owner(session_dir, updated, uid=uid, gid=gid)

@@ -72,6 +72,32 @@ class HeartbeatAction(Enum):
     learns it was refused instead of hanging."""
 
 
+LEASE_PERSIST_WARN_COOLDOWN_SECONDS = 60.0
+"""How often a `persisted=False` warning (Important 4, review) may repeat
+while the underlying `owner.json` write keeps failing. Without a cooldown,
+a holder heartbeating every `HEARTBEAT_SECONDS` (10s) into a persistently
+full/unwritable disk would log — and, on the shell side, toast — on EVERY
+single tick. `.superpowers/sdd/P6B-DECISIONS.md` locks fail-open but
+explicitly forbids fail-SILENT: this constant is what lets
+`_lease_heartbeat_tick` (wire, shell — both call `should_warn_persist_
+failure` identically) rate-limit that warning instead of omitting it."""
+
+
+def should_warn_persist_failure(last_warned_at: float | None, *, now: float | None = None) -> bool:
+    """Whether a `persisted=False` warning may fire again right now.
+
+    `last_warned_at` is the caller's own instance-level timestamp of its
+    last warning (`None` before the first one — always fires immediately).
+    Pure/no I/O so both `_lease_heartbeat_tick` implementations, and their
+    tests, can reason about the rate limit identically without needing a
+    real `LEASE_PERSIST_WARN_COOLDOWN_SECONDS`-long sleep.
+    """
+    if last_warned_at is None:
+        return True
+    stamp = time.time() if now is None else now
+    return (stamp - last_warned_at) >= LEASE_PERSIST_WARN_COOLDOWN_SECONDS
+
+
 def decide_heartbeat_action(result: HeartbeatResult, *, busy: bool) -> HeartbeatAction:
     """Pure decision matrix for one heartbeat tick.
 

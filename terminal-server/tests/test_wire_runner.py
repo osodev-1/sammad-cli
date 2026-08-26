@@ -865,16 +865,60 @@ async def test_null_id_session_owned_error_still_correlates_to_the_lone_outstand
 
 
 @pytest.mark.asyncio
+async def test_null_id_error_after_the_handshake_is_not_misattributed_to_an_unrelated_call():
+    """Minor (review): the test above proves the null-id fallback correlates
+    correctly DURING the handshake. This proves it stays scoped to ONLY the
+    handshake — the fallback used to key off "whichever request happens to
+    be the only one outstanding right now", not the handshake's own id.
+
+    A pre-existing, UN-GATED null-id error (kimi emits these for
+    PARSE_ERROR / an invalid request / an invalid response — nothing
+    P6b-specific) arriving AFTER `start()` already succeeded, while some
+    UNRELATED `call()` is the sole pending request, must never be
+    misattributed as that call's own answer — it must be dropped, and the
+    call must instead time out on its own, exactly as it would with no
+    null-id fallback at all.
+
+    Real subprocess round trip (`_fake_init_wire.py`'s new
+    `ok_then_null_error` mode): answers `initialize` normally, THEN answers
+    the very next message (our `call()`) with an unrelated null-id error."""
+    runner = _init_runner(mode="ok_then_null_error")
+    await runner.start()
+    try:
+        started = time.monotonic()
+        with pytest.raises(WireRunnerError) as exc:
+            await runner.call("some_method", {}, timeout=0.3)
+        elapsed = time.monotonic() - started
+        # The call's OWN timeout fired — NOT an instant (mis)resolution
+        # from the unrelated null-id error the fake sent back immediately.
+        assert exc.value.code == "call_failed"
+        assert "timed out" in exc.value.message
+        assert elapsed >= 0.25
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
 async def test_generic_init_error_without_app_code_falls_back_to_init_failed():
     """An initialize error with NO `data.code` (every JSON-RPC error other
     than `session_owned` today) must still fall back to `init_failed` —
     this is the "everything else stays today's flat error" half of the
-    contract, proven against a shape that ISN'T the timeout path."""
-    runner = _init_runner(mode="error", error={"code": -32001, "message": "llm not set"})
+    contract, proven against a shape that ISN'T the timeout path.
+
+    Important 3 (review): the MESSAGE, not just the code, must also stay
+    identical to the pre-P6b behavior when no app-level `data.code` was
+    recovered — this route (coder/architect/worker alike) rendered
+    `str(<whole error dict>)` as the 503 body before P6b ever touched this
+    method, gate on or off. A regression that instead surfaces the error
+    object's own `.message` field unconditionally silently changes that
+    body even with SANAD_SESSION_LOCKS unset, so this is a gate-off
+    identity test, not merely a code-path test."""
+    error = {"code": -32001, "message": "llm not set"}
+    runner = _init_runner(mode="error", error=error)
     with pytest.raises(WireRunnerError) as exc:
         await runner.start()
     assert exc.value.code == "init_failed"
-    assert exc.value.message == "llm not set"
+    assert exc.value.message == str(error)
     assert exc.value.data is None
 
 
@@ -966,13 +1010,14 @@ async def test_run_runner_start_unaffected_by_the_propagation_change():
     finally:
         await ok_runner.stop()
 
+    run_error = {"code": -32603, "message": "boom"}
     err_runner = RunRunner(
         run_id="r_000000000001",
         argv=(sys.executable, str(FAKE_INIT_WIRE)),
         cwd=Path.cwd(),
         env={
             "FAKE_INIT_MODE": "error",
-            "FAKE_INIT_ERROR_JSON": json.dumps({"code": -32603, "message": "boom"}),
+            "FAKE_INIT_ERROR_JSON": json.dumps(run_error),
         },
         max_turn_seconds=60.0,
         max_steps_per_turn=10,
@@ -981,4 +1026,7 @@ async def test_run_runner_start_unaffected_by_the_propagation_change():
     with pytest.raises(WireRunnerError) as exc:
         await err_runner.start()
     assert exc.value.code == "init_failed"
-    assert exc.value.message == "boom"
+    # Important 3 (review): no `data.code` here either — the worker route's
+    # 503 body must keep rendering the whole error dict, same as coder and
+    # architect above.
+    assert exc.value.message == str(run_error)

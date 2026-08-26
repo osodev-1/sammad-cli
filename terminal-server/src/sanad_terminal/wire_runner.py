@@ -176,6 +176,15 @@ class WireRunner:
         self._msg_id = 0
         self._alive = False
         self._last_activity = time.monotonic()
+        self._init_id: int | None = None
+        """The `initialize` request's own message id, WHILE the handshake in
+        `start()` is outstanding — `None` otherwise. Scopes `_dispatch`'s
+        null-id-error fallback (minor, review) to the handshake ONLY: a
+        pre-existing, un-gated null-id error (kimi emits these for
+        PARSE_ERROR / an invalid request / an invalid response — nothing
+        P6b-specific) arriving while exactly one OTHER `call()` happens to
+        be outstanding must never be misattributed as that unrelated
+        request's answer."""
         # Turn journal (server-authoritative; survives client disconnects).
         self._turns: dict[str, TurnState] = {}
         self._turn_order: list[str] = []
@@ -228,56 +237,84 @@ class WireRunner:
 
             iid = self._next_id()
             fut = self._new_pending(iid)
-            await self._send(
-                {
-                    "jsonrpc": "2.0",
-                    "method": "initialize",
-                    "id": str(iid),
-                    "params": {
-                        "protocol_version": _WIRE_PROTOCOL_VERSION,
-                        "client": {"name": self._client_name, "version": "1"},
-                        "capabilities": self._capabilities,
-                    },
-                }
-            )
+            # Minor (review): scopes `_dispatch`'s null-id-error fallback to
+            # THIS handshake only — cleared in the `finally` below the
+            # moment the handshake concludes (success, timeout, OR a
+            # `session_owned`-style refusal alike), so a pre-existing,
+            # un-gated null-id error arriving later (kimi emits these for
+            # PARSE_ERROR / an invalid request / an invalid response) can
+            # never be misattributed to some unrelated later `call()` just
+            # because it happens to be the only one outstanding at that
+            # moment.
+            self._init_id = iid
             try:
-                resp = await asyncio.wait_for(
-                    fut, timeout=init_timeout if init_timeout is not None else _INIT_TIMEOUT_SECONDS
+                await self._send(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "initialize",
+                        "id": str(iid),
+                        "params": {
+                            "protocol_version": _WIRE_PROTOCOL_VERSION,
+                            "client": {"name": self._client_name, "version": "1"},
+                            "capabilities": self._capabilities,
+                        },
+                    }
                 )
-            except (TimeoutError, asyncio.CancelledError) as exc:
-                await self.stop()
-                raise WireRunnerError("init_failed", "agent did not initialize") from exc
-            if "error" in resp:
-                await self.stop()
-                # P6b: don't collapse every initialize refusal into the same
-                # flat "init_failed" — the child's ONLY channel to explain a
-                # `session_owned` refusal (its stderr is DEVNULL) is this
-                # response's `error.data.code` (an app-level string
-                # discriminator; JSON-RPC's own `error.code` is required to
-                # be an int, so it can't carry it — see
-                # `kimi_cli.sanad.session_lease.build_session_owned_error`).
-                # When present, THAT becomes this exception's `.code` (and
-                # `.data` carries the rest — `ui_mode`/`busy`) so a caller
-                # like `routes_coder._spawn` can map it to its own HTTP
-                # status instead of every failure flattening to a 503. Any
-                # error without that shape (or a non-dict `error` at all)
-                # falls back to `init_failed`, exactly as before — a
-                # genuine crash/timeout is not, and must not become,
-                # distinguishable from any other opaque init failure.
-                err = resp.get("error")
-                err_obj = err if isinstance(err, dict) else {}
-                data = err_obj.get("data")
-                data_obj = data if isinstance(data, dict) else None
-                app_code = data_obj.get("code") if data_obj is not None else None
-                message = err_obj.get("message")
-                raise WireRunnerError(
-                    app_code if isinstance(app_code, str) else "init_failed",
-                    message if isinstance(message, str) else str(err),
-                    data=data_obj,
-                )
-            self._touch()
+                try:
+                    resp = await asyncio.wait_for(
+                        fut,
+                        timeout=init_timeout if init_timeout is not None else _INIT_TIMEOUT_SECONDS,
+                    )
+                except (TimeoutError, asyncio.CancelledError) as exc:
+                    await self.stop()
+                    raise WireRunnerError("init_failed", "agent did not initialize") from exc
+                if "error" in resp:
+                    await self.stop()
+                    # P6b: don't collapse every initialize refusal into the
+                    # same flat "init_failed" — the child's ONLY channel to
+                    # explain a `session_owned` refusal (its stderr is
+                    # DEVNULL) is this response's `error.data.code` (an
+                    # app-level string discriminator; JSON-RPC's own
+                    # `error.code` is required to be an int, so it can't
+                    # carry it — see
+                    # `kimi_cli.sanad.session_lease.build_session_owned_error`).
+                    # When present, THAT becomes this exception's `.code`
+                    # (and `.data` carries the rest — `ui_mode`/`busy`) so a
+                    # caller like `routes_coder._spawn` can map it to its
+                    # own HTTP status instead of every failure flattening
+                    # to a 503. Any error without that shape (or a
+                    # non-dict `error` at all) falls back to `init_failed`,
+                    # exactly as before — a genuine crash/timeout is not,
+                    # and must not become, distinguishable from any other
+                    # opaque init failure.
+                    err = resp.get("error")
+                    err_obj = err if isinstance(err, dict) else {}
+                    data = err_obj.get("data")
+                    data_obj = data if isinstance(data, dict) else None
+                    app_code = data_obj.get("code") if data_obj is not None else None
+                    # Important 3 (review): only trust the error object's
+                    # OWN `message` field when an app-level `data.code` was
+                    # actually recovered — the shape
+                    # `build_session_owned_error` (and friends) deliberately
+                    # emit. Every OTHER initialize error (the ordinary,
+                    # un-gated 503 path every route — coder, architect,
+                    # worker — already had before P6b) must keep rendering
+                    # the WHOLE error dict via `str(err)`, exactly as it
+                    # always did; using `.message` unconditionally silently
+                    # changed that 503 body across all three routes even
+                    # with SANAD_SESSION_LOCKS unset.
+                    message = err_obj.get("message") if isinstance(app_code, str) else None
+                    raise WireRunnerError(
+                        app_code if isinstance(app_code, str) else "init_failed",
+                        message if isinstance(message, str) else str(err),
+                        data=data_obj,
+                    )
+                self._touch()
+            finally:
+                self._init_id = None
 
     async def stop(self) -> None:
+        self._init_id = None
         self._alive = False
         cur = self._current
         if cur is not None and cur.status == "running":
@@ -751,20 +788,34 @@ class WireRunner:
             # or — the id `_send` gives every request IS a string today,
             # but nothing enforces that staying true — a non-string id).
             # P6b's binding contract (Task 2 review): correlate this to "the
-            # error to my only outstanding request", not strictly by id.
-            # When exactly one request is outstanding, a null-id ERROR
-            # response can only be that request's answer — there is no
-            # other addressee it could mean, and leaving it to `_read_loop`'s
-            # EOF handler (the child exits right after answering this way)
-            # would instead resolve that same future with a flat
-            # `WireRunnerError("exited", ...)`, discarding the real
-            # `session_owned` payload entirely. Restricted to `error`
-            # responses (never a bare/malformed message) so this can't
-            # misattribute an unrelated null-id message as a false success.
-            if "error" in msg and len(self._pending) == 1:
-                ((only_mid, fut),) = self._pending.items()
-                self._pending.pop(only_mid, None)
-                if not fut.done():
+            # error to my `initialize` request", specifically — the SAME
+            # child process this handshake ran against, on the SAME
+            # connection, is the only one that can ever answer this way.
+            # Leaving it to `_read_loop`'s EOF handler (the child exits
+            # right after answering this way) would instead resolve that
+            # same future with a flat `WireRunnerError("exited", ...)`,
+            # discarding the real `session_owned` payload entirely.
+            #
+            # Minor (review): scoped to `self._init_id` — the handshake's
+            # OWN id, set for the duration of `start()` and cleared the
+            # moment it concludes — rather than merely "whichever request
+            # happens to be the only one outstanding right now". A
+            # pre-existing, UN-GATED null-id error (kimi emits these for
+            # PARSE_ERROR / an invalid request / an invalid response —
+            # nothing P6b-specific) arriving later, while some unrelated
+            # `call()` happens to be the sole pending request, must never
+            # be misattributed as that call's answer. Restricted to
+            # `error` responses (never a bare/malformed message) so this
+            # can't misattribute an unrelated null-id message as a false
+            # success either.
+            if (
+                "error" in msg
+                and self._init_id is not None
+                and len(self._pending) == 1
+                and self._init_id in self._pending
+            ):
+                fut = self._pending.pop(self._init_id, None)
+                if fut is not None and not fut.done():
                     fut.set_result(msg)
             return
         try:
