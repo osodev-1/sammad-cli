@@ -52,8 +52,20 @@ export interface CoderTurnState {
   mode?: string;
   /** Server-side follow-up queue (P4b) — RAM-only, drains automatically as
    * each turn ends. Undefined (not null/[]) when the server response omits
-   * it, mirroring `mode`'s pass-through convention. */
-  queue?: { sendId: string; input: string }[];
+   * it, mirroring `mode`'s pass-through convention. `reason`/`blockedBy`
+   * (P6a Task 3) are additive: present only on an item that's waiting on
+   * the workspace write-lease rather than an ordinary FIFO position — see
+   * `queueEntryLabel` (lib/coder/queueLabels.ts) for how the panel renders
+   * them. */
+  queue?: { sendId: string; input: string; reason?: string; blockedBy?: string }[];
+  /** Workspace write-lease reading (P6a Task 3's `/turn` `"lease"` field) —
+   * undefined when the server response omits it, mirroring `mode`/`queue`'s
+   * pass-through convention. `kind` is `null` when nobody holds the lease,
+   * `"conversation"` when a real conversation does (see `holder`), or
+   * `"revert"` when a human-triggered revert does — `holder` stays `null`
+   * in that case (the server never surfaces its raw `__revert__` holder
+   * sentinel here). See `leaseStatusLabel` (lib/coder/queueLabels.ts). */
+  lease?: { kind: "conversation" | "revert" | null; holder: string | null; heldSeconds: number };
 }
 
 /** One turn's checkpoint diff (P5 Task 3) — name-status + unified patch,

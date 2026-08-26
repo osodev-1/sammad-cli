@@ -32,12 +32,14 @@ import {
   type CoderMessage,
 } from "@/lib/coder/transcript";
 import type { CoderItem, RespondPayload } from "@/lib/coder/types";
+import { leaseStatusLabel, queueEntryLabel } from "@/lib/coder/queueLabels";
 import type { StoredCoderMessage } from "@/lib/sessions/state";
 import { button, disabled, size } from "../../ui/theme";
 import { ApprovalCard, QuestionCard } from "./RequestCards";
 import { ToolCard } from "./ToolCard";
 import { PlanCard } from "./PlanCard";
 import { CheckpointFooter } from "./CheckpointFooter";
+import ConversationSwitcher from "./ConversationSwitcher";
 
 type RequestBlock = Extract<CoderBlock, { kind: "request" }>;
 type AssistantMessage = Extract<CoderMessage, { role: "assistant" }>;
@@ -91,6 +93,9 @@ export default function CoderPanel({
   onLastInterruptedTurnId,
   onCheckpoints,
   onReverted,
+  onSwitchConversation,
+  onCreateConversation,
+  creatingConversation,
 }: {
   sessionId?: string;
   visible: boolean;
@@ -123,6 +128,21 @@ export default function CoderPanel({
    * turn machine, so nothing here needs to react beyond bubbling the
    * "go refresh the file tree" signal upward. */
   onReverted?: () => void;
+  /** Minimal conversation switcher (P6a Task 4) — called when the user
+   * picks a DIFFERENT conversation from the header switcher. Owned by
+   * SessionWorkspace: it's the one that resets the persisted transcript
+   * and forces this panel to remount fresh for the new conversation (see
+   * SessionWorkspace's `switchCoderConversation`/`coderEpoch`), so this
+   * panel never has to reconcile one conversation's live state against
+   * another's transcript mid-flight. */
+  onSwitchConversation?: (conversationId: string) => void;
+  /** "New conversation" action from the same switcher — SessionWorkspace
+   * mints a ticket and creates one, then calls `onSwitchConversation` with
+   * the result (or surfaces `conversation_limit`/other failures itself). */
+  onCreateConversation?: () => void;
+  /** True while `onCreateConversation`'s request is in flight — threaded
+   * through so the switcher can disable itself against a double-click. */
+  creatingConversation?: boolean;
 }) {
   const [phase, setPhase] = useState<CoderPhase>("idle");
   const [startError, setStartError] = useState<string | null>(null);
@@ -140,7 +160,19 @@ export default function CoderPanel({
      anymore. Seeded/reconciled in begin(), after enqueue/dequeue, and on the
      periodic /turn poll below (and, incidentally, every time runTurn checks
      whether a follow-up turn already drained in). */
-  const [queue, setQueue] = useState<{ sendId: string; input: string }[]>([]);
+  const [queue, setQueue] = useState<
+    { sendId: string; input: string; reason?: string; blockedBy?: string }[]
+  >([]);
+  /* Workspace write-lease reading (P6a Task 3's `/turn` "lease" field),
+     synced alongside `queue` at every fetchCoderTurn() call site below —
+     null until the first read lands, then whatever the server last
+     reported. Rendered via `leaseStatusLabel` (lib/coder/queueLabels.ts),
+     never read/rendered raw (see that helper's docstring on why). */
+  const [lease, setLease] = useState<{
+    kind: "conversation" | "revert" | null;
+    holder: string | null;
+    heldSeconds: number;
+  } | null>(null);
   /* R6-style resilience: reconnecting = the turn lives server-side, our pipe
      doesn't; activity = the always-on "what is it doing" line. */
   const [reconnecting, setReconnecting] = useState(false);
@@ -308,6 +340,7 @@ export default function CoderPanel({
     // branch below fires; a queued follow-up can exist alongside a running,
     // interrupted, or idle turn alike.
     setQueue(state?.queue ?? []);
+    setLease(state?.lease ?? null);
     if (state?.turn?.status === "running") {
       await runTurnRef.current?.(
         state.turn.userInput || "(earlier request)",
@@ -651,6 +684,7 @@ export default function CoderPanel({
         // blow away `editingQueued`'s target queue entry out from under
         // the user's in-progress edit — see `editingQueuedRef` above.
         if (!editingQueuedRef.current) setQueue(state.queue ?? []);
+        setLease(state.lease ?? null);
         if (state.turn?.status === "running") {
           // Attach to the RUNNING turn and render it live — the bottom of
           // the chat shows the CURRENT state, with Stop on the active
@@ -770,7 +804,9 @@ export default function CoderPanel({
     if (phase !== "streaming" || !cid) return;
     const t = window.setInterval(() => {
       void fetchCoderTurn(cid, sessionId).then((state) => {
-        if (state && !editingQueuedRef.current) setQueue(state.queue ?? []);
+        if (!state) return;
+        if (!editingQueuedRef.current) setQueue(state.queue ?? []);
+        setLease(state.lease ?? null);
       });
     }, 5000);
     return () => window.clearInterval(t);
@@ -873,7 +909,9 @@ export default function CoderPanel({
       // composer rather than silently lose it (mirrors submitQueue's and
       // submitSteer's "never lose the text" fallback).
       void fetchCoderTurn(cid, sessionId).then((state) => {
-        if (state) setQueue(state.queue ?? []);
+        if (!state) return;
+        setQueue(state.queue ?? []);
+        setLease(state.lease ?? null);
       });
       if (text) setInput((cur) => (cur ? cur : text));
       return;
@@ -901,6 +939,7 @@ export default function CoderPanel({
       if (!removed.removed) {
         const state = await fetchCoderTurn(cid, sessionId);
         setQueue(state?.queue ?? []);
+        setLease(state?.lease ?? null);
         return;
       }
       const added = await queueCoder(cid, text, newSendId, sessionId);
@@ -909,6 +948,7 @@ export default function CoderPanel({
       // rather than trust our optimistic edit.
       const state = await fetchCoderTurn(cid, sessionId);
       setQueue(state?.queue ?? []);
+      setLease(state?.lease ?? null);
     })();
   }, [editingQueued, queue, cid, sessionId]);
 
@@ -930,7 +970,9 @@ export default function CoderPanel({
       void dequeueCoder(cid, item.sendId, sessionId).then((result) => {
         if (result.removed) return;
         void fetchCoderTurn(cid, sessionId).then((state) => {
-          if (state) setQueue(state.queue ?? []);
+          if (!state) return;
+          setQueue(state.queue ?? []);
+          setLease(state.lease ?? null);
         });
       });
     },
@@ -965,6 +1007,7 @@ export default function CoderPanel({
         return;
       }
       if (!editingQueuedRef.current) setQueue(state.queue ?? []);
+      setLease(state.lease ?? null);
       if (state.turn?.status === "running") {
         void runTurnRef.current?.(
           state.turn.userInput || "(earlier request)",
@@ -1149,12 +1192,26 @@ export default function CoderPanel({
   });
   const composerDisabled = phase === "error";
   const modeDisabled = !cid || phase === "error" || phase === "starting";
+  // Lease status line (P6a Tasks 3+4) — null (renders nothing) unless it's
+  // worth saying: a revert in progress, or another conversation holding
+  // the workspace write-lease. Never repeats "you're running a turn" —
+  // that's already the statusStrip above.
+  const leaseNotice = leaseStatusLabel(lease, cid);
 
   return (
     <div style={s.wrap}>
       <div style={s.header}>
         <span style={s.title}>Coder</span>
         <span style={s.subtitle}>Works directly in your workspace</span>
+        {onSwitchConversation && onCreateConversation && (
+          <ConversationSwitcher
+            sessionId={sessionId}
+            activeId={cid}
+            onSelect={onSwitchConversation}
+            onCreate={onCreateConversation}
+            creating={creatingConversation}
+          />
+        )}
       </div>
 
       <div style={s.transcript} ref={scrollRef}>
@@ -1334,7 +1391,7 @@ export default function CoderPanel({
             ) : (
               <div style={s.queuedBubble}>
                 {entry.input}
-                <span style={s.queuedTag}>queued</span>
+                <span style={s.queuedTag}>{queueEntryLabel(entry)}</span>
                 <span style={s.queuedActions}>
                   <button
                     type="button"
@@ -1421,6 +1478,11 @@ export default function CoderPanel({
         <span style={s.modeCaption}>{MODE_CAPTIONS[mode]}</span>
         {modeNotice && <span style={s.modeNotice}>⚠ {modeNotice}</span>}
       </div>
+
+      {/* Lease status (P6a Task 3) — a revert in progress, or another
+          conversation holding the workspace write-lease. Minimal by
+          design: one line, no separate dismissable banner. */}
+      {leaseNotice && <div style={s.leaseNotice}>{leaseNotice}</div>}
 
       <div style={s.composer}>
         <textarea
@@ -1745,6 +1807,12 @@ const s: Record<string, CSSProperties> = {
     fontSize: "0.72rem",
     lineHeight: 1.4,
     color: "var(--ink)",
+  },
+  leaseNotice: {
+    fontSize: "0.72rem",
+    lineHeight: 1.4,
+    color: "var(--ink-soft)",
+    padding: "0.3rem 0.85rem 0",
   },
   composer: {
     display: "flex",
