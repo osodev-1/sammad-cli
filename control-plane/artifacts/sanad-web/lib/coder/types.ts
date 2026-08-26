@@ -147,6 +147,23 @@ export interface SteerInputPayload {
   user_input: string;
 }
 
+/** `Notification` event payload (wire, P6b) — a generic system notice;
+ * today the only kind the panel recognizes is the cooperative-takeover
+ * stand-down (`kimi_cli.sanad.session_lease.build_takeover_notification`,
+ * `type: "session_lease_taken_over"`). This inner `type` is the
+ * notification's OWN discriminator — distinct from the outer
+ * `CoderItem.event.type`, which is always the literal string
+ * `"Notification"` for every notification regardless of kind. Other fields
+ * pass through untyped, mirroring `StatusUpdatePayload`'s convention. See
+ * `isTakeoverNotification`/`takeoverNotificationMessage` (lib/coder/client.ts). */
+export interface NotificationEventPayload {
+  type?: string;
+  body?: string;
+  title?: string;
+  severity?: string;
+  [k: string]: unknown;
+}
+
 /** A shell command the tool ran (or is about to run). */
 export interface ShellDisplayBlock {
   type: "shell";
