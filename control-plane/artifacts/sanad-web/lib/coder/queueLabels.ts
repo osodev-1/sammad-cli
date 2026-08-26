@@ -42,9 +42,21 @@ export function shortConversationId(cid: string): string {
  * waiting on nothing. Any other/future `reason` value also falls back to
  * the generic queued label rather than rendering an unrecognized string
  * verbatim. */
+/** A conversation id is `c_<12 hex>`. Anything else — notably the internal
+ * `__revert__` lease sentinel — must never be rendered as one. The backend
+ * already strips it, so this is defence in depth at the render boundary:
+ * the cost is one regex, the failure it prevents is a user being told they
+ * are "waiting for conversation revert__". */
+function isConversationId(id: string): boolean {
+  return /^c_[a-f0-9]{12}$/.test(id);
+}
+
 export function queueEntryLabel(entry: QueueEntryLike): string {
+  if (entry.reason === "waiting_for_revert") {
+    return "waiting for a revert to finish";
+  }
   if (entry.reason === "waiting_for_lease") {
-    return entry.blockedBy
+    return entry.blockedBy && isConversationId(entry.blockedBy)
       ? `waiting for conversation ${shortConversationId(entry.blockedBy)}`
       : "waiting for another conversation";
   }

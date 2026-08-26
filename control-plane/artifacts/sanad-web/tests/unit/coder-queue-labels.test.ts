@@ -103,3 +103,31 @@ describe("conversationStatusWord / conversationSwitcherLabel (switcher list form
     ).toBe("90abcdef — idle");
   });
 });
+
+
+describe("queueEntryLabel — P6a final-review hardening", () => {
+  it("labels a revert wait without ever naming a conversation", () => {
+    const label = queueEntryLabel({ reason: "waiting_for_revert" });
+    expect(label).toBe("waiting for a revert to finish");
+    expect(label).not.toContain("revert__");
+    expect(label).not.toContain("conversation");
+  });
+
+  it("never renders a non-conversation id as a conversation", () => {
+    // Defence in depth: the backend strips the sentinel, but if one ever
+    // leaked through, telling the user they await conversation "revert__"
+    // would be worse than a generic message.
+    const label = queueEntryLabel({
+      reason: "waiting_for_lease",
+      blockedBy: "__revert__:ab12cd34ef56",
+    });
+    expect(label).toBe("waiting for another conversation");
+    expect(label).not.toContain("revert");
+  });
+
+  it("still names a genuine conversation", () => {
+    expect(
+      queueEntryLabel({ reason: "waiting_for_lease", blockedBy: "c_abcdef123456" }),
+    ).toContain("conversation");
+  });
+});
