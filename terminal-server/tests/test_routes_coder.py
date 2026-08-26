@@ -16,7 +16,7 @@ from sanad_terminal import coder_runner, routes_blueprint
 from sanad_terminal.app import create_app
 from sanad_terminal.control_plane import ControlPlaneClient
 from sanad_terminal.settings import TerminalSettings
-from sanad_terminal.workspace_lease import REVERT_HOLDER, lease_for
+from sanad_terminal.workspace_lease import REVERT_HOLDER, lease_for, new_revert_holder
 from sanad_terminal.workspace_locks import lock_for
 from starlette.testclient import TestClient
 
@@ -1701,3 +1701,41 @@ def test_revert_refuses_even_if_the_lease_looks_stale_while_a_turn_runs(
     finally:
         send_thread.join(timeout=10)
     assert not send_thread.is_alive()
+
+
+@_needs_git
+def test_a_second_revert_is_refused_while_one_is_in_flight(client: TestClient, tmp_path: Path):
+    """Final-review Critical, at the ROUTE level. The primitive test pins that
+    two minted identities can't both hold; this pins that the ROUTE actually
+    mints one per request rather than sharing the constant — the bug was that
+    both reverts were granted and the first to finish freed the lease while
+    the second was still running `checkout-index`."""
+    root = _root_for(tmp_path)
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+    _seed_repo(root)
+    turn = client.post(
+        f"/internal/coder/conversations/{cid}/send",
+        headers=HEADERS,
+        json={"input": "WRITEFILE:a.txt:one\n", "sendId": "m1"},
+    )
+    turn_id = _lines(turn.text)[0]["turnId"]
+
+    # Stand in for a revert already in flight, exactly as the route does.
+    lease = lease_for(root)
+    first = new_revert_holder()
+    assert lease.try_acquire(first) is True
+    try:
+        res = client.post(
+            f"/internal/coder/conversations/{cid}/revert",
+            headers=HEADERS,
+            json={"turnId": turn_id},
+        )
+        assert res.status_code == 409, res.text
+        assert res.json()["error"]["code"] == "workspace_busy"
+        # The in-flight revert still holds its own lease — the second
+        # request must not have taken it, nor released it on the way out.
+        assert lease.holder_of() == first
+    finally:
+        lease.release(first)

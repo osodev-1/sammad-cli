@@ -822,7 +822,26 @@ class CoderRunner(WireRunner):
                     # raised/was cancelled before creating a consumer, or
                     # (defensive) returned an already-closed state without
                     # raising at all.
-                    lease.release(self.conversation_id)
+                    released = lease.release(self.conversation_id)
+                    if released:
+                        # Hand off, exactly as every OTHER release site does.
+                        # Without this, a conversation queued behind a turn
+                        # whose `start_turn` FAILED (a dead child, or a
+                        # cancellation during the pre-turn git checkpoint)
+                        # sits with a queued item and a FIFO slot but no
+                        # turn-end of its own to trigger a drain — stranded
+                        # until the user happens to send again. That is the
+                        # same stranding class the revert-release handoff
+                        # closes; this was the one release site of four that
+                        # still didn't hand off.
+                        #
+                        # Shielded inside `wake_workspace_waiters`, so a
+                        # cancellation that brought us here does not also
+                        # kill the woken runner's start-up. Terminates: each
+                        # pass pops from a finite FIFO.
+                        await wake_workspace_waiters(
+                            self._cwd, source=self.conversation_id
+                        )
         # Reachable only when `super().start_turn()` returned normally (any
         # exception/cancellation propagates past the `finally` above instead
         # of falling through here) — `state` is therefore always set; the

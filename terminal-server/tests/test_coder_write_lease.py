@@ -649,3 +649,86 @@ async def test_lease_is_still_held_while_post_turn_bookkeeping_runs(tmp_path, mo
         assert lease_for(tmp_path).holder_of() is None
     finally:
         await a.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_pre_prompt_hook_does_not_leave_the_turn_busy(tmp_path, monkeypatch):
+    """Final-review Important. The lease WAS released when `_before_prompt_sent`
+    was cancelled, but `self._current` was left at status "running" — so
+    `busy` stayed True forever: the conversation was permanently unusable,
+    it pinned the machine, and `_maybe_drain_queue` silently declined every
+    handoff aimed at it (it early-returns on `busy` without re-registering a
+    waiter)."""
+    a = _coder(tmp_path)
+    put_conversation(tmp_path, a)
+    await a.start()
+    try:
+        entered = asyncio.Event()
+
+        async def hang_in_hook(self, state):
+            entered.set()
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(CoderRunner, "_before_prompt_sent", hang_in_hook)
+
+        turn = asyncio.create_task(a.start_turn("hello", send_id="m1"))
+        await asyncio.wait_for(entered.wait(), timeout=5.0)
+        turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+
+        # The workspace must not be wedged...
+        assert lease_for(tmp_path).holder_of() is None
+        # ...and the conversation must not be permanently busy.
+        assert a.busy is False, "a cancelled pre-prompt hook left the turn 'running' forever"
+    finally:
+        await a.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_start_turn_still_hands_the_lease_to_the_next_waiter(
+    tmp_path, monkeypatch
+):
+    """Final-review residual. Three of the four lease-release sites handed off
+    to the next FIFO waiter; `start_turn`'s FAILURE path did not — so a
+    conversation queued behind a turn whose start_turn raised (a dead child,
+    or a cancellation during the pre-turn git checkpoint) was stranded with a
+    queued item and a FIFO slot but no turn-end of its own to trigger a
+    drain."""
+    a = _coder(tmp_path)
+    b = _coder(tmp_path)
+    put_conversation(tmp_path, a)
+    put_conversation(tmp_path, b)
+    await a.start()
+    await b.start()
+    try:
+        # B in exactly the state the system produces for a lease-blocked
+        # send: a queued item plus a FIFO slot, waiting to be handed the
+        # lease by whoever releases it next.
+        lease = lease_for(tmp_path)
+        b.enqueue("b1", "b work", reason="waiting_for_lease")
+        lease.add_waiter(b.conversation_id)
+        assert b.conversation_id in lease.waiters_snapshot()
+
+        # A's start_turn acquires the lease and THEN fails.
+        original = CoderRunner._before_prompt_sent
+
+        async def boom(self, state):
+            if self is a:
+                raise OSError("simulated dead child")
+            return await original(self, state)
+
+        monkeypatch.setattr(CoderRunner, "_before_prompt_sent", boom)
+        with pytest.raises(OSError):
+            await a.start_turn("will fail", send_id="a1")
+        monkeypatch.setattr(CoderRunner, "_before_prompt_sent", original)
+
+        # The failed start_turn released the lease — and must ALSO have
+        # handed off, or B waits forever with the lease sitting free.
+        await _wait_for(lambda: b._turn_order != [])
+        assert b._turns[b._turn_order[0]].send_id == "b1"
+        await _await_consumer(b)
+        assert lease.holder_of() is None
+    finally:
+        await a.stop()
+        await b.stop()
