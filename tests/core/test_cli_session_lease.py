@@ -430,3 +430,90 @@ def test_a_refused_later_reload_iteration_clears_latest_created_session(
     assert owner is not None
     assert owner.holder == other_holder
     assert owner.generation == acquired.owner.generation
+
+
+# ---------------------------------------------------------------------------
+# Important (re-review): the SHELL-level refusal must reach `_post_run` as
+# `SESSION_OWNED`, not `FAILURE`.
+# ---------------------------------------------------------------------------
+
+
+def test_a_shell_refusal_must_not_delete_the_live_foreign_holders_session(
+    monkeypatch: pytest.MonkeyPatch, isolated_share_dir: Path, work_dir: KaosPath
+) -> None:
+    """`Shell.run()`'s start-of-run re-acquire can come back REFUSED even
+    though the cli-level acquire above it GRANTED — a live foreign view
+    seized the lease in between. That refusal must surface as
+    `ExitCode.SESSION_OWNED`.
+
+    Reported as a bare `False` it becomes `ExitCode.FAILURE`, and
+    `_post_run` then takes its ordinary empty-session cleanup branch:
+    `is_empty()` is true for any freshly created session (i.e. a plain
+    `sanad` invocation), so it rmtree's the session directory — destroying
+    the `owner.json` and session state of the LIVE foreign view that just
+    refused us. This is the same session-destroying door the
+    `SESSION_OWNED` exit code exists to close, reopened on a second path;
+    `_post_run`'s early return is the only branch that leaves the directory
+    alone.
+
+    Driven through the FULL CLI on purpose: calling `Shell.run()` directly
+    (as `test_shell_run_refuses_to_start_when_try_acquire_finds_a_live_
+    foreign_holder` does) never reaches `_post_run`, so it cannot observe
+    the deletion at all.
+    """
+    from kimi_cli.cli import SessionOwned
+
+    monkeypatch.setenv("SANAD_SESSION_LOCKS", "1")
+
+    foreign_holder = "wire:424242"
+    captured: dict[str, object] = {}
+
+    class _FakeHookEngine:
+        async def trigger(self, *args: object, **kwargs: object) -> None:
+            return None
+
+    class _FakeSoul:
+        def __init__(self) -> None:
+            self.hook_engine = _FakeHookEngine()
+
+    class _FakeInstance:
+        def __init__(self) -> None:
+            self.soul = _FakeSoul()
+
+        async def run_shell(self, *args: object, **kwargs: object) -> bool:
+            # Exactly what the real `Shell.run()` now does when its
+            # re-acquire finds a live foreign holder.
+            raise SessionOwned
+
+        async def shutdown_background_tasks(self) -> None:
+            return None
+
+        async def await_bg_tasks_shutdown(self) -> None:
+            return None
+
+    async def _fake_create(session, **kwargs):  # noqa: ANN001, ANN003
+        captured["session"] = session
+        # The cli-level acquire above already GRANTED and returned
+        # `persisted=False` on a transient write failure (the CLI logs and
+        # proceeds) — so nothing of ours is on disk and a second view
+        # acquires immediately, with no 30s staleness wait needed.
+        (session.dir / sl.OWNER_FILE_NAME).unlink(missing_ok=True)
+        stolen = sl.try_acquire(session.dir, holder=foreign_holder, ui_mode="wire")
+        assert stolen.ok
+        return _FakeInstance()
+
+    monkeypatch.setattr("kimi_cli.app.KimiCLI.create", _fake_create)
+
+    result = runner.invoke(cli, ["--work-dir", str(work_dir)])
+
+    session = captured["session"]
+    assert isinstance(session, Session)
+
+    # The refusal is NOT an ordinary failed run.
+    assert result.exit_code == ExitCode.SESSION_OWNED
+
+    # The live foreign view's session directory and lease both survive.
+    assert session.dir.exists()
+    owner = sl.read_owner(session.dir)
+    assert owner is not None
+    assert owner.holder == foreign_holder
