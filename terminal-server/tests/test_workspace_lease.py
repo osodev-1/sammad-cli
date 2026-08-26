@@ -20,7 +20,9 @@ from sanad_terminal.workspace_lease import (
     DEFAULT_STALE_AFTER_SECONDS,
     REVERT_HOLDER,
     WriteLease,
+    is_revert_holder,
     lease_for,
+    new_revert_holder,
 )
 
 CID_A = "c_aaaaaaaaaaaa"
@@ -236,3 +238,35 @@ def test_ttl_boundary_is_strictly_greater_than(tmp_path: Path):
     assert lease.try_acquire(CID_B, now=110.0) is False
     assert lease.holder_of() == CID_A
     assert lease.try_acquire(CID_B, now=110.001) is True
+
+
+# -- P6a final-review regressions -------------------------------------------
+
+
+def test_two_reverts_cannot_both_hold_the_lease():
+    """Final-review Critical. `try_acquire` is re-entrant on identity — right
+    for a turn (whose identity is a unique conversation id), but catastrophic
+    for a SHARED constant: two concurrent reverts acquiring under the bare
+    `REVERT_HOLDER` would BOTH be granted, and the first to finish would free
+    the lease while the second was still running `checkout-index`."""
+    lease = _lease()
+    first = new_revert_holder()
+    second = new_revert_holder()
+    assert first != second, "each revert must get its own identity"
+
+    assert lease.try_acquire(first, now=100.0) is True
+    assert lease.try_acquire(second, now=101.0) is False, (
+        "a second concurrent revert must be refused, not re-entrantly granted"
+    )
+
+    # And the loser cannot free the winner's lease.
+    assert lease.release(second) is False
+    assert lease.holder_of() == first
+    assert lease.release(first) is True
+
+
+def test_is_revert_holder_recognises_any_revert_but_no_conversation():
+    assert is_revert_holder(new_revert_holder()) is True
+    assert is_revert_holder(REVERT_HOLDER) is True
+    assert is_revert_holder(CID_A) is False
+    assert is_revert_holder(None) is False

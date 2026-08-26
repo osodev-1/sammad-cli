@@ -34,13 +34,18 @@ from sanad_terminal.coder_runner import (
     list_conversations,
     new_conversation_id,
     put_conversation,
+    wake_workspace_waiters,
 )
 from sanad_terminal.control_plane import ControlPlaneError
 from sanad_terminal.git_ops import GitError, _checkpoint_ref
 from sanad_terminal.routes_workspace import _settings, workspace_root
 from sanad_terminal.wire_runner import WireRunnerError
 from sanad_terminal.workspace import build_child_env, verified_trust_hashes
-from sanad_terminal.workspace_lease import REVERT_HOLDER, lease_for
+from sanad_terminal.workspace_lease import (
+    is_revert_holder,
+    lease_for,
+    new_revert_holder,
+)
 from sanad_terminal.workspace_locks import lock_for
 
 router = APIRouter(prefix="/internal/coder")
@@ -122,9 +127,14 @@ def _lease_summary(root: Path) -> dict[str, Any]:
     stays `None` in that case)."""
     lease = lease_for(root)
     holder = lease.holder_of()
-    if holder is None:
+    # A past-TTL holder is what the drain path already treats as absent
+    # (`_maybe_drain_queue`), so report it the same way — otherwise `/turn`
+    # says "blocked" for a lease the very next `/send` would reclaim.
+    if holder is None or lease.held_seconds() > lease.stale_after_seconds:
         return {"kind": None, "holder": None, "heldSeconds": 0.0}
-    if holder == REVERT_HOLDER:
+    if is_revert_holder(holder):
+        # Every revert has its own identity; `kind` is what the UI reads, so
+        # the sentinel itself never reaches it.
         return {"kind": "revert", "holder": None, "heldSeconds": lease.held_seconds()}
     return {"kind": "conversation", "holder": holder, "heldSeconds": lease.held_seconds()}
 
@@ -405,7 +415,16 @@ async def send(_: Gated, root: Root, cid: str, body: SendBody) -> StreamingRespo
             send_id = body.sendId or f"q_{uuid.uuid4().hex[:12]}"
             try:
                 position = runner.enqueue(
-                    send_id, body.input, reason="waiting_for_lease", blocked_by=exc.holder
+                    send_id,
+                    body.input,
+                    # A revert is not a conversation the user can look up, so it
+                    # must never travel as `blockedBy`; the reason carries it.
+                    reason=(
+                        "waiting_for_revert"
+                        if is_revert_holder(exc.holder)
+                        else "waiting_for_lease"
+                    ),
+                    blocked_by=None if is_revert_holder(exc.holder) else exc.holder,
                 )
             except WireRunnerError as enqueue_exc:
                 # queue_full — same envelope as the sibling busy-queue path
@@ -650,9 +669,35 @@ async def revert(
     # (see the comment there) — this is the SECOND call site that sets it,
     # deliberately harmless per `lease_for`'s own "update on get" contract.
     lease = lease_for(root, stale_after_seconds=settings.coder_write_lease_ttl_seconds)
-    if not lease.try_acquire(REVERT_HOLDER):
+    # A UNIQUE identity per revert — NOT the bare sentinel. `try_acquire` is
+    # re-entrant on identity, so two concurrent reverts sharing one constant
+    # would both be granted and the first to finish would free the lease
+    # out from under the second's `checkout-index`.
+    holder = new_revert_holder()
+    # Liveness gate BEFORE the acquire. `try_acquire`'s stale branch reclaims
+    # unconditionally once the TTL elapses, on the assumption that a lease
+    # that old means a leaked release — false for a turn that is merely long.
+    # Checking only AFTER the acquire is too late: the reclaim has already
+    # EVICTED the live turn's lease, so refusing the revert then leaves that
+    # turn running with no lease at all and a third conversation free to
+    # acquire and write alongside it. Gate first so the theft never happens.
+    # This is not a TOCTOU reintroduction: the atomic `try_acquire` below is
+    # still the real gate, and a turn that starts in between holds a FRESH
+    # (non-stale) lease, so the acquire fails and we 409 anyway.
+    if any(r.busy for r in list_conversations(root)):
+        return _err(409, "workspace_busy", "a turn is running in this workspace")
+    if not lease.try_acquire(holder):
         return _err(409, "workspace_busy", "a turn is running in this workspace")
     try:
+        # Re-checked inside the lease region as belt-and-braces. `try_acquire` alone is
+        # not sufficient: its stale-reclaim branch grants unconditionally once
+        # the TTL elapses, on the assumption that a lease that old means a
+        # leaked release — which is exactly the assumption that fails for a
+        # long-running turn. P5 gated revert on `any(r.busy)`; keeping that
+        # here as well means the TTL stays a leak-RECOVERY mechanism and never
+        # becomes a live-turn PREEMPTION mechanism (two writers, one worktree).
+        if any(r.busy for r in list_conversations(root)):
+            return _err(409, "workspace_busy", "a turn is running in this workspace")
         entry = _read_checkpoint_entry(root, cid, body.turnId)
         pre = entry.get("checkpointPre") if entry else None
         if not isinstance(pre, str) or not pre:
@@ -684,7 +729,13 @@ async def revert(
                 {"kind": "revert", "turnId": body.turnId, "toPre": pre, "safety": safety_sha},
             )
     finally:
-        lease.release(REVERT_HOLDER)
+        lease.release(holder)
+        # Every OTHER release site hands off to the next FIFO waiter; without
+        # this, a conversation that queued behind the revert (202 + a waiter
+        # slot, per the queue-at-the-lease contract) has no turn-end of its
+        # own to trigger a drain, and would sit stranded until the user sent
+        # again.
+        await wake_workspace_waiters(root)
 
     return JSONResponse(
         {"ok": True, "safetyCheckpoint": safety_sha, "reverted": {"turnId": body.turnId}}

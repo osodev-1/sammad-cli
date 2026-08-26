@@ -156,8 +156,26 @@ def test_coder_write_lease_ttl_default_and_parses(base_env):
     # The lease is held for a whole turn — the TTL must never be able to
     # reclaim from a turn that is merely long.
     assert s.coder_write_lease_ttl_seconds > s.coder_max_turn_seconds
+    # A configured value ABOVE the floor is honoured verbatim.
+    s = TerminalSettings.load(env={**base_env, "CODER_WRITE_LEASE_TTL_SECONDS": "9000"})
+    assert s.coder_write_lease_ttl_seconds == 9000
+
+
+def test_write_lease_ttl_is_clamped_above_the_turn_budget(base_env):
+    """The TTL invariant is DERIVED, not just documented. `try_acquire`'s
+    stale branch grants unconditionally once the TTL elapses, assuming a
+    lease that old means a leaked release — false for any turn longer than
+    the TTL, which would turn leak-recovery into a mis-grant (a second
+    writer on a worktree an agent is still writing to)."""
+    # Configured below the floor → clamped to turn-budget + 300.
     s = TerminalSettings.load(env={**base_env, "CODER_WRITE_LEASE_TTL_SECONDS": "60"})
-    assert s.coder_write_lease_ttl_seconds == 60
+    assert s.coder_write_lease_ttl_seconds == int(s.coder_max_turn_seconds) + 300
+    assert s.coder_write_lease_ttl_seconds > s.coder_max_turn_seconds
+
+    # Raising ONLY the turn budget must not silently invert the invariant.
+    s = TerminalSettings.load(env={**base_env, "CODER_MAX_TURN_SECONDS": "7200"})
+    assert s.coder_write_lease_ttl_seconds == 7500
+    assert s.coder_write_lease_ttl_seconds > s.coder_max_turn_seconds
 
 
 def test_write_lease_ttl_default_matches_the_lease_module_fallback(base_env):

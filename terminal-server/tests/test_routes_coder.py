@@ -1494,7 +1494,11 @@ def test_send_cannot_start_a_turn_while_a_revert_holds_the_lease(
         ).json()
         assert turn.get("turn") is None, "a turn started while a revert held the lease"
         assert turn["queue"][0]["sendId"] == "m1"
-        assert turn["queue"][0]["reason"] == "waiting_for_lease"
+        # A revert is not a conversation, so the wait is labelled distinctly
+        # and its internal identity must never travel as `blockedBy`.
+        assert turn["queue"][0]["reason"] == "waiting_for_revert"
+        assert turn["queue"][0].get("blockedBy") is None
+        assert "__revert__" not in json.dumps(turn)
         # The file the queued turn would have written must not exist yet.
         assert not (root / "during_revert.txt").exists()
     finally:
@@ -1646,3 +1650,54 @@ def test_empty_send_id_is_rejected_by_the_body_model(client: TestClient):
         json={"input": "hello", "sendId": ""},
     )
     assert res.status_code == 422, res.text
+
+
+def test_revert_refuses_even_if_the_lease_looks_stale_while_a_turn_runs(
+    client: TestClient, tmp_path: Path
+):
+    """Final-review Critical. `try_acquire`'s stale branch grants
+    unconditionally once the TTL elapses, on the assumption that a lease that
+    old means a LEAKED release — an assumption that is false for a turn that
+    is merely long. P5 gated revert on `any(r.busy)`; dropping that in favour
+    of the acquire alone would let the TTL preempt a live, still-writing turn
+    and run `checkout-index` underneath it. The liveness cross-check keeps the
+    TTL a leak-RECOVERY mechanism, never a live-turn PREEMPTION one."""
+    root = _root_for(tmp_path)
+    cid = client.post(
+        "/internal/coder/conversations", headers=HEADERS, json={"ticket": "tt_good"}
+    ).json()["conversationId"]
+
+    send_thread = threading.Thread(
+        target=client.post,
+        args=(f"/internal/coder/conversations/{cid}/send",),
+        kwargs={"headers": HEADERS, "json": {"input": "HANG"}},
+        daemon=True,
+    )
+    send_thread.start()
+    try:
+        _wait_for_running_turn(client, cid)
+
+        # Age the running turn's lease past the TTL, exactly as a very long
+        # turn would. NOT via `stale_after_seconds`: the route calls
+        # `lease_for(root, stale_after_seconds=...)`, whose documented
+        # "update on get" would reset it before `try_acquire` ever ran — so
+        # move the acquire timestamp instead, which nothing rewrites.
+        lease = lease_for(root)
+        assert lease.holder_of() == cid
+        lease._acquired_at = time.monotonic() - (lease.stale_after_seconds + 1000)
+        assert lease.held_seconds() > lease.stale_after_seconds
+
+        res = client.post(
+            f"/internal/coder/conversations/{cid}/revert",
+            headers=HEADERS,
+            json={"turnId": "t_whatever"},
+        )
+        assert res.status_code == 409, res.text
+        assert res.json()["error"]["code"] == "workspace_busy"
+        # And the running turn must still own its lease afterwards.
+        assert lease.holder_of() == cid
+
+        client.post(f"/internal/coder/conversations/{cid}/cancel", headers=HEADERS)
+    finally:
+        send_thread.join(timeout=10)
+    assert not send_thread.is_alive()
