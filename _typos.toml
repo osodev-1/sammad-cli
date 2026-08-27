@@ -8,7 +8,21 @@ extend-exclude = ["control-plane/"]
 # Legitimate identifiers the dictionary misreads: `datas` is PyInstaller's API
 # name (kimi.spec), `iterm` is the iTerm app id (web/ open-in feature), and
 # `seeked` is the HTML5 media event (web/ video thumbnail hook).
+#
+# The rest are sanad vocabulary that the dictionary splits or second-guesses.
+# `caf` is not a word here at all: it is the leading fragment of the
+# core.quotePath escape `"caf\303\251.txt"` (café.txt) documented in git_ops.py
+# and asserted in test_git_checkpoints.py — the bytes are the point, so it
+# cannot be respelled. `mis` is the prefix of the deliberate coinages
+# `mis-grant` (settings.py, test_settings.py) and `(mis)resolution`
+# (test_wire_runner.py), which typos splits on the hyphen and the paren.
+# `unparseable` is the variant spelling used in the wire runner's comments and
+# in the test name `test_unparseable_falls_back_to_legacy`, which a plan doc
+# under docs/superpowers/ quotes verbatim.
 [default.extend-words]
+caf = "caf"
 datas = "datas"
 iterm = "iterm"
+mis = "mis"
 seeked = "seeked"
+unparseable = "unparseable"
