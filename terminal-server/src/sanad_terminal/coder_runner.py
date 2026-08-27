@@ -894,10 +894,24 @@ class CoderRunner(WireRunner):
                 exc,
             )
             return
-        entry["pre"] = sha
+        # `create_checkpoint` returns None ONLY for skip-when-clean (a real
+        # failure raises, and is handled above). Skipped means the tree is
+        # BYTE-IDENTICAL to `parent`, so the parent IS this turn's pre-state
+        # — recording None instead threw that away, and everything downstream
+        # reads a missing `pre` as "this turn has no checkpoint":
+        #   * `/diff` (Review)  -> 404 no_checkpoint
+        #   * `/revert`         -> 404 no_checkpoint
+        #   * the footer summary-> never computed, so the UI rendered a
+        #                          confident "0 files changed +0 −0"
+        # Nothing changes between one turn's post-checkpoint and the next
+        # turn's pre-checkpoint in the normal case, so the skip fired on
+        # essentially EVERY turn and P5's diff/revert were inert in
+        # production. Fall back to the parent, which is exactly that tree.
+        effective_pre = sha if sha is not None else self._last_checkpoint_sha
+        entry["pre"] = effective_pre
         if sha is not None:
             self._last_checkpoint_sha = sha
-        await self._append(state, {"kind": "checkpoint", "when": "pre", "sha": sha})
+        await self._append(state, {"kind": "checkpoint", "when": "pre", "sha": effective_pre})
 
     async def _checkpoint_post(self, state: TurnState) -> None:
         """Snapshot the workspace tree once the turn has finished, chained
@@ -948,6 +962,13 @@ class CoderRunner(WireRunner):
                     type(exc).__name__,
                     exc,
                 )
+        elif sha is None and pre is not None:
+            # Skip-when-clean on the POST side: the turn genuinely changed
+            # nothing. Say so EXPLICITLY rather than omitting the summary —
+            # the frontend defaults a missing summary to zeroes, so "absent"
+            # and "genuinely zero" rendered identically and an unknown state
+            # was indistinguishable from a no-op turn.
+            summary = {"filesChanged": 0, "additions": 0, "deletions": 0}
         entry["summary"] = summary
         item: dict[str, Any] = {"kind": "checkpoint", "when": "post", "sha": sha}
         if summary is not None:
