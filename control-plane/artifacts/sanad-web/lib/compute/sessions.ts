@@ -482,6 +482,24 @@ export async function sessionTaskAuth(
   };
 }
 
+/**
+ * The hash a preview hostname is built from, for the session the caller means
+ * — same resolution as `sessionTaskAuth` (explicit id, else the first
+ * session), but WITHOUT requiring `runNonce`. A stopped machine still has a
+ * stable hash, and the router answers a dead task with its own
+ * "workspace is not running" 503, which is a truer error than pretending the
+ * session does not exist.
+ */
+export async function sessionPreviewHash(
+  userId: string,
+  sessionId?: string,
+): Promise<string | null> {
+  const row = sessionId
+    ? await getSession(userId, sessionId)
+    : ((await listSessions(userId))[0] ?? null);
+  return row?.hash12 ?? null;
+}
+
 /** Router route lookup: hash12 → task IP (sessions first, legacy table second). */
 export async function sessionIpByHash(hash12: string): Promise<string | null> {
   const [row] = await db

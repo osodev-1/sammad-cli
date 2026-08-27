@@ -19,6 +19,13 @@ let router: http.Server;
 let wss: WebSocketServer;
 let routerPort: number;
 let targetPort: number;
+/* A SECOND target standing in for a user's dev server. Previously one echo
+   server played both roles with AGENTD_PORT === PREVIEW_PORTS, which cannot
+   express the rule that the agentd port is never previewable — and hid the
+   fact that compute and preview resolve to different targets. */
+let previewTarget: http.Server;
+let previewWss: WebSocketServer;
+let previewPort: number;
 
 interface Res {
   status: number;
@@ -56,11 +63,25 @@ beforeAll(async () => {
   await new Promise<void>((r) => target.listen(0, "127.0.0.1", r));
   targetPort = (target.address() as AddressInfo).port;
 
+  // The user's dev server: separate process, separate port, its own WS for HMR.
+  previewTarget = http.createServer((req, res) => {
+    res.writeHead(200, {
+      "content-type": "text/html",
+      "x-frame-options": "DENY", // must be stripped on previews
+    });
+    res.end(`app:${req.url}`);
+  });
+  previewWss = new WebSocketServer({ server: previewTarget, path: "/hmr" });
+  previewWss.on("connection", (ws) => ws.on("message", (m) => ws.send(`hmr:${m}`)));
+  await new Promise<void>((r) => previewTarget.listen(0, "127.0.0.1", r));
+  previewPort = (previewTarget.address() as AddressInfo).port;
+
   const config = loadConfig({
     ROUTER_SHARED_SECRET: "rsec",
     CONTROL_PLANE_URL: "https://cp.test",
     AGENTD_PORT: String(targetPort),
-    PREVIEW_PORTS: String(targetPort),
+    // A RANGE, as production now uses — not an enumerated allowlist.
+    PREVIEW_PORTS: "1024-65535",
   } as NodeJS.ProcessEnv);
 
   const table = new RouteTable(config, (async () =>
@@ -78,10 +99,14 @@ afterAll(async () => {
   // covered by closeAllConnections, so terminate the WS clients directly.
   for (const client of wss.clients) client.terminate();
   wss.close();
+  for (const client of previewWss.clients) client.terminate();
+  previewWss.close();
   router.closeAllConnections();
   target.closeAllConnections();
+  previewTarget.closeAllConnections();
   await new Promise((r) => router.close(r));
   await new Promise((r) => target.close(r));
+  await new Promise((r) => previewTarget.close(r));
 });
 
 describe("router proxying", () => {
@@ -94,13 +119,42 @@ describe("router proxying", () => {
   });
 
   it("proxies preview hosts and injects frame-ancestors", async () => {
-    const res = await get("/index.html", `${HASH}-${targetPort}.preview.sanadcode.com`);
+    const res = await get("/index.html", `${HASH}-${previewPort}.preview.sanadcode.com`);
     expect(res.status).toBe(200);
-    expect(res.body).toBe("echo:/index.html");
+    expect(res.body).toBe("app:/index.html");
     expect(res.headers["content-security-policy"]).toBe(
       "frame-ancestors https://www.sanadcode.com"
     );
     expect(res.headers["x-frame-options"]).toBeUndefined();
+  });
+
+  it("previews an ARBITRARY port, not just the four well-known ones", async () => {
+    // `previewPort` is an ephemeral OS-assigned port — the whole point of the
+    // range: a workspace runs whatever dev server the project uses.
+    expect(previewPort).not.toBe(3000);
+    const res = await get("/", `${HASH}-${previewPort}.preview.sanadcode.com`);
+    expect(res.status).toBe(200);
+  });
+
+  it("REFUSES to preview the agentd port", async () => {
+    // agentd is the workspace's own control API. It is bearer-protected and
+    // would fail closed anyway, but it must not be addressable on a preview
+    // hostname: previews carry no auth of their own.
+    const res = await get("/internal/workspace/tree", `${HASH}-${targetPort}.preview.sanadcode.com`);
+    expect(res.status).toBe(404);
+  });
+
+  it("proxies WebSocket upgrades over a PREVIEW host (HMR)", async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${routerPort}/hmr`, {
+      headers: { host: `${HASH}-${previewPort}.preview.sanadcode.com` },
+    });
+    const reply = await new Promise<string>((resolve, reject) => {
+      ws.on("open", () => ws.send("reload"));
+      ws.on("message", (m) => resolve(String(m)));
+      ws.on("error", reject);
+    });
+    expect(reply).toBe("hmr:reload");
+    ws.close();
   });
 
   it("404s unknown hosts and non-matching paths", async () => {

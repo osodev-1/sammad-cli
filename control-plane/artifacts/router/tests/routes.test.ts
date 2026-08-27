@@ -35,9 +35,20 @@ describe("parseRequest", () => {
     expect(parseRequest(config, `${HASH}-5173.preview.sanadcode.com`, "/")).toMatchObject({
       port: 5173,
     });
-    // Port not in the allowlist → refused
+    // ANY port in range — a workspace runs whatever the project uses, so an
+    // enumerated allowlist refused real dev servers (4321, 7777, …) that were
+    // genuinely listening.
+    expect(parseRequest(config, `${HASH}-9999.preview.sanadcode.com`, "/")).toMatchObject({
+      port: 9999,
+    });
+    expect(parseRequest(config, `${HASH}-54321.preview.sanadcode.com`, "/")).toMatchObject({
+      port: 54321,
+    });
+    // Below the range: privileged ports the container's unprivileged `dev`
+    // user cannot bind anyway.
     expect(parseRequest(config, `${HASH}-22.preview.sanadcode.com`, "/")).toBeNull();
-    expect(parseRequest(config, `${HASH}-9999.preview.sanadcode.com`, "/")).toBeNull();
+    // NEVER agentd, whatever the spec says — previews carry no auth.
+    expect(parseRequest(config, `${HASH}-7070.preview.sanadcode.com`, "/")).toBeNull();
     // Malformed labels
     expect(parseRequest(config, `nothash-3000.preview.sanadcode.com`, "/")).toBeNull();
     expect(parseRequest(config, "preview.sanadcode.com", "/")).toBeNull();

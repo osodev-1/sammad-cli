@@ -2,6 +2,7 @@
  * Pure client-side workspace model: entry kinds, tree shaping from the flat
  * snapshot, and artifact detection. DOM-free so it unit-tests in node.
  */
+import { parseLocalTarget } from "@/lib/compute/preview";
 
 export interface WsEntry {
   name: string;
@@ -155,6 +156,27 @@ export function isBrowserViewable(name: string): boolean {
  * compute preview subdomains.
  */
 export function previewUrl(pathOrUrl: string, sessionId?: string): string {
+  /*
+   * A port in the workspace container — `3000`, `:3000`, `localhost:3000`,
+   * `http://127.0.0.1:5173/x`. This case used to fall through to the
+   * absolute-URL branch below and be handed to the iframe verbatim, which
+   * made the BROWSER resolve `localhost` — against the user's own laptop,
+   * where nothing is listening. A dev server running in the container was
+   * simply unreachable. Route it to the redirect that lands on the preview
+   * origin instead.
+   */
+  const local = parseLocalTarget(pathOrUrl);
+  if (local) {
+    const encoded = local.path
+      .split("/")
+      .filter(Boolean)
+      .map(encodeURIComponent)
+      .join("/");
+    return withSession(
+      `/api/workspace/port/${local.port}${encoded ? `/${encoded}` : ""}`,
+      sessionId,
+    );
+  }
   if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
   const encoded = pathOrUrl
     .split("/")

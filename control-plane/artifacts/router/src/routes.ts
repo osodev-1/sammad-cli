@@ -34,7 +34,7 @@ export function parseRequest(config: RouterConfig, host: string | undefined, url
     const m = label.match(/^([a-f0-9]{12})-(\d{2,5})$/);
     if (!m) return null;
     const port = Number(m[2]);
-    if (!HASH_RE.test(m[1]) || !config.allowedPreviewPorts.has(port)) return null;
+    if (!HASH_RE.test(m[1]) || !config.isPreviewablePort(port)) return null;
     return { kind: "preview", hash: m[1], port };
   }
 
