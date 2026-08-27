@@ -19,7 +19,16 @@
 
 set -uo pipefail
 REGION="eu-central-1"
+# BOTH, and AWS_REGION first: the AWS CLI v2 gives AWS_REGION precedence over
+# AWS_DEFAULT_REGION, and CloudShell pre-sets AWS_REGION to the console's
+# region (us-east-1 by default). Exporting only AWS_DEFAULT_REGION — as
+# bootstrap.sh does — silently runs the whole script against the WRONG region:
+# every lookup then reports the stack "not found" while the real one sits
+# untouched in eu-central-1.
+export AWS_REGION="$REGION"
 export AWS_DEFAULT_REGION="$REGION"
+note_region() { printf '   region pinned: %s (was AWS_REGION=%s)\n' "$REGION" "${_PREV_AWS_REGION:-unset}" >&2; }
+_PREV_AWS_REGION="${AWS_REGION_ORIG:-}"
 PHASE="${1:-cert}"
 
 DOMAIN="*.preview.sanadcode.com"
@@ -32,7 +41,7 @@ note() { printf '   %s\n' "$*" >&2; }
 die()  { printf '\n\033[1mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 ACCT=$(aws sts get-caller-identity --query Account --output text) || die "no AWS credentials"
-note "Account: $ACCT   Region: $REGION"
+note "Account: $ACCT   Region: $REGION (AWS_REGION and AWS_DEFAULT_REGION both pinned)"
 
 cert_arn_for() {
   aws acm list-certificates --includes keyTypes=RSA_2048,EC_prime256v1 \
