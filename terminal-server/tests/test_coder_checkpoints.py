@@ -193,12 +193,21 @@ async def test_non_mutating_turn_records_pre_but_null_post(tmp_path):
         pre_item, post_item = checkpoint_items
         assert isinstance(pre_item["sha"], str) and pre_item["sha"]
         assert post_item["sha"] is None
-        assert "summary" not in post_item
+        # An EXPLICIT zero, not an omission. The frontend defaults a missing
+        # summary to zeroes, so omitting it made "nothing changed" and "we
+        # could not compute this" render identically — and the second case is
+        # the one worth seeing. When the post checkpoint is skipped as clean
+        # we know the answer is zero, so we say zero.
+        assert post_item["summary"] == {"filesChanged": 0, "additions": 0, "deletions": 0}
 
         entry = _entry_for(_load_index(journal_dir), state.turn_id)
         assert entry["checkpointPre"] == pre_item["sha"]
         assert entry["checkpointPost"] is None
-        assert entry["checkpointSummary"] is None
+        assert entry["checkpointSummary"] == {
+            "filesChanged": 0,
+            "additions": 0,
+            "deletions": 0,
+        }
 
         # No post ref was ever created — skip-when-clean creates nothing.
         assert not _ref_exists(
@@ -362,5 +371,86 @@ async def test_architect_runner_has_no_checkpoint_machinery(tmp_path):
         summary = state.summary()
         assert "checkpointPre" not in summary
         assert "checkpointPost" not in summary
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_consecutive_turns_still_get_a_usable_pre_checkpoint(tmp_path):
+    """THE COMMON CASE: two mutating turns back to back, with nothing
+    touching the tree in between — no out-of-band edit to make turn 2's pre
+    snapshot differ from turn 1's post.
+
+    `create_checkpoint` then correctly skips turn 2's pre as clean and
+    returns None. Recording that None as the turn's pre is what broke
+    everything downstream: `/diff` (Review) and `/revert` both reject a turn
+    whose `checkpointPre` is not a string, and the footer summary is only
+    computed when pre AND post both exist — so the UI rendered a confident
+    "0 files changed +0 −0" for every turn that actually changed files.
+
+    The skip means the tree is byte-identical to the parent, so the parent
+    IS the pre-state and must be recorded as such.
+    """
+    workspace = tmp_path / "workspace"
+    _seed_repo(workspace)
+    journal_dir = tmp_path / "agentd" / "coder" / "c_consec"
+
+    runner = _make_runner(workspace, journal_dir)
+    await runner.start()
+    try:
+        state1 = await _run_turn_to_completion(runner, "WRITEFILE:a.txt:one\n")
+        items1 = await _follow_all(runner, state1.turn_id)
+        post1_sha = next(
+            i["sha"] for i in items1 if i.get("kind") == "checkpoint" and i["when"] == "post"
+        )
+        assert post1_sha is not None
+
+        # NOTHING happens here — that is the whole point.
+        state2 = await _run_turn_to_completion(runner, "WRITEFILE:b.txt:two\n")
+        items2 = await _follow_all(runner, state2.turn_id)
+
+        pre2 = next(
+            i["sha"] for i in items2 if i.get("kind") == "checkpoint" and i["when"] == "pre"
+        )
+        # Turn 1's post IS turn 2's pre-state: identical trees.
+        assert pre2 == post1_sha, "a skipped pre must fall back to its parent, not None"
+
+        entry = runner._checkpoints[state2.turn_id]
+        assert entry["pre"] == post1_sha
+
+        # And the summary must now describe turn 2's REAL work, not zeroes.
+        summary = entry["summary"]
+        assert summary is not None, "summary must be computed for a mutating turn"
+        assert summary["filesChanged"] == 1
+        assert summary["additions"] >= 1
+
+        # The recorded pre..post range must be a valid diff base — this is
+        # exactly what /diff and /revert consume.
+        post2 = entry["post"]
+        assert isinstance(post2, str) and post2
+        names = _git(workspace, "diff", "--name-only", pre2, post2).split()
+        assert names == ["b.txt"]
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_clean_turn_reports_an_explicit_zero_summary(tmp_path):
+    """A turn that changes nothing skips its POST checkpoint. That used to
+    omit the summary entirely, and the frontend defaults a missing summary to
+    zeroes — so "we could not tell" and "nothing changed" rendered
+    identically. Say zero explicitly when we actually know it is zero."""
+    workspace = tmp_path / "workspace"
+    _seed_repo(workspace)
+    journal_dir = tmp_path / "agentd" / "coder" / "c_clean"
+
+    runner = _make_runner(workspace, journal_dir)
+    await runner.start()
+    try:
+        await _run_turn_to_completion(runner, "WRITEFILE:a.txt:one\n")
+        state2 = await _run_turn_to_completion(runner, "NOOP\n")
+        entry = runner._checkpoints[state2.turn_id]
+        assert entry["post"] is None  # skip-when-clean
+        assert entry["summary"] == {"filesChanged": 0, "additions": 0, "deletions": 0}
     finally:
         await runner.stop()
