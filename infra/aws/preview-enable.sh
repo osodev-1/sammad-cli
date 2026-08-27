@@ -56,10 +56,17 @@ if [ "$PHASE" = "finish" ]; then
   fi
   note "ISSUED"
 
-  ALB_ARN=$(aws elbv2 describe-load-balancers --names "$ALB_NAME" --query 'LoadBalancers[0].LoadBalancerArn' --output text) \
-    || die "load balancer $ALB_NAME not found"
-  LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
-    --query "Listeners[?Port==\`443\`].ListenerArn | [0]" --output text)
+  if [ -n "${LISTENER_ARN:-}" ]; then
+    ALB_ARN="(supplied listener)"
+  else
+    ALB_ARN=$(aws elbv2 describe-load-balancers --names "$ALB_NAME" --query 'LoadBalancerArn' --output text 2>/dev/null)
+    if [ -z "$ALB_ARN" ] || [ "$ALB_ARN" = "None" ]; then
+      ALB_ARN=$(aws elbv2 describe-load-balancers --names "$ALB_NAME" --query 'LoadBalancers[0].LoadBalancerArn' --output text) \
+        || die "load balancer $ALB_NAME not readable — pass LISTENER_ARN=… instead"
+    fi
+  fi
+  LISTENER="${LISTENER_ARN:-$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
+    --query "Listeners[?Port==\`443\`].ListenerArn | [0]" --output text)}"
   if [ "$LISTENER" = "None" ] || [ -z "$LISTENER" ]; then
     die "no HTTPS listener on $ALB_NAME — run 'bash bootstrap.sh finish' first"
   fi
@@ -111,9 +118,17 @@ say "Security group: let the router reach ANY dev-server port"
 # The stack's VPC is wherever the ALB actually lives. bootstrap.sh assumed the
 # DEFAULT VPC, which is not necessarily where this account's stack was built —
 # and guessing wrong makes the security groups look absent when they are fine.
+ALB_ERR=$(mktemp)
 VPC=$(aws elbv2 describe-load-balancers --names "$ALB_NAME" \
-        --query 'LoadBalancers[0].VpcId' --output text 2>/dev/null)
+        --query 'LoadBalancers[0].VpcId' --output text 2>"$ALB_ERR")
 if [ "$VPC" = "None" ] || [ -z "$VPC" ]; then
+  # Surface the REAL reason. An IAM AccessDenied here is indistinguishable
+  # from "no such load balancer" once stderr is discarded, and that sent the
+  # first two runs chasing a non-existent naming problem.
+  if [ -s "$ALB_ERR" ]; then
+    note "describe-load-balancers failed:"
+    sed 's/^/      /' "$ALB_ERR" >&2
+  fi
   note "could not read the VPC from $ALB_NAME — falling back to the default VPC"
   VPC=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text)
 fi
@@ -123,15 +138,21 @@ note "VPC=$VPC (from $ALB_NAME)"
 # to a name lookup across ALL VPCs before giving up. Explicit overrides win:
 #   TASKS_SG=sg-… ROUTER_SG=sg-… bash preview-enable.sh
 sg_lookup() { # name
-  local id
+  local id err
+  err=$(mktemp)
   id=$(aws ec2 describe-security-groups \
         --filters "Name=group-name,Values=$1" "Name=vpc-id,Values=$VPC" \
-        --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
+        --query 'SecurityGroups[0].GroupId' --output text 2>"$err")
   if [ "$id" = "None" ] || [ -z "$id" ]; then
     id=$(aws ec2 describe-security-groups \
           --filters "Name=group-name,Values=$1" \
-          --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
+          --query 'SecurityGroups[0].GroupId' --output text 2>"$err")
   fi
+  if { [ "$id" = "None" ] || [ -z "$id" ]; } && [ -s "$err" ]; then
+    note "describe-security-groups($1) failed:"
+    sed 's/^/      /' "$err" >&2
+  fi
+  rm -f "$err"
   echo "$id"
 }
 
