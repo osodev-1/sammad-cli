@@ -84,23 +84,74 @@ if [ "$PHASE" = "finish" ]; then
   exit 0
 fi
 
+# ---------------------------------------------------------------- diagnose ---
+if [ "$PHASE" = "diagnose" ]; then
+  say "DIAGNOSE — what actually exists in this account"
+  echo "--- load balancers ---" >&2
+  aws elbv2 describe-load-balancers \
+    --query 'LoadBalancers[].{Name:LoadBalancerName,VpcId:VpcId,DNS:DNSName}' --output table 2>&1 | head -20
+  echo "--- security groups named sanad-* (all VPCs) ---" >&2
+  aws ec2 describe-security-groups --filters "Name=group-name,Values=sanad-*" \
+    --query 'SecurityGroups[].{Name:GroupName,Id:GroupId,VpcId:VpcId}' --output table 2>&1 | head -30
+  echo "--- ECS clusters/services ---" >&2
+  for c in $(aws ecs list-clusters --query 'clusterArns[]' --output text 2>/dev/null); do
+    echo "cluster: $c" >&2
+    aws ecs list-services --cluster "$c" --query 'serviceArns[]' --output text 2>&1 | head -10
+  done
+  echo "--- ACM certificates ---" >&2
+  aws acm list-certificates \
+    --query 'CertificateSummaryList[].{Domain:DomainName,Status:Status,Arn:CertificateArn}' --output table 2>&1 | head -20
+  say "Send this output back."
+  exit 0
+fi
+
 # ------------------------------------------------------ security group ---
 say "Security group: let the router reach ANY dev-server port"
-VPC=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text)
-note "VPC=$VPC"
 
-sg_id() {
-  aws ec2 describe-security-groups \
-    --filters "Name=group-name,Values=$1" "Name=vpc-id,Values=$VPC" \
-    --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null
-}
-TASKS_SG=$(sg_id sanad-tasks-sg)
-ROUTER_SG=$(sg_id sanad-router-sg)
-if [ "$TASKS_SG" = "None" ] || [ -z "$TASKS_SG" ]; then
-  die "sanad-tasks-sg not found — run bootstrap.sh first"
+# The stack's VPC is wherever the ALB actually lives. bootstrap.sh assumed the
+# DEFAULT VPC, which is not necessarily where this account's stack was built —
+# and guessing wrong makes the security groups look absent when they are fine.
+VPC=$(aws elbv2 describe-load-balancers --names "$ALB_NAME" \
+        --query 'LoadBalancers[0].VpcId' --output text 2>/dev/null)
+if [ "$VPC" = "None" ] || [ -z "$VPC" ]; then
+  note "could not read the VPC from $ALB_NAME — falling back to the default VPC"
+  VPC=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text)
 fi
-if [ "$ROUTER_SG" = "None" ] || [ -z "$ROUTER_SG" ]; then
-  die "sanad-router-sg not found — run bootstrap.sh first"
+note "VPC=$VPC (from $ALB_NAME)"
+
+# Look up by name inside that VPC; if the name was never used there, fall back
+# to a name lookup across ALL VPCs before giving up. Explicit overrides win:
+#   TASKS_SG=sg-… ROUTER_SG=sg-… bash preview-enable.sh
+sg_lookup() { # name
+  local id
+  id=$(aws ec2 describe-security-groups \
+        --filters "Name=group-name,Values=$1" "Name=vpc-id,Values=$VPC" \
+        --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
+  if [ "$id" = "None" ] || [ -z "$id" ]; then
+    id=$(aws ec2 describe-security-groups \
+          --filters "Name=group-name,Values=$1" \
+          --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
+  fi
+  echo "$id"
+}
+
+TASKS_SG="${TASKS_SG:-$(sg_lookup sanad-tasks-sg)}"
+ROUTER_SG="${ROUTER_SG:-$(sg_lookup sanad-router-sg)}"
+
+if [ "$TASKS_SG" = "None" ] || [ -z "$TASKS_SG" ] || [ "$ROUTER_SG" = "None" ] || [ -z "$ROUTER_SG" ]; then
+  note "tasks=$TASKS_SG  router=$ROUTER_SG"
+  say "Could not find the security groups by name. Run this and send the output:"
+  cat >&2 <<'DIAG'
+
+  bash preview-enable.sh diagnose
+
+  …or pass the ids directly, if you know them (sanad-web's env has them as
+  SANAD_TASKS_SG):
+
+  TASKS_SG=sg-xxxx ROUTER_SG=sg-yyyy bash preview-enable.sh
+
+DIAG
+  exit 1
 fi
 note "tasks=$TASKS_SG  router=$ROUTER_SG"
 
@@ -113,7 +164,7 @@ if aws ec2 authorize-security-group-ingress --group-id "$TASKS_SG" \
      --protocol tcp --port 1024-65535 --source-group "$ROUTER_SG" >/dev/null 2>&1; then
   note "opened tcp 1024-65535 from the router"
 else
-  note "rule already present"
+  note "rule already present (or unchanged)"
 fi
 
 # ------------------------------------------------------------------ ACM ---
